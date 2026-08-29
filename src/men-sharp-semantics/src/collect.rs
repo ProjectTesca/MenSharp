@@ -19,7 +19,8 @@ use std::ops::Range;
 use men_sharp_parser::ast::{
     ClassDeclaration, CompilationUnit, DelegateDeclaration, EnumDeclaration, EventDeclaration,
     ExternAliasDirective, FieldDeclaration, GenericsDefine, GenericsParameter, Ident, Modifier,
-    NamespaceDeclaration, NamespaceMember, Spanned, TypeDeclaration, TypeMember, UsingDirective,
+    NamespaceDeclaration, NamespaceMember, ParameterModifier, Spanned, TypeDeclaration, TypeMember,
+    UsingDirective,
 };
 
 use crate::symbol::{
@@ -81,6 +82,8 @@ pub struct MemberNode<'ast> {
     pub is_explicit_implementation: bool,
     pub is_static: bool,
     pub accessibility: Option<Accessibility>,
+    /// A method whose first parameter carries the `this` modifier.
+    pub is_extension: bool,
 }
 
 pub fn collect_file<'ast>(
@@ -172,6 +175,7 @@ fn collect_enum<'ast>(declaration: &'ast EnumDeclaration<'ast, 'ast>) -> Option<
             // an enum member is a public constant of its enum
             is_static: true,
             accessibility: None,
+            is_extension: false,
         })
         .collect();
 
@@ -228,6 +232,18 @@ fn collect_type_member<'ast>(
             is_explicit_implementation: method.explicit_interface.is_some(),
             is_static: is_static(method.modifiers),
             accessibility: accessibility_of(method.modifiers),
+            is_extension: method
+                .parameters
+                .as_ref()
+                .ok()
+                .and_then(|list| list.parameters.first())
+                .map(|parameter| {
+                    parameter
+                        .modifiers
+                        .iter()
+                        .any(|modifier| modifier.value == ParameterModifier::This)
+                })
+                .unwrap_or(false),
         }),
         TypeMember::Property(property) => members.push(MemberNode {
             syntax: SyntaxRef::Property(property),
@@ -240,6 +256,7 @@ fn collect_type_member<'ast>(
             is_explicit_implementation: property.explicit_interface.is_some(),
             is_static: is_static(property.modifiers),
             accessibility: accessibility_of(property.modifiers),
+            is_extension: false,
         }),
         TypeMember::Indexer(indexer) => members.push(MemberNode {
             syntax: SyntaxRef::Indexer(indexer),
@@ -252,6 +269,7 @@ fn collect_type_member<'ast>(
             is_explicit_implementation: indexer.explicit_interface.is_some(),
             is_static: false,
             accessibility: accessibility_of(indexer.modifiers),
+            is_extension: false,
         }),
         TypeMember::Event(event) => collect_event(event, members),
         TypeMember::Constructor(constructor) => members.push(MemberNode {
@@ -265,6 +283,7 @@ fn collect_type_member<'ast>(
             is_explicit_implementation: false,
             is_static: is_static(constructor.modifiers),
             accessibility: accessibility_of(constructor.modifiers),
+            is_extension: false,
         }),
         TypeMember::Destructor(destructor) => members.push(MemberNode {
             syntax: SyntaxRef::Destructor(destructor),
@@ -277,6 +296,7 @@ fn collect_type_member<'ast>(
             is_explicit_implementation: false,
             is_static: false,
             accessibility: None,
+            is_extension: false,
         }),
         TypeMember::Operator(operator) => {
             let parameter_count = operator
@@ -306,6 +326,7 @@ fn collect_type_member<'ast>(
                 // overloaded operators are always static in C#
                 is_static: true,
                 accessibility: accessibility_of(operator.modifiers),
+                is_extension: false,
             });
         }
         TypeMember::NestedType(declaration) => {
@@ -337,6 +358,7 @@ fn collect_field<'ast>(
                     .iter()
                     .any(|modifier| modifier.value == Modifier::Const),
             accessibility: accessibility_of(field.modifiers),
+            is_extension: false,
         });
     }
 }
@@ -357,6 +379,7 @@ fn collect_event<'ast>(
             is_explicit_implementation: event.explicit_interface.is_some(),
             is_static: is_static(event.modifiers),
             accessibility: accessibility_of(event.modifiers),
+            is_extension: false,
         });
     }
 }

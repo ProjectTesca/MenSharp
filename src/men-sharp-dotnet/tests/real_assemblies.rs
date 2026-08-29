@@ -222,3 +222,28 @@ fn unity_core_module_if_installed() {
         TypeSig::MethodTypeParameter(0)
     );
 }
+
+#[test]
+fn extension_attribute_is_detected_on_linq() {
+    let bytes = load_or_skip!(dotnet_shared_dir().map(|dir| dir.join("System.Linq.dll")));
+    let assembly = DotNetAssembly::parse(&bytes).unwrap();
+
+    let enumerable = assembly.find_type("System.Linq", "Enumerable").unwrap();
+    let enumerable = assembly.type_definition(enumerable);
+
+    // the static class and its methods both carry ExtensionAttribute
+    assert!(enumerable.is_extension);
+    let where_method = enumerable
+        .methods
+        .iter()
+        .find(|method| method.name == "Where")
+        .unwrap();
+    assert!(where_method.is_extension);
+
+    // an ordinary type does not
+    let bytes =
+        load_or_skip!(dotnet_shared_dir().map(|dir| dir.join("System.Private.CoreLib.dll")));
+    let corelib = DotNetAssembly::parse(&bytes).unwrap();
+    let string = corelib.find_type("System", "String").unwrap();
+    assert!(!corelib.type_definition(string).is_extension);
+}

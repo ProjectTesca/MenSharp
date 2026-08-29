@@ -72,6 +72,9 @@ pub struct TypeDefinition<'data> {
     pub flags: u32,
     pub is_value_type: bool,
     pub is_enum: bool,
+    /// Carries `System.Runtime.CompilerServices.ExtensionAttribute` — a static
+    /// class declaring extension methods.
+    pub is_extension: bool,
     pub extends: Option<TypeSig>,
     pub interfaces: Vec<TypeSig>,
     pub generic_parameters: Vec<GenericParameter<'data>>,
@@ -159,6 +162,8 @@ impl FieldDefinition<'_> {
 pub struct MethodDefinition<'data> {
     pub name: &'data str,
     pub flags: u16,
+    /// Carries `ExtensionAttribute` — callable as `receiver.Name(...)`.
+    pub is_extension: bool,
     pub signature: MethodSig,
     /// Parameter names and flags, aligned with `signature.parameters`.
     pub parameters: Vec<ParameterDefinition<'data>>,
@@ -427,6 +432,9 @@ fn build<'data>(
     // 1-based method row -> (type index, local index), from the method ranges
     let method_owner = owner_of_ranges(&method_lists, raw.methods.len() as u32);
 
+    // which rows carry System.Runtime.CompilerServices.ExtensionAttribute
+    let (extension_methods, extension_types) = extension_carriers(raw, strings, &method_owner)?;
+
     let mut types = Vec::with_capacity(raw.type_defs.len());
     for (index, row) in raw.type_defs.iter().enumerate() {
         let extends = if row.extends.row == 0 {
@@ -474,6 +482,7 @@ fn build<'data>(
             methods.push(MethodDefinition {
                 name: heap_string(strings, method.name)?,
                 flags: method.flags,
+                is_extension: extension_methods.contains(&method_row),
                 signature: sig,
                 parameters,
             });
@@ -485,6 +494,7 @@ fn build<'data>(
             flags: row.flags,
             is_value_type: false, // filled in below
             is_enum: false,
+            is_extension: extension_types.contains(&(index as u32 + 1)),
             extends,
             interfaces: Vec::new(),
             generic_parameters: Vec::new(),
@@ -729,6 +739,82 @@ fn build<'data>(
         type_specs,
         top_level,
     })
+}
+
+/// The 1-based MethodDef rows and TypeDef rows that carry
+/// `System.Runtime.CompilerServices.ExtensionAttribute`.
+fn extension_carriers(
+    raw: &RawTables,
+    strings: &[u8],
+    method_owner: &HashMap<u32, (u32, u32)>,
+) -> Result<
+    (
+        std::collections::HashSet<u32>,
+        std::collections::HashSet<u32>,
+    ),
+    MetadataError,
+> {
+    let mut methods = std::collections::HashSet::new();
+    let mut types = std::collections::HashSet::new();
+
+    for attribute in &raw.custom_attributes {
+        // the attribute type is named by its constructor: a MethodDef in this
+        // assembly or a MemberRef into another
+        let is_extension = match attribute.constructor.table {
+            tables::METHOD_DEF => {
+                let Some(&(owner, _)) = method_owner.get(&attribute.constructor.row) else {
+                    continue;
+                };
+                let Some(owner) = raw.type_defs.get(owner as usize) else {
+                    continue;
+                };
+                heap_string(strings, owner.namespace)? == "System.Runtime.CompilerServices"
+                    && heap_string(strings, owner.name)? == "ExtensionAttribute"
+            }
+            tables::MEMBER_REF => {
+                let Some(member) = attribute
+                    .constructor
+                    .row
+                    .checked_sub(1)
+                    .and_then(|row| raw.member_refs.get(row as usize))
+                else {
+                    continue;
+                };
+                match member.class.table {
+                    tables::TYPE_REF => {
+                        let Some(reference) = member
+                            .class
+                            .row
+                            .checked_sub(1)
+                            .and_then(|row| raw.type_refs.get(row as usize))
+                        else {
+                            continue;
+                        };
+                        heap_string(strings, reference.namespace)?
+                            == "System.Runtime.CompilerServices"
+                            && heap_string(strings, reference.name)? == "ExtensionAttribute"
+                    }
+                    _ => false,
+                }
+            }
+            _ => false,
+        };
+        if !is_extension {
+            continue;
+        }
+
+        match attribute.parent.table {
+            tables::METHOD_DEF => {
+                methods.insert(attribute.parent.row);
+            }
+            tables::TYPE_DEF => {
+                types.insert(attribute.parent.row);
+            }
+            _ => {}
+        }
+    }
+
+    Ok((methods, types))
 }
 
 /// A coded TypeDefOrRef into a [`TypeSig`]. TypeSpecs are already parsed, so a

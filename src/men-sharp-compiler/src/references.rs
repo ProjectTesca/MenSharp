@@ -39,6 +39,9 @@ pub struct ReferenceSet<'data> {
     assembly_by_name: HashMap<&'data str, u32>,
     /// Per assembly: (namespace, metadata name) -> the assembly it forwards to.
     forwarders: Vec<HashMap<(&'data str, &'data str), &'data str>>,
+    /// (namespace, method name) -> the static classes declaring such an extension
+    /// method.
+    extensions: HashMap<(&'data str, &'data str), Vec<ExternalTypeId>>,
 }
 
 impl<'data> ReferenceSet<'data> {
@@ -48,6 +51,7 @@ impl<'data> ReferenceSet<'data> {
         let mut namespaces = HashSet::new();
         let mut assembly_by_name = HashMap::new();
         let mut forwarders = Vec::with_capacity(assemblies.len());
+        let mut extensions: HashMap<(&str, &str), Vec<ExternalTypeId>> = HashMap::new();
 
         for (assembly_index, assembly) in assemblies.iter().enumerate() {
             assembly_by_name
@@ -70,12 +74,26 @@ impl<'data> ReferenceSet<'data> {
                 }
 
                 let (name, arity) = definition.name_and_arity();
+                let id = ExternalTypeId {
+                    assembly: assembly_index as u32,
+                    type_index: type_index as u32,
+                };
                 types
                     .entry((definition.namespace, name, arity))
-                    .or_insert(ExternalTypeId {
-                        assembly: assembly_index as u32,
-                        type_index: type_index as u32,
-                    });
+                    .or_insert(id);
+
+                if definition.is_extension {
+                    for method in &definition.methods {
+                        if method.is_extension {
+                            let owners = extensions
+                                .entry((definition.namespace, method.name))
+                                .or_default();
+                            if !owners.contains(&id) {
+                                owners.push(id);
+                            }
+                        }
+                    }
+                }
 
                 // "System.Collections.Generic" also proves "System" and
                 // "System.Collections"; prefixes are subslices of the same string
@@ -99,6 +117,7 @@ impl<'data> ReferenceSet<'data> {
             namespaces,
             assembly_by_name,
             forwarders,
+            extensions,
         }
     }
 
@@ -406,6 +425,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                     kind: ExternalMemberKind::Field,
                     is_static: field.is_static(),
                     accessibility: accessibility_from(field.flags),
+                    is_extension: false,
                     signature: MemberSignature::Field(self.convert(id, &field.field_type)),
                 });
             }
@@ -431,6 +451,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                 },
                 is_static: method.is_static(),
                 accessibility: accessibility_from(method.flags),
+                is_extension: method.is_extension,
                 signature: MemberSignature::Function(self.convert_function(
                     id,
                     &method.signature,
@@ -478,6 +499,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                 accessibility: accessor
                     .map(|method| accessibility_from(method.flags))
                     .unwrap_or(Accessibility::Private),
+                is_extension: false,
                 signature,
             });
         }
@@ -494,6 +516,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                 accessibility: accessor
                     .map(|method| accessibility_from(method.flags))
                     .unwrap_or(Accessibility::Private),
+                is_extension: false,
                 signature: MemberSignature::Event(
                     event
                         .event_type
@@ -521,6 +544,14 @@ impl ExternalTypes for ReferenceSet<'_> {
                 men_sharp_dotnet::Variance::Invariant => TypeVariance::Invariant,
             })
             .collect()
+    }
+
+    fn extension_method_owners(&self, namespace: &[&str], name: &str) -> Vec<ExternalTypeId> {
+        let joined = namespace.join(".");
+        self.extensions
+            .get(&(joined.as_str(), name))
+            .cloned()
+            .unwrap_or_default()
     }
 }
 

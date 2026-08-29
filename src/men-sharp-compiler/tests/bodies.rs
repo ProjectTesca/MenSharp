@@ -244,6 +244,78 @@ fn spec_inference_against_the_real_core_library() {
 }
 
 #[test]
+fn linq_chains_flow_through_real_extension_methods() {
+    let Some(dir) = dotnet_shared_dir() else {
+        eprintln!("skipped: no .NET runtime on this machine");
+        return;
+    };
+
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(dir.join("System.Linq.dll")).unwrap(),
+        std::fs::read(dir.join("System.Runtime.dll")).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let files = compiler.parse(vec![SourceCode::new(
+        "linq.cs",
+        r#"
+        using System.Collections.Generic;
+        using System.Linq;
+
+        public class Query
+        {
+            void Run(List<string> names, int[] numbers)
+            {
+                // the full chain: extension lookup, receiver-driven inference,
+                // and lambda bodies typed link by link
+                var lengths = names.Where(x => x.Length > 2).Select(x => x.Length).ToArray();
+                string probe1 = lengths;
+
+                var total = numbers.Sum();
+                string probe2 = total;
+
+                var first = names.FirstOrDefault();
+                string ok = first;
+
+                var pairs = names.Select(x => (x, x.Length)).ToList();
+
+                // without `using System.Linq;` this would be UnknownMember; with a
+                // wrong lambda the error lands inside the lambda body
+                names.Where(x => x.Missing > 0);
+            }
+        }
+        "#,
+    )]);
+
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+
+    let kinds: Vec<&SemanticErrorKind> = bodies.errors.iter().map(|error| &error.kind).collect();
+    assert_eq!(kinds.len(), 3, "{kinds:?}");
+    // Where(...).Select(x => x.Length).ToArray() really produced int[]
+    assert_eq!(
+        *kinds[0],
+        SemanticErrorKind::TypeMismatch {
+            expected: "System.String".to_string(),
+            found: "System.Int32[]".to_string(),
+        }
+    );
+    // Sum() over int[] produced int
+    assert_eq!(
+        *kinds[1],
+        SemanticErrorKind::TypeMismatch {
+            expected: "System.String".to_string(),
+            found: "System.Int32".to_string(),
+        }
+    );
+    // x.Missing inside the lambda, where x: string
+    assert!(matches!(kinds[2], SemanticErrorKind::UnknownMember { .. }));
+}
+
+#[test]
 fn core_library_generics_flow_through_bodies() {
     let Some(dir) = dotnet_shared_dir() else {
         eprintln!("skipped: no .NET runtime on this machine");

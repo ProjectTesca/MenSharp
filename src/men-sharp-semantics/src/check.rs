@@ -139,7 +139,7 @@ enum Meaning<'ast> {
     TypeName(Type),
     Namespace(Resolution<'ast>),
     /// An uninvoked method name.
-    Group(MethodGroup),
+    Group(MethodGroup<'ast>),
     Error,
 }
 
@@ -152,13 +152,27 @@ struct AccessContext {
     implicit_this: bool,
 }
 
-struct MethodGroup {
+struct MethodGroup<'ast> {
     candidates: Vec<MemberCandidate>,
     explicit_arguments: Vec<Type>,
     /// Accessed through a type name, so instance members are unusable.
     via_type: bool,
+    /// The member name, for the extension-method fallback and diagnostics.
+    name: &'ast str,
+    /// The receiver value — it becomes the first argument of an extension call.
+    receiver: Option<Type>,
+    /// Whether extension methods may be consulted when instance resolution fails
+    /// (`receiver.M(...)` yes, `M(...)` and `Type.M(...)` no).
+    allow_extensions: bool,
     receiver_display: String,
     span: Range<usize>,
+}
+
+/// What one pass of overload resolution concluded.
+enum AttemptOutcome {
+    Selected(FunctionSignature),
+    Ambiguous,
+    NoMatch { inference_failed: bool },
 }
 
 /// One call argument. Lambdas are *deferred*: their bodies are typed during
@@ -1654,7 +1668,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         candidates: Vec<MemberCandidate>,
         access: AccessContext,
         explicit_arguments: Vec<Type>,
-        name: &str,
+        name: &'ast str,
         span: &Range<usize>,
     ) -> Option<Meaning<'ast>> {
         let AccessContext {
@@ -1678,6 +1692,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 candidates: methods,
                 explicit_arguments,
                 via_type,
+                name,
+                allow_extensions: !via_type && !implicit_this && receiver.is_some(),
+                receiver: receiver.clone(),
                 receiver_display,
                 span: span.clone(),
             }));
@@ -1848,6 +1865,20 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
                 let candidates = self.system().members_named(&receiver, name);
                 if candidates.is_empty() {
+                    // no instance member: maybe an extension method
+                    let probe = MethodGroup {
+                        candidates: Vec::new(),
+                        explicit_arguments,
+                        via_type: false,
+                        name,
+                        receiver: Some(receiver.clone()),
+                        allow_extensions: true,
+                        receiver_display: self.display(&receiver),
+                        span: span.clone(),
+                    };
+                    if self.extension_group(&probe).is_some() {
+                        return Meaning::Group(probe);
+                    }
                     let kind = SemanticErrorKind::UnknownMember {
                         type_name: self.display(&receiver),
                     };
@@ -1932,6 +1963,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             candidates: vec![candidate],
                             explicit_arguments: Vec::new(),
                             via_type: false,
+                            name: "Invoke",
+                            receiver: None,
+                            allow_extensions: false,
                             receiver_display,
                             span: span.clone(),
                         };
@@ -2033,13 +2067,100 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
-    /// Overload resolution over a method group, with §12.6.3 type inference.
+    /// Overload resolution over a method group, §12.6.3 inference included; when
+    /// instance candidates fail, extension methods in scope get their turn with the
+    /// receiver as first argument (C# §12.8.10.3).
     fn resolve_call(
         &mut self,
-        group: MethodGroup,
+        group: MethodGroup<'ast>,
         arguments: Vec<CallArgument<'ast>>,
         span: &Range<usize>,
     ) -> Type {
+        let instance_failure = match self.attempt_call(&group, &arguments) {
+            AttemptOutcome::Selected(signature) => {
+                return self.finish_call(&signature, &arguments);
+            }
+            AttemptOutcome::Ambiguous => {
+                self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
+                return Type::Error;
+            }
+            AttemptOutcome::NoMatch { inference_failed } => inference_failed,
+        };
+
+        if group.allow_extensions
+            && let Some(receiver) = group.receiver.clone()
+            && let Some(extension_group) = self.extension_group(&group)
+        {
+            let mut extension_arguments = Vec::with_capacity(arguments.len() + 1);
+            extension_arguments.push(CallArgument {
+                shape: ArgumentShape::Value(receiver),
+                expression: None,
+                modifier: None,
+                is_integer_literal: false,
+                out_declaration: None,
+                span: span.clone(),
+            });
+            extension_arguments.extend(arguments);
+
+            match self.attempt_call(&extension_group, &extension_arguments) {
+                AttemptOutcome::Selected(signature) => {
+                    return self.finish_call(&signature, &extension_arguments);
+                }
+                AttemptOutcome::Ambiguous => {
+                    self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
+                    return Type::Error;
+                }
+                AttemptOutcome::NoMatch { inference_failed } => {
+                    self.report_call_failure(
+                        &group,
+                        &extension_arguments[1..],
+                        instance_failure || inference_failed,
+                        span,
+                    );
+                    return Type::Error;
+                }
+            }
+        }
+
+        self.report_call_failure(&group, &arguments, instance_failure, span);
+        Type::Error
+    }
+
+    fn report_call_failure(
+        &mut self,
+        group: &MethodGroup<'ast>,
+        arguments: &[CallArgument<'ast>],
+        inference_failed: bool,
+        span: &Range<usize>,
+    ) {
+        let kind = if group.candidates.is_empty() {
+            SemanticErrorKind::UnknownMember {
+                type_name: group.receiver_display.clone(),
+            }
+        } else if inference_failed {
+            SemanticErrorKind::CannotInferTypeArguments
+        } else {
+            SemanticErrorKind::NoMatchingOverload
+        };
+        self.error(kind, span.clone());
+
+        for argument in arguments {
+            if let (ArgumentShape::Lambda(_), Some(expression)) =
+                (&argument.shape, argument.expression)
+            {
+                self.expression_types
+                    .insert(EntityID::from(expression), Type::Error);
+            }
+        }
+    }
+
+    /// One pass of candidate filtering and betterness. Side-effect free apart from
+    /// rolled-back lambda probes.
+    fn attempt_call(
+        &mut self,
+        group: &MethodGroup<'ast>,
+        arguments: &[CallArgument<'ast>],
+    ) -> AttemptOutcome {
         let mut viable: Vec<(FunctionSignature, usize)> = Vec::new();
         let mut inference_failed = false;
 
@@ -2187,31 +2308,24 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         let best = viable.iter().map(|(_, exact)| *exact).max();
         let Some(best) = best else {
-            let kind = if inference_failed {
-                SemanticErrorKind::CannotInferTypeArguments
-            } else {
-                SemanticErrorKind::NoMatchingOverload
-            };
-            self.error(kind, span.clone());
-            for argument in &arguments {
-                if let (ArgumentShape::Lambda(_), Some(expression)) =
-                    (&argument.shape, argument.expression)
-                {
-                    self.expression_types
-                        .insert(EntityID::from(expression), Type::Error);
-                }
-            }
-            return Type::Error;
+            return AttemptOutcome::NoMatch { inference_failed };
         };
 
         let mut winners = viable.into_iter().filter(|(_, exact)| *exact == best);
         let (signature, _) = winners.next().unwrap();
         if winners.next().is_some() {
-            self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
-            return Type::Error;
+            return AttemptOutcome::Ambiguous;
         }
+        AttemptOutcome::Selected(signature)
+    }
 
-        // side effects of the chosen overload: lambda bodies for real, out-vars
+    /// The chosen overload's side effects: lambda bodies checked for real,
+    /// `out var` locals bound, argument expressions typed.
+    fn finish_call(
+        &mut self,
+        signature: &FunctionSignature,
+        arguments: &[CallArgument<'ast>],
+    ) -> Type {
         for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
             match &argument.shape {
                 ArgumentShape::Lambda(lambda) => {
@@ -2230,9 +2344,88 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
         }
+        signature.return_type.clone()
+    }
 
-        let _ = &group.receiver_display;
-        signature.return_type
+    /// The extension methods named like this group's member, gathered from every
+    /// namespace scope and `using` import, nearest scope first.
+    fn extension_group(&self, group: &MethodGroup<'ast>) -> Option<MethodGroup<'ast>> {
+        let name = group.name;
+
+        let mut search: Vec<(Vec<&'ast str>, Option<SymbolId>)> = Vec::new();
+        for scope in self.scopes.iter().rev() {
+            search.push((scope.path.clone(), scope.symbol));
+            for using in &scope.usings {
+                if let crate::resolve::ResolvedUsing::Namespace(path) = using {
+                    let symbol = self.resolver.source_namespace_at(path);
+                    search.push((path.clone(), symbol));
+                }
+            }
+        }
+
+        let mut candidates: Vec<MemberCandidate> = Vec::new();
+        for (path, namespace_symbol) in &search {
+            // source static classes declared in this namespace
+            if let Some(namespace_symbol) = namespace_symbol {
+                for &class in &self
+                    .resolver
+                    .declarations
+                    .table
+                    .symbol(*namespace_symbol)
+                    .members
+                {
+                    if self.resolver.declarations.table.symbol(class).kind != SymbolKind::Class {
+                        continue;
+                    }
+                    let class_type = Type::Named {
+                        target: TypeTarget::Source(class),
+                        arguments: Vec::new(),
+                    };
+                    for candidate in self.system().members_named(&class_type, name) {
+                        let is_extension = match &candidate.origin {
+                            MemberOrigin::Source(id) => {
+                                self.resolver.declarations.table.symbol(*id).is_extension
+                            }
+                            MemberOrigin::External { member, .. } => member.is_extension,
+                        };
+                        if is_extension && candidate.declaring_type == class_type {
+                            candidates.push(candidate);
+                        }
+                    }
+                }
+            }
+
+            // external static classes with matching extension methods
+            for owner in self.resolver.external.extension_method_owners(path, name) {
+                let owner_type = Type::Named {
+                    target: TypeTarget::External(owner),
+                    arguments: Vec::new(),
+                };
+                for candidate in self.system().members_named(&owner_type, name) {
+                    let is_extension = matches!(
+                        &candidate.origin,
+                        MemberOrigin::External { member, .. } if member.is_extension
+                    );
+                    if is_extension && candidate.declaring_type == owner_type {
+                        candidates.push(candidate);
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            return None;
+        }
+        Some(MethodGroup {
+            candidates,
+            explicit_arguments: group.explicit_arguments.clone(),
+            via_type: true,
+            name,
+            receiver: None,
+            allow_extensions: false,
+            receiver_display: group.receiver_display.clone(),
+            span: group.span.clone(),
+        })
     }
 
     // -------------------------------------------------------------- lambdas
@@ -2607,6 +2800,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 candidates: constructors,
                 explicit_arguments: Vec::new(),
                 via_type: false,
+                name: ".ctor",
+                receiver: None,
+                allow_extensions: false,
                 receiver_display,
                 span: new_expression.span.clone(),
             };
@@ -2726,6 +2922,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     candidates: indexers,
                     explicit_arguments: Vec::new(),
                     via_type: false,
+                    name: "this[]",
+                    receiver: None,
+                    allow_extensions: false,
                     receiver_display,
                     span: span.clone(),
                 };

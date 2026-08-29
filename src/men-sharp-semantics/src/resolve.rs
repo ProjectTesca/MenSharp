@@ -895,7 +895,7 @@ impl<'ast> Resolver<'_, 'ast> {
     }
 
     /// Walks the source namespace tree along a path.
-    fn source_namespace_at(&self, path: &[&str]) -> Option<SymbolId> {
+    pub(crate) fn source_namespace_at(&self, path: &[&str]) -> Option<SymbolId> {
         let mut current = self.declarations.table.root();
         for segment in path {
             current = self.source_namespace_in(current, segment)?;

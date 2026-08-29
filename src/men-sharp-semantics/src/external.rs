@@ -47,6 +47,8 @@ pub struct ExternalMember {
     pub kind: ExternalMemberKind,
     pub is_static: bool,
     pub accessibility: Accessibility,
+    /// Carries `ExtensionAttribute`.
+    pub is_extension: bool,
     pub signature: MemberSignature,
 }
 
@@ -103,6 +105,11 @@ pub trait ExternalTypes: Sync {
     /// Declaration-site variance per generic parameter, `IEnumerable<out T>`-style.
     /// An empty vec means all parameters are invariant.
     fn variances(&self, id: ExternalTypeId) -> Vec<TypeVariance>;
+
+    /// The static classes under `namespace` that declare an extension method with
+    /// this name — the checker asks per imported namespace, then reads the methods
+    /// through ordinary member lookup.
+    fn extension_method_owners(&self, namespace: &[&str], name: &str) -> Vec<ExternalTypeId>;
 }
 
 /// A provider with no types at all. Resolution still works for purely
@@ -148,6 +155,10 @@ impl ExternalTypes for NoExternalTypes {
     }
 
     fn variances(&self, _: ExternalTypeId) -> Vec<TypeVariance> {
+        Vec::new()
+    }
+
+    fn extension_method_owners(&self, _: &[&str], _: &str) -> Vec<ExternalTypeId> {
         Vec::new()
     }
 }

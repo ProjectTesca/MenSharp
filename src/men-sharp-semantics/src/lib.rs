@@ -477,6 +477,14 @@ mod tests {
         fn variances(&self, _: crate::types::ExternalTypeId) -> Vec<crate::TypeVariance> {
             Vec::new()
         }
+
+        fn extension_method_owners(
+            &self,
+            _: &[&str],
+            _: &str,
+        ) -> Vec<crate::types::ExternalTypeId> {
+            Vec::new()
+        }
     }
 
     fn external(id: ExternalTypeId) -> Type {
@@ -1439,6 +1447,98 @@ mod tests {
             SemanticErrorKind::TypeMismatch {
                 expected: "System.String".to_string(),
                 found: "System.Int64[]".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn extension_methods_resolve_with_scoping() {
+        checked!(
+            check,
+            r#"
+            public class Animal { }
+            public class Dog : Animal { }
+
+            public static class Extensions
+            {
+                public static int Doubled(this int value) { return value * 2; }
+                public static T LastOf<T>(this T[] items) { return default; }
+                public static string Show(this Animal animal) { return "animal"; }
+            }
+
+            public class App
+            {
+                void Run(int[] numbers, Dog dog)
+                {
+                    int d = 5.Doubled();
+                    string byReceiver = dog.Show();
+                    string probe = numbers.LastOf();
+                    dog.Missing();
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        // the probe proves LastOf inferred T = int through the receiver
+        assert_eq!(
+            *kinds[0],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Int32".to_string(),
+            }
+        );
+        assert!(matches!(kinds[1], SemanticErrorKind::UnknownMember { .. }));
+    }
+
+    #[test]
+    fn extension_methods_respect_using_scopes() {
+        checked!(
+            check,
+            "namespace Lib { public static class E { public static int Twice(this int v) { return v + v; } } }",
+            "using Lib;\npublic class UsesIt { void Run() { int x = 3.Twice(); } }",
+            "public class LacksIt { void Run() { int y = 3.Twice(); } }",
+        );
+
+        // only the file without `using Lib;` fails
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert!(matches!(kinds[0], SemanticErrorKind::UnknownMember { .. }));
+        assert_eq!(check.errors[0].file, FileId(2));
+    }
+
+    #[test]
+    fn instance_methods_win_over_extensions() {
+        checked!(
+            check,
+            r#"
+            public static class Extensions
+            {
+                public static string Describe(this Thing thing) { return "extension"; }
+            }
+            public class Thing
+            {
+                public int Describe() { return 1; }
+            }
+            public class App
+            {
+                void Run(Thing thing)
+                {
+                    string probe = thing.Describe();
+                }
+            }
+            "#,
+        );
+
+        // the probe reports int: the instance method was chosen
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert_eq!(
+            *kinds[0],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Int32".to_string(),
             }
         );
     }

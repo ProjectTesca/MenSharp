@@ -267,6 +267,7 @@ impl<'ast> Merger<'ast> {
         let mut symbol = new_symbol(node.kind, node.name, node.arity, site);
         symbol.is_partial = node.is_partial;
         symbol.is_explicit_implementation = node.is_explicit_implementation;
+        symbol.is_extension = node.is_extension;
         symbol.is_static = node.is_static;
         symbol.accessibility = node.accessibility.unwrap_or(
             // interface and enum members default to public, everything else private

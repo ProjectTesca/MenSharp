@@ -263,6 +263,15 @@ pub(crate) struct InterfaceImplRow {
     pub interface: CodedIndex,
 }
 
+pub(crate) struct MemberRefRow {
+    pub class: CodedIndex,
+}
+
+pub(crate) struct CustomAttributeRow {
+    pub parent: CodedIndex,
+    pub constructor: CodedIndex,
+}
+
 pub(crate) struct ConstantRow {
     pub element_type: u8,
     pub parent: CodedIndex,
@@ -336,6 +345,8 @@ pub(crate) struct RawTables {
     pub methods: Vec<MethodDefRow>,
     pub params: Vec<ParamRow>,
     pub interface_impls: Vec<InterfaceImplRow>,
+    pub member_refs: Vec<MemberRefRow>,
+    pub custom_attributes: Vec<CustomAttributeRow>,
     pub constants: Vec<ConstantRow>,
     pub event_maps: Vec<EventMapRow>,
     pub events: Vec<EventRow>,
@@ -499,6 +510,33 @@ pub(crate) fn read_tables(stream: &[u8]) -> Result<RawTables, MetadataError> {
                         Ok(InterfaceImplRow {
                             class: t.index(TYPE_DEF)?,
                             interface: t.coded(TYPE_DEF_OR_REF)?,
+                        })
+                    },
+                    &mut tables,
+                )?;
+            }
+            MEMBER_REF => {
+                raw.member_refs = read_rows(
+                    rows,
+                    |t: &mut TableReader| {
+                        let class = t.coded(MEMBER_REF_PARENT)?;
+                        t.string()?; // name (always .ctor here)
+                        t.blob()?; // signature
+                        Ok(MemberRefRow { class })
+                    },
+                    &mut tables,
+                )?;
+            }
+            CUSTOM_ATTRIBUTE => {
+                raw.custom_attributes = read_rows(
+                    rows,
+                    |t: &mut TableReader| {
+                        let parent = t.coded(HAS_CUSTOM_ATTRIBUTE)?;
+                        let constructor = t.coded(CUSTOM_ATTRIBUTE_TYPE)?;
+                        t.blob()?; // constructor arguments
+                        Ok(CustomAttributeRow {
+                            parent,
+                            constructor,
                         })
                     },
                     &mut tables,

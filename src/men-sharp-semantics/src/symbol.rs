@@ -202,6 +202,8 @@ pub struct Symbol<'ast> {
     pub variance: crate::types::TypeVariance,
     /// `void IFoo.Bar()` — excluded from ordinary member lookup and name-clash rules.
     pub is_explicit_implementation: bool,
+    /// A static method whose first parameter is `this T` — an extension method.
+    pub is_extension: bool,
     /// Nested symbols in declaration order: namespace members, type members and
     /// nested types. Type parameters are kept apart in [`Self::type_parameters`]
     /// because they live in a different lookup scope.
@@ -243,6 +245,7 @@ impl<'ast> SymbolTable<'ast> {
             accessibility: Accessibility::Public,
             variance: crate::types::TypeVariance::Invariant,
             is_explicit_implementation: false,
+            is_extension: false,
             members: Vec::new(),
             type_parameters: Vec::new(),
             member_map: HashMap::new(),
@@ -348,6 +351,7 @@ pub(crate) fn new_symbol<'ast>(
         accessibility: Accessibility::Public,
         variance: crate::types::TypeVariance::Invariant,
         is_explicit_implementation: false,
+        is_extension: false,
         members: Vec::new(),
         type_parameters: Vec::new(),
         member_map: HashMap::new(),
