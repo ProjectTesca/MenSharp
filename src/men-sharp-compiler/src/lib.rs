@@ -33,7 +33,8 @@ use std::sync::Arc;
 use men_sharp_dotnet::DotNetAssembly;
 use men_sharp_parser::MenSharpAST;
 use men_sharp_semantics::{
-    Declarations, ExternalTypes, FileId, Signatures, collect_file, merge_declarations, resolve_file,
+    BodyCheck, Declarations, ExternalTypes, FileId, Signatures, check_file, collect_file,
+    merge_declarations, resolve_file,
 };
 use rayon::prelude::*;
 
@@ -172,6 +173,31 @@ impl Compiler {
         let mut all = Signatures::default();
         for signatures in per_file {
             all.merge(signatures);
+        }
+        all.errors
+            .sort_by_key(|error| (error.file, error.span.start, error.span.end));
+        all
+    }
+
+    /// Type-checks every member body: one task per file, results merged and sorted.
+    /// This is the phase whose output (a type for every expression) code generation
+    /// will consume.
+    pub fn check_bodies(
+        &self,
+        declarations: &Declarations<'_>,
+        signatures: &Signatures,
+        external: &(dyn ExternalTypes + Sync),
+    ) -> BodyCheck {
+        let per_file: Vec<BodyCheck> = self.pool.install(|| {
+            (0..declarations.files.len())
+                .into_par_iter()
+                .map(|index| check_file(declarations, signatures, external, index))
+                .collect()
+        });
+
+        let mut all = BodyCheck::default();
+        for check in per_file {
+            all.merge(check);
         }
         all.errors
             .sort_by_key(|error| (error.file, error.span.start, error.span.end));

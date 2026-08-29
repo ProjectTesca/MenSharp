@@ -25,7 +25,9 @@
 //! assert_eq!(declarations.table.symbol(app).members_named("Program").len(), 1);
 //! ```
 
+pub mod check;
 pub mod collect;
+pub mod conversions;
 pub mod error;
 pub mod external;
 pub mod lookup;
@@ -34,9 +36,11 @@ pub mod resolve;
 pub mod symbol;
 pub mod types;
 
+pub use check::{BodyCheck, check_file};
 pub use collect::{
     DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode, collect_file,
 };
+pub use conversions::NumericKind;
 pub use error::{SemanticError, SemanticErrorKind};
 pub use external::{
     ExternalMember, ExternalMemberKind, ExternalTypeInfo, ExternalTypeKind, ExternalTypes,
@@ -342,19 +346,43 @@ mod tests {
 
     impl MockExternal {
         fn corlib() -> Self {
-            Self {
+            let mut mock = Self {
                 types: vec![
                     ("System", "Int32", 0),
                     ("System", "String", 0),
                     ("System", "Boolean", 0),
                     ("System", "Object", 0),
+                    ("System", "SByte", 0),
+                    ("System", "Byte", 0),
+                    ("System", "Int16", 0),
+                    ("System", "UInt16", 0),
+                    ("System", "UInt32", 0),
+                    ("System", "Int64", 0),
+                    ("System", "UInt64", 0),
+                    ("System", "Char", 0),
+                    ("System", "Single", 0),
+                    ("System", "Double", 0),
+                    ("System", "Decimal", 0),
+                    ("System", "IntPtr", 0),
+                    ("System", "UIntPtr", 0),
+                    ("System", "Type", 0),
+                    ("System", "Array", 0),
+                    ("System", "ValueType", 0),
+                    ("System", "Enum", 0),
                     ("System.Collections.Generic", "List", 1),
                     ("UnityEngine", "MonoBehaviour", 0),
                     ("UnityEngine", "Debug", 0),
                     ("UnityEngine.SceneManagement", "SceneManager", 0),
                 ],
-                nested: vec![(4, "Enumerator", 1)],
-            }
+                nested: Vec::new(),
+            };
+            let list = mock
+                .types
+                .iter()
+                .position(|&(_, name, _)| name == "List")
+                .unwrap() as u32;
+            mock.nested = vec![(list, "Enumerator", 1)];
+            mock
         }
 
         fn id_of(&self, namespace: &str, name: &str) -> ExternalTypeId {
@@ -431,6 +459,13 @@ mod tests {
             _: &str,
         ) -> Vec<crate::ExternalMember> {
             Vec::new()
+        }
+
+        fn display_name(&self, id: crate::types::ExternalTypeId) -> String {
+            self.types
+                .get(id.type_index as usize)
+                .map(|&(ns, name, _)| format!("{ns}.{name}"))
+                .unwrap_or_else(|| "<nested>".to_string())
         }
     }
 
@@ -896,6 +931,344 @@ mod tests {
         let speak = system.members_named(&Type::TypeParameter(t), "Speak");
         assert_eq!(speak.len(), 1);
         assert!(matches!(speak[0].origin, MemberOrigin::Source(_)));
+    }
+
+    // --------------------------------------------------------- body checking
+
+    use crate::check::check_file;
+
+    /// Runs the full front half plus body checking over the sources.
+    macro_rules! checked {
+        ($check:ident, $($source:expr),+ $(,)?) => {
+            declarations!(declarations, $($source),+);
+            let mock = MockExternal::corlib();
+            let signatures = resolve_signatures(&declarations, &mock);
+            assert_eq!(signatures.errors, vec![], "signatures must resolve cleanly");
+            let mut $check = crate::check::BodyCheck::default();
+            for index in 0..declarations.files.len() {
+                $check.merge(check_file(&declarations, &signatures, &mock, index));
+            }
+        };
+    }
+
+    fn error_kinds(check: &crate::check::BodyCheck) -> Vec<&SemanticErrorKind> {
+        check.errors.iter().map(|error| &error.kind).collect()
+    }
+
+    #[test]
+    fn locals_and_var_infer_and_convert() {
+        checked!(
+            check,
+            r#"
+            public class Body
+            {
+                void Run()
+                {
+                    var count = 1;
+                    count = 2;
+                    long widened = count;
+                    byte narrowed = 5;
+                    string wrong = count;
+                }
+            }
+            "#,
+        );
+
+        // the probe: assigning the inferred int to string names both types
+        assert_eq!(check.errors.len(), 1);
+        assert_eq!(
+            check.errors[0].kind,
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Int32".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn members_inheritance_and_conditions() {
+        checked!(
+            check,
+            r#"
+            public class Base
+            {
+                public int health;
+                public bool IsAlive() { return health > 0; }
+            }
+            public class Player : Base
+            {
+                public string name;
+
+                void Update()
+                {
+                    if (IsAlive() && health < 100) { health = health + 1; }
+                    if (health) {}
+                    Missing();
+                    string wrong = this.unknown;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 3, "{kinds:?}");
+        assert!(matches!(
+            kinds[0],
+            SemanticErrorKind::ConditionNotBoolean { .. }
+        ));
+        assert!(matches!(kinds[1], SemanticErrorKind::UnknownIdentifier));
+        assert!(matches!(kinds[2], SemanticErrorKind::UnknownMember { .. }));
+    }
+
+    #[test]
+    fn overloads_pick_by_argument_types() {
+        checked!(
+            check,
+            r#"
+            public class Overloads
+            {
+                void Take(int value) {}
+                void Take(string value) {}
+                string Pick(long value) { return ""; }
+                int Pick(int value) { return 0; }
+
+                void Run()
+                {
+                    Take(1);
+                    Take("hello");
+                    Take(true);
+                    string probe = Pick(1);
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        // Take(true) fits neither overload
+        assert!(matches!(kinds[0], SemanticErrorKind::NoMatchingOverload));
+        // Pick(1) prefers the exact int overload returning int, so the string
+        // probe reports int
+        assert_eq!(
+            *kinds[1],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Int32".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn generic_methods_infer_or_ask_for_annotations() {
+        checked!(
+            check,
+            r#"
+            public class Generics
+            {
+                T Identity<T>(T value) { return value; }
+                T Make<T>() { return default(T); }
+
+                void Run()
+                {
+                    string ok = Identity("hello");
+                    string probe = Identity(1);
+                    string explicitly = Make<string>();
+                    var impossible = Make();
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        assert_eq!(
+            *kinds[0],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Int32".to_string(),
+            }
+        );
+        // Make() has nothing to infer T from: the annotate-it error
+        assert!(matches!(
+            kinds[1],
+            SemanticErrorKind::CannotInferTypeArguments
+        ));
+    }
+
+    #[test]
+    fn enums_statics_and_value_flow() {
+        checked!(
+            check,
+            r#"
+            public enum Color { Red, Green }
+            public class Statics
+            {
+                public static int counter;
+                public int instance;
+
+                static void Tick()
+                {
+                    counter = counter + 1;
+                    instance = 2;
+                    var color = Color.Red;
+                    bool same = color == Color.Green;
+                    string wrong = color;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        assert!(matches!(
+            kinds[0],
+            SemanticErrorKind::InstanceMemberInStaticContext
+        ));
+        assert_eq!(
+            *kinds[1],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "Color".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn arrays_foreach_and_indexing() {
+        checked!(
+            check,
+            r#"
+            public class Arrays
+            {
+                void Run(int[] values)
+                {
+                    var first = values[0];
+                    values[1] = first + 1;
+                    int total = 0;
+                    foreach (var value in values) { total += value; }
+                    foreach (string wrong in values) {}
+                    values["x"] = 1;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        // int element into a string loop variable
+        assert!(matches!(kinds[0], SemanticErrorKind::TypeMismatch { .. }));
+        // a string index into an int[] slot
+        assert!(matches!(kinds[1], SemanticErrorKind::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn user_defined_operators_and_string_concat() {
+        checked!(
+            check,
+            r#"
+            public struct Vec
+            {
+                public float x;
+                public static Vec operator +(Vec a, Vec b) { return a; }
+            }
+            public class Ops
+            {
+                void Run(Vec a, Vec b, int n)
+                {
+                    var sum = a + b;
+                    sum.x = 1.5f;
+                    string label = "n = " + n;
+                    var bad = a * b;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert!(matches!(
+            kinds[0],
+            SemanticErrorKind::InvalidOperator { .. }
+        ));
+    }
+
+    #[test]
+    fn out_var_and_is_patterns_bind_locals() {
+        checked!(
+            check,
+            r#"
+            public class Player {}
+            public class Bindings
+            {
+                bool TryGet(out int value) { value = 1; return true; }
+
+                void Run(object thing)
+                {
+                    if (TryGet(out var got)) { int use = got; }
+                    if (thing is Player player) { Player p = player; }
+                    string probe = got;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert_eq!(
+            *kinds[0],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Int32".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn return_types_are_enforced() {
+        checked!(
+            check,
+            r#"
+            public class Returns
+            {
+                int Number() { return "text"; }
+                void Nothing() { return 1; }
+                int Missing() { return; }
+                long Widened() { return 1; }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 3, "{kinds:?}");
+        assert!(matches!(kinds[0], SemanticErrorKind::TypeMismatch { .. }));
+        assert!(matches!(kinds[1], SemanticErrorKind::ReturnValueMismatch));
+        assert!(matches!(kinds[2], SemanticErrorKind::ReturnValueMismatch));
+    }
+
+    #[test]
+    fn unsupported_constructs_get_scaffolding_errors() {
+        checked!(
+            check,
+            r#"
+            public class Scaffolding
+            {
+                void Run()
+                {
+                    var f = () => 1;
+                    var q = from x in "abc" select x;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert!(
+            kinds
+                .iter()
+                .all(|kind| matches!(kind, SemanticErrorKind::UnsupportedExpression)),
+            "{kinds:?}"
+        );
+        assert_eq!(kinds.len(), 2);
     }
 
     #[test]

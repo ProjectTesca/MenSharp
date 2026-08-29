@@ -96,6 +96,9 @@ pub trait ExternalTypes: Sync {
 
     /// All members with the given metadata name, overloads included.
     fn members_named(&self, id: ExternalTypeId, name: &str) -> Vec<ExternalMember>;
+
+    /// A human-readable name (`UnityEngine.Debug`) for diagnostics.
+    fn display_name(&self, id: ExternalTypeId) -> String;
 }
 
 /// A provider with no types at all. Resolution still works for purely
@@ -134,5 +137,9 @@ impl ExternalTypes for NoExternalTypes {
 
     fn members_named(&self, _: ExternalTypeId, _: &str) -> Vec<ExternalMember> {
         Vec::new()
+    }
+
+    fn display_name(&self, id: ExternalTypeId) -> String {
+        format!("<external {}:{}>", id.assembly, id.type_index)
     }
 }

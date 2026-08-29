@@ -51,4 +51,61 @@ pub enum SemanticErrorKind {
     NamespaceUsedAsType,
     /// The target of a `using` directive does not exist.
     UnresolvedUsingTarget,
+    // ---------- body checking ----------
+    /// A simple name that is neither a local, a member, a type nor a namespace.
+    UnknownIdentifier,
+    /// `receiver.Name` where the receiver's type has no such member.
+    UnknownMember {
+        type_name: String,
+    },
+    /// Something that is not a method or delegate was called.
+    NotCallable {
+        type_name: String,
+    },
+    /// No overload accepts these arguments.
+    NoMatchingOverload,
+    /// More than one overload fits equally well.
+    AmbiguousOverload,
+    /// Generic method type arguments could not be inferred from the arguments;
+    /// writing them explicitly avoids this error.
+    CannotInferTypeArguments,
+    /// The type cannot be worked out here; writing it explicitly avoids this error.
+    TypeAnnotationNeeded,
+    /// No implicit conversion from `found` to `expected`.
+    TypeMismatch {
+        expected: String,
+        found: String,
+    },
+    /// An `if`/`while`/`for` condition that is not `bool`.
+    ConditionNotBoolean {
+        found: String,
+    },
+    /// No built-in or user-defined operator takes these operands.
+    InvalidOperator {
+        left: String,
+        right: Option<String>,
+    },
+    /// An instance member used where no instance exists.
+    InstanceMemberInStaticContext,
+    /// A static member accessed through an instance.
+    StaticMemberViaInstance,
+    /// A type name in a position that needs a value.
+    TypeUsedAsValue,
+    /// A namespace name in a position that needs a value.
+    NamespaceUsedAsValue,
+    /// Indexing something that has no indexer.
+    NotIndexable {
+        type_name: String,
+    },
+    /// `foreach` over something with no element type.
+    NotEnumerable {
+        type_name: String,
+    },
+    /// `return` with a value in a `void` member, or without one elsewhere.
+    ReturnValueMismatch,
+    /// A construct the checker does not handle yet. Temporary scaffolding: each of
+    /// these becomes a real implementation or a precise "unsupported on Udon"
+    /// diagnostic as the checker grows.
+    UnsupportedExpression,
+    UnsupportedStatement,
 }

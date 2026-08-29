@@ -506,6 +506,10 @@ impl ExternalTypes for ReferenceSet<'_> {
 
         members
     }
+
+    fn display_name(&self, id: ExternalTypeId) -> String {
+        ReferenceSet::display_name(self, id)
+    }
 }
 
 /// A parse failure tied to the file it came from.

@@ -64,6 +64,9 @@ pub enum Type {
     Tuple(Vec<TupleElement>),
     Dynamic,
     Void,
+    /// The type of the `null` literal: convertible to any reference or nullable
+    /// type, never the type of anything at runtime.
+    Null,
     /// `var` — to be filled in by type inference.
     Infer,
     /// Resolution failed; a diagnostic has been reported.

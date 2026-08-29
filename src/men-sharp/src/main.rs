@@ -14,7 +14,7 @@ use std::process::ExitCode;
 
 use men_sharp_compiler::{Compiler, CompilerSettings, ParsedFile, ReferenceSet, SourceCode};
 use men_sharp_semantics::{
-    Declarations, MemberSignature, Signatures, SymbolId, SymbolKind, Type, TypeTarget,
+    BodyCheck, Declarations, MemberSignature, Signatures, SymbolId, SymbolKind, Type, TypeTarget,
 };
 
 fn main() -> ExitCode {
@@ -93,8 +93,10 @@ fn main() -> ExitCode {
     let files = compiler.parse(sources);
     let declarations = compiler.collect_declarations(&files);
     let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
 
-    let error_count = report(&files, &declarations, &signatures);
+    let error_count = report(&files, &declarations, &signatures, &bodies);
+    println!("checked {} expressions", bodies.expression_types.len());
 
     println!("symbols ({} threads):", compiler.thread_count());
     let printer = Printer {
@@ -113,7 +115,12 @@ fn main() -> ExitCode {
 }
 
 /// Prints every parse and semantic error as `file:line:column: message`.
-fn report(files: &[ParsedFile], declarations: &Declarations, signatures: &Signatures) -> usize {
+fn report(
+    files: &[ParsedFile],
+    declarations: &Declarations,
+    signatures: &Signatures,
+    bodies: &BodyCheck,
+) -> usize {
     let mut count = 0;
 
     for file in files {
@@ -127,7 +134,12 @@ fn report(files: &[ParsedFile], declarations: &Declarations, signatures: &Signat
         }
     }
 
-    for error in declarations.errors.iter().chain(&signatures.errors) {
+    for error in declarations
+        .errors
+        .iter()
+        .chain(&signatures.errors)
+        .chain(&bodies.errors)
+    {
         let file = &files[error.file.0 as usize];
         let (line, column) = line_column(file.ast.source(), error.span.start);
         eprintln!("{}:{line}:{column}: error: {:?}", file.name, error.kind);
@@ -285,6 +297,7 @@ impl Printer<'_> {
             ),
             Type::Dynamic => "dynamic".to_string(),
             Type::Void => "void".to_string(),
+            Type::Null => "null".to_string(),
             Type::Infer => "var".to_string(),
             Type::Error => "<error>".to_string(),
         }

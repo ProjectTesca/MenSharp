@@ -130,15 +130,15 @@ pub fn resolve_file(
 // ---------------------------------------------------------------------------
 
 /// One enclosing namespace scope during the walk.
-struct NamespaceScope<'ast> {
+pub(crate) struct NamespaceScope<'ast> {
     /// Full dotted path from the root.
-    path: Vec<&'ast str>,
+    pub(crate) path: Vec<&'ast str>,
     /// The source symbol of this namespace, when the table has one.
-    symbol: Option<SymbolId>,
-    usings: Vec<ResolvedUsing<'ast>>,
+    pub(crate) symbol: Option<SymbolId>,
+    pub(crate) usings: Vec<ResolvedUsing<'ast>>,
 }
 
-enum ResolvedUsing<'ast> {
+pub(crate) enum ResolvedUsing<'ast> {
     /// `using A.B;`
     Namespace(Vec<&'ast str>),
     /// `using static T;` — brings T's nested types (and later, members) into scope.
@@ -152,7 +152,7 @@ enum ResolvedUsing<'ast> {
 
 /// What a (partial) name has resolved to while walking segments.
 #[derive(Clone)]
-enum Resolution<'ast> {
+pub(crate) enum Resolution<'ast> {
     Namespace {
         path: Vec<&'ast str>,
         symbol: Option<SymbolId>,
@@ -166,15 +166,15 @@ enum Resolution<'ast> {
     Error,
 }
 
-struct Resolver<'a, 'ast> {
-    declarations: &'a Declarations<'ast>,
-    external: &'a dyn ExternalTypes,
-    file: FileId,
-    out: Signatures,
+pub(crate) struct Resolver<'a, 'ast> {
+    pub(crate) declarations: &'a Declarations<'ast>,
+    pub(crate) external: &'a dyn ExternalTypes,
+    pub(crate) file: FileId,
+    pub(crate) out: Signatures,
 }
 
 impl<'ast> Resolver<'_, 'ast> {
-    fn error(&mut self, kind: SemanticErrorKind, span: Range<usize>) {
+    pub(crate) fn error(&mut self, kind: SemanticErrorKind, span: Range<usize>) {
         self.out.errors.push(SemanticError {
             kind,
             file: self.file,
@@ -468,7 +468,7 @@ impl<'ast> Resolver<'_, 'ast> {
 
     /// The heart of the phase: one written `TypeRef` to one [`Type`], recorded in
     /// the `type_of` side table.
-    fn resolve_type_ref(
+    pub(crate) fn resolve_type_ref(
         &mut self,
         node: &TypeRef<'ast, 'ast>,
         scopes: &[NamespaceScope<'ast>],
@@ -505,7 +505,7 @@ impl<'ast> Resolver<'_, 'ast> {
         resolved
     }
 
-    fn resolve_predefined(&mut self, predefined: &Spanned<PredefinedType>) -> Type {
+    pub(crate) fn resolve_predefined(&mut self, predefined: &Spanned<PredefinedType>) -> Type {
         let name = match predefined.value {
             PredefinedType::Void => return Type::Void,
             PredefinedType::Dynamic => return Type::Dynamic,
@@ -544,7 +544,7 @@ impl<'ast> Resolver<'_, 'ast> {
         }
     }
 
-    fn resolve_name_type(
+    pub(crate) fn resolve_name_type(
         &mut self,
         name: &NameType<'ast, 'ast>,
         scopes: &[NamespaceScope<'ast>],
@@ -620,7 +620,7 @@ impl<'ast> Resolver<'_, 'ast> {
 
     // ---------------------------------------------------------------- lookup
 
-    fn lookup_unqualified(
+    pub(crate) fn lookup_unqualified(
         &mut self,
         name: &'ast str,
         arity: u32,
@@ -628,12 +628,31 @@ impl<'ast> Resolver<'_, 'ast> {
         scopes: &[NamespaceScope<'ast>],
         type_stack: &[SymbolId],
     ) -> Resolution<'ast> {
+        match self.try_lookup_unqualified(name, arity, span, scopes, type_stack) {
+            Some(resolution) => resolution,
+            None => {
+                self.error(SemanticErrorKind::UnresolvedTypeName, span.clone());
+                Resolution::Error
+            }
+        }
+    }
+
+    /// [`Self::lookup_unqualified`] without the not-found diagnostic, for callers
+    /// (the body checker) that have a better message to give.
+    pub(crate) fn try_lookup_unqualified(
+        &mut self,
+        name: &'ast str,
+        arity: u32,
+        span: &Range<usize>,
+        scopes: &[NamespaceScope<'ast>],
+        type_stack: &[SymbolId],
+    ) -> Option<Resolution<'ast>> {
         // 1. type parameters of the enclosing method and types, innermost first
         if arity == 0 {
             for &owner in type_stack.iter().rev() {
                 for &parameter in &self.declarations.table.symbol(owner).type_parameters {
                     if self.declarations.table.symbol(parameter).name == name {
-                        return Resolution::TypeParameter(parameter);
+                        return Some(Resolution::TypeParameter(parameter));
                     }
                 }
             }
@@ -642,10 +661,10 @@ impl<'ast> Resolver<'_, 'ast> {
         // 2. nested types of the enclosing types, innermost first
         for &owner in type_stack.iter().rev() {
             if let Some(id) = self.source_type_in(owner, name, arity) {
-                return Resolution::Type {
+                return Some(Resolution::Type {
                     target: TypeTarget::Source(id),
                     arguments: Vec::new(),
-                };
+                });
             }
         }
 
@@ -653,44 +672,43 @@ impl<'ast> Resolver<'_, 'ast> {
         for scope in scopes.iter().rev() {
             if let Some(symbol) = scope.symbol {
                 if let Some(id) = self.source_type_in(symbol, name, arity) {
-                    return Resolution::Type {
+                    return Some(Resolution::Type {
                         target: TypeTarget::Source(id),
                         arguments: Vec::new(),
-                    };
+                    });
                 }
                 if arity == 0
                     && let Some(child) = self.source_namespace_in(symbol, name)
                 {
                     let mut path = scope.path.clone();
                     path.push(name);
-                    return Resolution::Namespace {
+                    return Some(Resolution::Namespace {
                         path,
                         symbol: Some(child),
-                    };
+                    });
                 }
             }
 
             if let Some(id) = self.external.find_type(&scope.path, name, arity) {
-                return Resolution::Type {
+                return Some(Resolution::Type {
                     target: TypeTarget::External(id),
                     arguments: Vec::new(),
-                };
+                });
             }
             if arity == 0 {
                 let mut path = scope.path.clone();
                 path.push(name);
                 if self.external.namespace_exists(&path) {
-                    return Resolution::Namespace { path, symbol: None };
+                    return Some(Resolution::Namespace { path, symbol: None });
                 }
             }
 
             if let Some(resolution) = self.lookup_in_usings(scope, name, arity, span) {
-                return resolution;
+                return Some(resolution);
             }
         }
 
-        self.error(SemanticErrorKind::UnresolvedTypeName, span.clone());
-        Resolution::Error
+        None
     }
 
     /// This scope's `using` directives: aliases, `using static` nested types, and
@@ -760,7 +778,7 @@ impl<'ast> Resolver<'_, 'ast> {
         found
     }
 
-    fn lookup_member(
+    pub(crate) fn lookup_member(
         &mut self,
         current: Resolution<'ast>,
         name: &'ast str,
@@ -889,7 +907,7 @@ impl<'ast> Resolver<'_, 'ast> {
 
     /// Resolves one `using` directive against the current scopes. `None` means the
     /// directive was broken and already reported (here or by the parser).
-    fn resolve_using(
+    pub(crate) fn resolve_using(
         &mut self,
         using: &UsingDirective<'ast, 'ast>,
         scopes: &[NamespaceScope<'ast>],
@@ -991,7 +1009,7 @@ fn segment_arity(segment: &NameSegment) -> u32 {
 /// Applies `?`, `[]` and `*` in C#'s reading order: `?` and `*` wrap what precedes
 /// them; a run of rank specifiers reads outermost-first (`int[][,]` is a `[]` array
 /// of `[,]` arrays).
-fn apply_suffixes(base: Type, suffixes: &[TypeSuffix]) -> Type {
+pub(crate) fn apply_suffixes(base: Type, suffixes: &[TypeSuffix]) -> Type {
     let mut current = base;
     let mut index = 0;
 
