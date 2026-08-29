@@ -28,6 +28,7 @@
 pub mod collect;
 pub mod error;
 pub mod external;
+pub mod lookup;
 pub mod merge;
 pub mod resolve;
 pub mod symbol;
@@ -37,10 +38,16 @@ pub use collect::{
     DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode, collect_file,
 };
 pub use error::{SemanticError, SemanticErrorKind};
-pub use external::{ExternalTypes, NoExternalTypes};
+pub use external::{
+    ExternalMember, ExternalMemberKind, ExternalTypeInfo, ExternalTypeKind, ExternalTypes,
+    NoExternalTypes,
+};
+pub use lookup::{MemberCandidate, MemberOrigin, TypeSystem};
 pub use merge::{Declarations, merge_declarations};
 pub use resolve::{Signatures, resolve_file, resolve_signatures};
-pub use symbol::{DeclarationSite, FileId, Symbol, SymbolId, SymbolKind, SymbolTable, SyntaxRef};
+pub use symbol::{
+    Accessibility, DeclarationSite, FileId, Symbol, SymbolId, SymbolKind, SymbolTable, SyntaxRef,
+};
 pub use types::{
     ExternalTypeId, FunctionSignature, MemberSignature, ParameterPassing, ParameterSignature,
     TupleElement, Type, TypeTarget,
@@ -396,6 +403,35 @@ mod tests {
                 .iter()
                 .any(|&(ns, ..)| ns == joined || ns.starts_with(&format!("{joined}.")))
         }
+
+        fn type_info(&self, id: crate::types::ExternalTypeId) -> crate::ExternalTypeInfo {
+            crate::ExternalTypeInfo {
+                kind: crate::ExternalTypeKind::Class,
+                arity: self
+                    .types
+                    .get(id.type_index as usize)
+                    .map(|&(.., arity)| arity)
+                    .unwrap_or(0),
+                is_sealed: false,
+                is_abstract: false,
+            }
+        }
+
+        fn base_type(&self, _: crate::types::ExternalTypeId) -> Option<Type> {
+            None
+        }
+
+        fn interfaces(&self, _: crate::types::ExternalTypeId) -> Vec<Type> {
+            Vec::new()
+        }
+
+        fn members_named(
+            &self,
+            _: crate::types::ExternalTypeId,
+            _: &str,
+        ) -> Vec<crate::ExternalMember> {
+            Vec::new()
+        }
     }
 
     fn external(id: ExternalTypeId) -> Type {
@@ -728,6 +764,157 @@ mod tests {
             member_signature(&declarations, &signatures, "App.User", "missing"),
             MemberSignature::Field(Type::Error)
         );
+    }
+
+    // --------------------------------------------------------- member lookup
+
+    use crate::lookup::{MemberOrigin, TypeSystem};
+
+    fn named_source(symbol: SymbolId, arguments: Vec<Type>) -> Type {
+        Type::Named {
+            target: TypeTarget::Source(symbol),
+            arguments,
+        }
+    }
+
+    #[test]
+    fn inherited_members_come_back_instantiated() {
+        declarations!(
+            declarations,
+            r#"
+            public class Base<T>
+            {
+                public T Value;
+                public void SetValue(T value) {}
+            }
+            public class Derived : Base<int>
+            {
+                public string Name;
+            }
+            "#,
+        );
+        let mock = MockExternal::corlib();
+        let signatures = resolve_signatures(&declarations, &mock);
+        assert_eq!(signatures.errors, vec![]);
+
+        let system = TypeSystem {
+            declarations: &declarations,
+            signatures: &signatures,
+            external: &mock,
+        };
+
+        let derived = named_source(find(&declarations, "Derived"), Vec::new());
+        let int32 = external(mock.id_of("System", "Int32"));
+
+        // Base<T>.Value reached through Derived : Base<int> becomes int
+        let value = system.members_named(&derived, "Value");
+        assert_eq!(value.len(), 1);
+        assert_eq!(
+            value[0].signature,
+            Some(MemberSignature::Field(int32.clone()))
+        );
+        assert_eq!(
+            value[0].declaring_type,
+            named_source(find(&declarations, "Base"), vec![int32.clone()])
+        );
+
+        // and so does the parameter of SetValue(T)
+        let set_value = system.members_named(&derived, "SetValue");
+        let Some(MemberSignature::Function(function)) = &set_value[0].signature else {
+            panic!("expected a function");
+        };
+        assert_eq!(function.parameters[0].parameter_type, int32);
+
+        // its own member is found on itself
+        let name = system.members_named(&derived, "Name");
+        assert_eq!(name.len(), 1);
+        assert_eq!(name[0].declaring_type, derived);
+    }
+
+    #[test]
+    fn lookup_returns_all_candidates_nearest_first() {
+        declarations!(
+            declarations,
+            r#"
+            public class A { public void F() {} }
+            public class B : A { public static void F(int x) {} }
+            "#,
+        );
+        let mock = MockExternal::corlib();
+        let signatures = resolve_signatures(&declarations, &mock);
+        let system = TypeSystem {
+            declarations: &declarations,
+            signatures: &signatures,
+            external: &mock,
+        };
+
+        let b = named_source(find(&declarations, "B"), Vec::new());
+        let candidates = system.members_named(&b, "F");
+
+        assert_eq!(candidates.len(), 2);
+        // B's own overload first, with its modifiers readable
+        assert_eq!(candidates[0].declaring_type, b);
+        assert!(candidates[0].is_static);
+        assert_eq!(candidates[0].accessibility, crate::Accessibility::Public);
+        assert_eq!(
+            candidates[1].declaring_type,
+            named_source(find(&declarations, "A"), Vec::new())
+        );
+        assert!(!candidates[1].is_static);
+    }
+
+    #[test]
+    fn interfaces_and_type_parameters_walk_their_hierarchies() {
+        declarations!(
+            declarations,
+            r#"
+            public interface IAnimal { void Speak(); }
+            public interface IDog : IAnimal { void Fetch(); }
+            public class Kennel<T> where T : IDog
+            {
+                public void Handle(T dog) {}
+            }
+            "#,
+        );
+        let mock = MockExternal::corlib();
+        let signatures = resolve_signatures(&declarations, &mock);
+        assert_eq!(signatures.errors, vec![]);
+        let system = TypeSystem {
+            declarations: &declarations,
+            signatures: &signatures,
+            external: &mock,
+        };
+
+        // an interface receiver sees members of the interfaces it extends
+        let dog = named_source(find(&declarations, "IDog"), Vec::new());
+        assert_eq!(system.members_named(&dog, "Fetch").len(), 1);
+        assert_eq!(system.members_named(&dog, "Speak").len(), 1);
+
+        // a constrained type parameter sees its bound's members
+        let kennel = find(&declarations, "Kennel");
+        let t = declarations.table.symbol(kennel).type_parameters[0];
+        let speak = system.members_named(&Type::TypeParameter(t), "Speak");
+        assert_eq!(speak.len(), 1);
+        assert!(matches!(speak[0].origin, MemberOrigin::Source(_)));
+    }
+
+    #[test]
+    fn enum_members_surface_without_signatures() {
+        declarations!(declarations, "public enum Color { Red, Green }");
+        let mock = MockExternal::corlib();
+        let signatures = resolve_signatures(&declarations, &mock);
+        let system = TypeSystem {
+            declarations: &declarations,
+            signatures: &signatures,
+            external: &mock,
+        };
+
+        let color = named_source(find(&declarations, "Color"), Vec::new());
+        let red = system.members_named(&color, "Red");
+        assert_eq!(red.len(), 1);
+        assert_eq!(red[0].kind, SymbolKind::EnumMember);
+        assert!(red[0].is_static);
+        assert_eq!(red[0].signature, None);
     }
 
     #[test]

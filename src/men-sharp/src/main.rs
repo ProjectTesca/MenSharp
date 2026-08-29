@@ -257,6 +257,7 @@ impl Printer<'_> {
             }
             Type::TypeParameter(symbol) => self.declarations.table.symbol(*symbol).name.to_string(),
             Type::ExternalTypeParameter { index, .. } => format!("!{index}"),
+            Type::ExternalMethodTypeParameter(index) => format!("!!{index}"),
             Type::Array { element, rank } => {
                 format!(
                     "{}[{}]",

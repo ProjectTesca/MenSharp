@@ -22,7 +22,9 @@ use men_sharp_parser::ast::{
     NamespaceDeclaration, NamespaceMember, Spanned, TypeDeclaration, TypeMember, UsingDirective,
 };
 
-use crate::symbol::{FileId, SymbolKind, SyntaxRef, conversion_operator_name, operator_name};
+use crate::symbol::{
+    Accessibility, FileId, SymbolKind, SyntaxRef, conversion_operator_name, operator_name,
+};
 
 /// Everything one file declares, in source order.
 #[derive(Debug)]
@@ -59,6 +61,9 @@ pub struct TypeNode<'ast> {
     pub span: Range<usize>,
     pub arity: u32,
     pub is_partial: bool,
+    pub is_static: bool,
+    /// Written accessibility; `None` lets the merge pick the container's default.
+    pub accessibility: Option<Accessibility>,
     pub type_parameters: Vec<&'ast GenericsParameter<'ast, 'ast>>,
     pub members: Vec<MemberNode<'ast>>,
     pub nested: Vec<TypeNode<'ast>>,
@@ -74,6 +79,8 @@ pub struct MemberNode<'ast> {
     pub type_parameters: Vec<&'ast GenericsParameter<'ast, 'ast>>,
     pub is_partial: bool,
     pub is_explicit_implementation: bool,
+    pub is_static: bool,
+    pub accessibility: Option<Accessibility>,
 }
 
 pub fn collect_file<'ast>(
@@ -138,6 +145,8 @@ fn collect_class<'ast>(class: &'ast ClassDeclaration<'ast, 'ast>) -> Option<Type
         span: name.span.clone(),
         arity: arity_of(&class.generics),
         is_partial: is_partial(class.modifiers),
+        is_static: is_static(class.modifiers),
+        accessibility: accessibility_of(class.modifiers),
         type_parameters: type_parameters_of(&class.generics),
         members,
         nested,
@@ -160,6 +169,9 @@ fn collect_enum<'ast>(declaration: &'ast EnumDeclaration<'ast, 'ast>) -> Option<
             type_parameters: Vec::new(),
             is_partial: false,
             is_explicit_implementation: false,
+            // an enum member is a public constant of its enum
+            is_static: true,
+            accessibility: None,
         })
         .collect();
 
@@ -170,6 +182,8 @@ fn collect_enum<'ast>(declaration: &'ast EnumDeclaration<'ast, 'ast>) -> Option<
         span: name.span.clone(),
         arity: 0,
         is_partial: false,
+        is_static: false,
+        accessibility: accessibility_of(declaration.modifiers),
         type_parameters: Vec::new(),
         members,
         nested: Vec::new(),
@@ -188,6 +202,8 @@ fn collect_delegate<'ast>(
         span: name.span.clone(),
         arity: arity_of(&declaration.generics),
         is_partial: false,
+        is_static: false,
+        accessibility: accessibility_of(declaration.modifiers),
         type_parameters: type_parameters_of(&declaration.generics),
         members: Vec::new(),
         nested: Vec::new(),
@@ -210,6 +226,8 @@ fn collect_type_member<'ast>(
             type_parameters: type_parameters_of(&method.generics),
             is_partial: is_partial(method.modifiers),
             is_explicit_implementation: method.explicit_interface.is_some(),
+            is_static: is_static(method.modifiers),
+            accessibility: accessibility_of(method.modifiers),
         }),
         TypeMember::Property(property) => members.push(MemberNode {
             syntax: SyntaxRef::Property(property),
@@ -220,6 +238,8 @@ fn collect_type_member<'ast>(
             type_parameters: Vec::new(),
             is_partial: is_partial(property.modifiers),
             is_explicit_implementation: property.explicit_interface.is_some(),
+            is_static: is_static(property.modifiers),
+            accessibility: accessibility_of(property.modifiers),
         }),
         TypeMember::Indexer(indexer) => members.push(MemberNode {
             syntax: SyntaxRef::Indexer(indexer),
@@ -230,6 +250,8 @@ fn collect_type_member<'ast>(
             type_parameters: Vec::new(),
             is_partial: false,
             is_explicit_implementation: indexer.explicit_interface.is_some(),
+            is_static: false,
+            accessibility: accessibility_of(indexer.modifiers),
         }),
         TypeMember::Event(event) => collect_event(event, members),
         TypeMember::Constructor(constructor) => members.push(MemberNode {
@@ -241,6 +263,8 @@ fn collect_type_member<'ast>(
             type_parameters: Vec::new(),
             is_partial: false,
             is_explicit_implementation: false,
+            is_static: is_static(constructor.modifiers),
+            accessibility: accessibility_of(constructor.modifiers),
         }),
         TypeMember::Destructor(destructor) => members.push(MemberNode {
             syntax: SyntaxRef::Destructor(destructor),
@@ -251,6 +275,8 @@ fn collect_type_member<'ast>(
             type_parameters: Vec::new(),
             is_partial: false,
             is_explicit_implementation: false,
+            is_static: false,
+            accessibility: None,
         }),
         TypeMember::Operator(operator) => {
             let parameter_count = operator
@@ -277,6 +303,9 @@ fn collect_type_member<'ast>(
                 type_parameters: Vec::new(),
                 is_partial: false,
                 is_explicit_implementation: false,
+                // overloaded operators are always static in C#
+                is_static: true,
+                accessibility: accessibility_of(operator.modifiers),
             });
         }
         TypeMember::NestedType(declaration) => {
@@ -301,6 +330,13 @@ fn collect_field<'ast>(
             type_parameters: Vec::new(),
             is_partial: false,
             is_explicit_implementation: false,
+            // a `const` field is implicitly static
+            is_static: is_static(field.modifiers)
+                || field
+                    .modifiers
+                    .iter()
+                    .any(|modifier| modifier.value == Modifier::Const),
+            accessibility: accessibility_of(field.modifiers),
         });
     }
 }
@@ -319,6 +355,8 @@ fn collect_event<'ast>(
             type_parameters: Vec::new(),
             is_partial: false,
             is_explicit_implementation: event.explicit_interface.is_some(),
+            is_static: is_static(event.modifiers),
+            accessibility: accessibility_of(event.modifiers),
         });
     }
 }
@@ -343,4 +381,33 @@ fn is_partial(modifiers: &[Spanned<Modifier>]) -> bool {
     modifiers
         .iter()
         .any(|modifier| modifier.value == Modifier::Partial)
+}
+
+fn is_static(modifiers: &[Spanned<Modifier>]) -> bool {
+    modifiers
+        .iter()
+        .any(|modifier| modifier.value == Modifier::Static)
+}
+
+/// The written accessibility, combining the two-keyword forms.
+fn accessibility_of(modifiers: &[Spanned<Modifier>]) -> Option<Accessibility> {
+    let has = |wanted: Modifier| modifiers.iter().any(|modifier| modifier.value == wanted);
+
+    if has(Modifier::Public) {
+        Some(Accessibility::Public)
+    } else if has(Modifier::Protected) && has(Modifier::Internal) {
+        Some(Accessibility::ProtectedInternal)
+    } else if has(Modifier::Protected) && has(Modifier::Private) {
+        Some(Accessibility::PrivateProtected)
+    } else if has(Modifier::Protected) {
+        Some(Accessibility::Protected)
+    } else if has(Modifier::Internal) {
+        Some(Accessibility::Internal)
+    } else if has(Modifier::File) {
+        Some(Accessibility::File)
+    } else if has(Modifier::Private) {
+        Some(Accessibility::Private)
+    } else {
+        None
+    }
 }

@@ -40,11 +40,14 @@ pub enum Type {
     },
     /// A generic parameter, by its symbol in the table.
     TypeParameter(SymbolId),
-    /// A generic parameter of an external type or method, by position.
+    /// A generic parameter of an external type, by position (metadata `!0`).
     ExternalTypeParameter {
         owner: ExternalTypeId,
         index: u32,
     },
+    /// A generic parameter of the external method a signature belongs to, by
+    /// position (metadata `!!0`). Only meaningful inside that method's signature.
+    ExternalMethodTypeParameter(u32),
     Array {
         element: Box<Type>,
         rank: u32,
@@ -104,4 +107,64 @@ pub enum MemberSignature {
     Property(Type),
     Event(Type),
     Function(FunctionSignature),
+}
+
+impl Type {
+    /// Rebuilds this type with `replace` applied at every position, leaves first.
+    /// `replace` sees each rebuilt node and may swap it for something else; this is
+    /// the primitive behind generic substitution.
+    pub fn map(&self, replace: &impl Fn(Type) -> Type) -> Type {
+        let rebuilt = match self {
+            Type::Named { target, arguments } => Type::Named {
+                target: *target,
+                arguments: arguments
+                    .iter()
+                    .map(|argument| argument.map(replace))
+                    .collect(),
+            },
+            Type::Array { element, rank } => Type::Array {
+                element: Box::new(element.map(replace)),
+                rank: *rank,
+            },
+            Type::Pointer(element) => Type::Pointer(Box::new(element.map(replace))),
+            Type::Nullable(element) => Type::Nullable(Box::new(element.map(replace))),
+            Type::ByRef { readonly, element } => Type::ByRef {
+                readonly: *readonly,
+                element: Box::new(element.map(replace)),
+            },
+            Type::Tuple(elements) => Type::Tuple(
+                elements
+                    .iter()
+                    .map(|element| TupleElement {
+                        name: element.name.clone(),
+                        element: element.element.map(replace),
+                    })
+                    .collect(),
+            ),
+            other => other.clone(),
+        };
+        replace(rebuilt)
+    }
+}
+
+impl MemberSignature {
+    pub fn map(&self, replace: &impl Fn(Type) -> Type) -> MemberSignature {
+        match self {
+            MemberSignature::Field(field) => MemberSignature::Field(field.map(replace)),
+            MemberSignature::Property(property) => MemberSignature::Property(property.map(replace)),
+            MemberSignature::Event(event) => MemberSignature::Event(event.map(replace)),
+            MemberSignature::Function(function) => MemberSignature::Function(FunctionSignature {
+                return_type: function.return_type.map(replace),
+                parameters: function
+                    .parameters
+                    .iter()
+                    .map(|parameter| ParameterSignature {
+                        passing: parameter.passing,
+                        is_params: parameter.is_params,
+                        parameter_type: parameter.parameter_type.map(replace),
+                    })
+                    .collect(),
+            }),
+        }
+    }
 }

@@ -79,6 +79,21 @@ impl SymbolKind {
     }
 }
 
+/// C# accessibility, source and metadata alike.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Accessibility {
+    Public,
+    Internal,
+    Protected,
+    /// `protected internal`.
+    ProtectedInternal,
+    /// `private protected`.
+    PrivateProtected,
+    Private,
+    /// C# 11 `file`.
+    File,
+}
+
 impl From<ClassKind> for SymbolKind {
     fn from(kind: ClassKind) -> Self {
         match kind {
@@ -179,6 +194,10 @@ pub struct Symbol<'ast> {
     pub declarations: Vec<DeclarationSite<'ast>>,
     /// Whether every declaration carried the `partial` modifier.
     pub is_partial: bool,
+    pub is_static: bool,
+    /// Written accessibility, or the container's default (members `private`,
+    /// interface members `public`, top-level types `internal`, ...).
+    pub accessibility: Accessibility,
     /// `void IFoo.Bar()` — excluded from ordinary member lookup and name-clash rules.
     pub is_explicit_implementation: bool,
     /// Nested symbols in declaration order: namespace members, type members and
@@ -218,6 +237,8 @@ impl<'ast> SymbolTable<'ast> {
             parent: None,
             declarations: Vec::new(),
             is_partial: false,
+            is_static: false,
+            accessibility: Accessibility::Public,
             is_explicit_implementation: false,
             members: Vec::new(),
             type_parameters: Vec::new(),
@@ -320,6 +341,8 @@ pub(crate) fn new_symbol<'ast>(
         parent: None,
         declarations: vec![site],
         is_partial: false,
+        is_static: false,
+        accessibility: Accessibility::Public,
         is_explicit_implementation: false,
         members: Vec::new(),
         type_parameters: Vec::new(),

@@ -1,19 +1,34 @@
 //! Referenced assemblies as an [`ExternalTypes`] provider.
 //!
 //! The driver reads dll files into byte buffers (which the caller keeps alive),
-//! parses each with `men-sharp-dotnet`, and indexes every externally visible
-//! top-level type by `(namespace, name, arity)` plus every namespace prefix. That
-//! is exactly the shape `men-sharp-semantics` asks its [`ExternalTypes`] trait —
-//! the semantic layer never learns that dlls were involved.
+//! parses each with `men-sharp-dotnet`, and serves the semantic layer's questions:
+//! name lookup over every externally visible type, and — through the conversion in
+//! this module — base types, interfaces and member signatures as semantic
+//! [`Type`]s. The semantic layer never learns that dlls were involved.
 //!
-//! When several assemblies declare the same type name the first one given wins;
-//! type forwarders (facade assemblies) are not chased yet — reference the assembly
-//! that really defines the types, as Unity projects naturally do.
+//! Two pieces of cross-assembly plumbing live here:
+//!
+//! - **TypeRef chasing**: a signature in `UnityEngine.CoreModule.dll` may name a
+//!   type as "`System.Object` in assembly `mscorlib`"; the token is resolved into
+//!   whichever loaded assembly really defines it.
+//! - **Type forwarders**: facade assemblies (`netstandard.dll`, `System.Runtime`)
+//!   define nothing and forward everything; when a name is not defined where a
+//!   reference points, its forwarder entry redirects the search, transitively.
+//!
+//! When several assemblies define the same top-level name the first one given wins.
+//! `params` on external methods is not detected yet (it lives in a custom
+//! attribute, which the metadata reader does not decode).
 
 use std::collections::{HashMap, HashSet};
 
-use men_sharp_dotnet::{DotNetAssembly, MetadataError};
-use men_sharp_semantics::{ExternalTypeId, ExternalTypes};
+use men_sharp_dotnet::{
+    DotNetAssembly, MetadataError, MethodSig, TypeDefinition, TypeSig, TypeToken,
+};
+use men_sharp_semantics::{
+    Accessibility, ExternalMember, ExternalMemberKind, ExternalTypeId, ExternalTypeInfo,
+    ExternalTypeKind, ExternalTypes, FunctionSignature, MemberSignature, ParameterPassing,
+    ParameterSignature, Type, TypeTarget,
+};
 
 pub struct ReferenceSet<'data> {
     assemblies: Vec<DotNetAssembly<'data>>,
@@ -21,6 +36,9 @@ pub struct ReferenceSet<'data> {
     types: HashMap<(&'data str, &'data str, u32), ExternalTypeId>,
     /// Every dotted namespace prefix that exists in any referenced assembly.
     namespaces: HashSet<&'data str>,
+    assembly_by_name: HashMap<&'data str, u32>,
+    /// Per assembly: (namespace, metadata name) -> the assembly it forwards to.
+    forwarders: Vec<HashMap<(&'data str, &'data str), &'data str>>,
 }
 
 impl<'data> ReferenceSet<'data> {
@@ -28,8 +46,22 @@ impl<'data> ReferenceSet<'data> {
     pub fn new(assemblies: Vec<DotNetAssembly<'data>>) -> Self {
         let mut types = HashMap::new();
         let mut namespaces = HashSet::new();
+        let mut assembly_by_name = HashMap::new();
+        let mut forwarders = Vec::with_capacity(assemblies.len());
 
         for (assembly_index, assembly) in assemblies.iter().enumerate() {
+            assembly_by_name
+                .entry(assembly.name)
+                .or_insert(assembly_index as u32);
+
+            forwarders.push(
+                assembly
+                    .forwarders
+                    .iter()
+                    .map(|forwarder| ((forwarder.namespace, forwarder.name), forwarder.assembly))
+                    .collect::<HashMap<_, _>>(),
+            );
+
             for (type_index, definition) in assembly.types.iter().enumerate() {
                 if definition.enclosing_type.is_some()
                     || !assembly.is_externally_visible(type_index as u32)
@@ -65,6 +97,8 @@ impl<'data> ReferenceSet<'data> {
             assemblies,
             types,
             namespaces,
+            assembly_by_name,
+            forwarders,
         }
     }
 
@@ -73,7 +107,7 @@ impl<'data> ReferenceSet<'data> {
     }
 
     /// The definition behind an id handed out by this provider.
-    pub fn type_definition(&self, id: ExternalTypeId) -> &men_sharp_dotnet::TypeDefinition<'data> {
+    pub fn type_definition(&self, id: ExternalTypeId) -> &TypeDefinition<'data> {
         self.assemblies[id.assembly as usize].type_definition(id.type_index)
     }
 
@@ -85,6 +119,209 @@ impl<'data> ReferenceSet<'data> {
         } else {
             format!("{}.{}", definition.namespace, definition.name)
         }
+    }
+
+    // ------------------------------------------------- cross-assembly lookup
+
+    /// A type by metadata path (`namespace` + nesting chain of metadata names),
+    /// starting in one assembly and following type forwarders until it lands on a
+    /// real definition.
+    fn resolve_metadata_path(
+        &self,
+        assembly_index: u32,
+        namespace: &str,
+        names: &[&str],
+    ) -> Option<ExternalTypeId> {
+        let first = *names.first()?;
+
+        let mut current = assembly_index;
+        let mut hops = 0;
+        let top = loop {
+            let assembly = &self.assemblies[current as usize];
+            if let Some(top) = assembly.find_type(namespace, first) {
+                break top;
+            }
+
+            // not defined here: follow the forwarder, if there is one
+            let target = self.forwarders[current as usize].get(&(namespace, first))?;
+            current = *self.assembly_by_name.get(target)?;
+            hops += 1;
+            if hops > self.assemblies.len() {
+                return None; // a forwarder cycle in broken metadata
+            }
+        };
+
+        // walk the nesting chain by metadata name
+        let assembly = &self.assemblies[current as usize];
+        let mut index = top;
+        for name in &names[1..] {
+            index = assembly
+                .type_definition(index)
+                .nested_types
+                .iter()
+                .copied()
+                .find(|&nested| assembly.type_definition(nested).name == *name)?;
+        }
+
+        Some(ExternalTypeId {
+            assembly: current,
+            type_index: index,
+        })
+    }
+
+    /// A raw signature token from `within` into a provider-wide type id.
+    fn resolve_token(&self, within: u32, token: TypeToken) -> Option<ExternalTypeId> {
+        match token {
+            TypeToken::Definition(index) => Some(ExternalTypeId {
+                assembly: within,
+                type_index: index,
+            }),
+            TypeToken::Reference(_) => {
+                let path = self.assemblies[within as usize].token_path(token)?;
+                let assembly = match path.assembly {
+                    Some(name) => *self.assembly_by_name.get(name)?,
+                    None => within,
+                };
+                self.resolve_metadata_path(assembly, path.namespace, &path.names)
+            }
+            // never appears inside CLASS/VALUETYPE positions of a signature
+            TypeToken::Specification(_) => None,
+        }
+    }
+
+    // ------------------------------------------------------------ conversion
+
+    /// A metadata signature into a semantic [`Type`]. `owner` is the type whose
+    /// declaration the signature appears in — its generic parameters are what
+    /// `!n` refers to.
+    fn convert(&self, owner: ExternalTypeId, sig: &TypeSig) -> Type {
+        match sig {
+            TypeSig::Void => Type::Void,
+            TypeSig::Boolean => self.corlib("Boolean"),
+            TypeSig::Char => self.corlib("Char"),
+            TypeSig::SByte => self.corlib("SByte"),
+            TypeSig::Byte => self.corlib("Byte"),
+            TypeSig::Int16 => self.corlib("Int16"),
+            TypeSig::UInt16 => self.corlib("UInt16"),
+            TypeSig::Int32 => self.corlib("Int32"),
+            TypeSig::UInt32 => self.corlib("UInt32"),
+            TypeSig::Int64 => self.corlib("Int64"),
+            TypeSig::UInt64 => self.corlib("UInt64"),
+            TypeSig::Single => self.corlib("Single"),
+            TypeSig::Double => self.corlib("Double"),
+            TypeSig::String => self.corlib("String"),
+            TypeSig::Object => self.corlib("Object"),
+            TypeSig::IntPtr => self.corlib("IntPtr"),
+            TypeSig::UIntPtr => self.corlib("UIntPtr"),
+            TypeSig::Named { token, .. } => match self.resolve_token(owner.assembly, *token) {
+                Some(id) => Type::Named {
+                    target: TypeTarget::External(id),
+                    arguments: Vec::new(),
+                },
+                None => Type::Error,
+            },
+            TypeSig::Generic {
+                token, arguments, ..
+            } => match self.resolve_token(owner.assembly, *token) {
+                Some(id) => Type::Named {
+                    target: TypeTarget::External(id),
+                    arguments: arguments
+                        .iter()
+                        .map(|argument| self.convert(owner, argument))
+                        .collect(),
+                },
+                None => Type::Error,
+            },
+            TypeSig::SzArray(element) => Type::Array {
+                element: Box::new(self.convert(owner, element)),
+                rank: 1,
+            },
+            TypeSig::Array { element, rank } => Type::Array {
+                element: Box::new(self.convert(owner, element)),
+                rank: *rank,
+            },
+            TypeSig::Pointer(element) => Type::Pointer(Box::new(self.convert(owner, element))),
+            TypeSig::ByRef(element) => Type::ByRef {
+                readonly: false,
+                element: Box::new(self.convert(owner, element)),
+            },
+            TypeSig::TypeParameter(index) => Type::ExternalTypeParameter {
+                owner,
+                index: *index,
+            },
+            TypeSig::MethodTypeParameter(index) => Type::ExternalMethodTypeParameter(*index),
+            // no shape Udon could ever call; surfaced as an error type if used
+            TypeSig::TypedReference | TypeSig::FunctionPointer => Type::Error,
+        }
+    }
+
+    fn corlib(&self, name: &str) -> Type {
+        match self.types.get(&("System", name, 0)) {
+            Some(&id) => Type::Named {
+                target: TypeTarget::External(id),
+                arguments: Vec::new(),
+            },
+            None => Type::Error,
+        }
+    }
+
+    fn convert_function(
+        &self,
+        owner: ExternalTypeId,
+        signature: &MethodSig,
+        out_flags: &[bool],
+    ) -> FunctionSignature {
+        FunctionSignature {
+            return_type: self.convert(owner, &signature.return_type),
+            parameters: signature
+                .parameters
+                .iter()
+                .enumerate()
+                .map(|(index, parameter)| {
+                    let converted = self.convert(owner, parameter);
+                    // metadata spells `ref`/`out` as a byref type plus a flag
+                    let (passing, parameter_type) = match converted {
+                        Type::ByRef { element, .. } => (
+                            if out_flags.get(index).copied().unwrap_or(false) {
+                                ParameterPassing::Out
+                            } else {
+                                ParameterPassing::Ref
+                            },
+                            *element,
+                        ),
+                        other => (ParameterPassing::Value, other),
+                    };
+                    ParameterSignature {
+                        passing,
+                        is_params: false,
+                        parameter_type,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    /// A delegate extends `System.MulticastDelegate` (or `System.Delegate`).
+    fn is_delegate(&self, definition: &TypeDefinition, id: ExternalTypeId) -> bool {
+        let Some(TypeSig::Named { token, .. }) = &definition.extends else {
+            return false;
+        };
+        let Some(path) = self.assemblies[id.assembly as usize].token_path(*token) else {
+            return false;
+        };
+        path.namespace == "System"
+            && matches!(path.names.as_slice(), ["MulticastDelegate"] | ["Delegate"])
+    }
+}
+
+fn accessibility_from(access_bits: u16) -> Accessibility {
+    match access_bits & 0x7 {
+        0x6 => Accessibility::Public,
+        0x5 => Accessibility::ProtectedInternal, // FamORAssem
+        0x4 => Accessibility::Protected,         // Family
+        0x3 => Accessibility::Internal,          // Assembly
+        0x2 => Accessibility::PrivateProtected,  // FamANDAssem
+        _ => Accessibility::Private,
     }
 }
 
@@ -120,6 +357,154 @@ impl ExternalTypes for ReferenceSet<'_> {
 
     fn namespace_exists(&self, namespace: &[&str]) -> bool {
         !namespace.is_empty() && self.namespaces.contains(namespace.join(".").as_str())
+    }
+
+    fn type_info(&self, id: ExternalTypeId) -> ExternalTypeInfo {
+        let definition = self.type_definition(id);
+
+        let kind = if definition.is_enum {
+            ExternalTypeKind::Enum
+        } else if definition.is_value_type {
+            ExternalTypeKind::Struct
+        } else if definition.is_interface() {
+            ExternalTypeKind::Interface
+        } else if self.is_delegate(definition, id) {
+            ExternalTypeKind::Delegate
+        } else {
+            ExternalTypeKind::Class
+        };
+
+        ExternalTypeInfo {
+            kind,
+            arity: definition.generic_parameters.len() as u32,
+            is_sealed: definition.is_sealed(),
+            is_abstract: definition.is_abstract(),
+        }
+    }
+
+    fn base_type(&self, id: ExternalTypeId) -> Option<Type> {
+        let extends = self.type_definition(id).extends.as_ref()?;
+        Some(self.convert(id, extends))
+    }
+
+    fn interfaces(&self, id: ExternalTypeId) -> Vec<Type> {
+        self.type_definition(id)
+            .interfaces
+            .iter()
+            .map(|interface| self.convert(id, interface))
+            .collect()
+    }
+
+    fn members_named(&self, id: ExternalTypeId, name: &str) -> Vec<ExternalMember> {
+        let definition = self.type_definition(id);
+        let mut members = Vec::new();
+
+        for field in &definition.fields {
+            if field.name == name {
+                members.push(ExternalMember {
+                    name: field.name.to_string(),
+                    kind: ExternalMemberKind::Field,
+                    is_static: field.is_static(),
+                    accessibility: accessibility_from(field.flags),
+                    signature: MemberSignature::Field(self.convert(id, &field.field_type)),
+                });
+            }
+        }
+
+        for method in &definition.methods {
+            if method.name != name {
+                continue;
+            }
+            let out_flags: Vec<bool> = method
+                .parameters
+                .iter()
+                .map(|parameter| parameter.is_out())
+                .collect();
+            members.push(ExternalMember {
+                name: method.name.to_string(),
+                kind: if method.name == ".ctor" || method.name == ".cctor" {
+                    ExternalMemberKind::Constructor
+                } else {
+                    ExternalMemberKind::Method {
+                        type_parameter_count: method.signature.generic_parameter_count,
+                    }
+                },
+                is_static: method.is_static(),
+                accessibility: accessibility_from(method.flags),
+                signature: MemberSignature::Function(self.convert_function(
+                    id,
+                    &method.signature,
+                    &out_flags,
+                )),
+            });
+        }
+
+        for property in &definition.properties {
+            if property.name != name {
+                continue;
+            }
+            // static-ness and accessibility live on the accessor methods
+            let accessor = property
+                .getter
+                .or(property.setter)
+                .map(|local| &definition.methods[local as usize]);
+
+            let signature = if property.signature.parameters.is_empty() {
+                MemberSignature::Property(self.convert(id, &property.signature.property_type))
+            } else {
+                // an indexer: parameters plus an element type
+                MemberSignature::Function(FunctionSignature {
+                    return_type: self.convert(id, &property.signature.property_type),
+                    parameters: property
+                        .signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| ParameterSignature {
+                            passing: ParameterPassing::Value,
+                            is_params: false,
+                            parameter_type: self.convert(id, parameter),
+                        })
+                        .collect(),
+                })
+            };
+
+            members.push(ExternalMember {
+                name: property.name.to_string(),
+                kind: ExternalMemberKind::Property {
+                    has_getter: property.getter.is_some(),
+                    has_setter: property.setter.is_some(),
+                },
+                is_static: accessor.map(|method| method.is_static()).unwrap_or(false),
+                accessibility: accessor
+                    .map(|method| accessibility_from(method.flags))
+                    .unwrap_or(Accessibility::Private),
+                signature,
+            });
+        }
+
+        for event in &definition.events {
+            if event.name != name {
+                continue;
+            }
+            let accessor = event.add.map(|local| &definition.methods[local as usize]);
+            members.push(ExternalMember {
+                name: event.name.to_string(),
+                kind: ExternalMemberKind::Event,
+                is_static: accessor.map(|method| method.is_static()).unwrap_or(false),
+                accessibility: accessor
+                    .map(|method| accessibility_from(method.flags))
+                    .unwrap_or(Accessibility::Private),
+                signature: MemberSignature::Event(
+                    event
+                        .event_type
+                        .as_ref()
+                        .map(|event_type| self.convert(id, event_type))
+                        .unwrap_or(Type::Error),
+                ),
+            });
+        }
+
+        members
     }
 }
 

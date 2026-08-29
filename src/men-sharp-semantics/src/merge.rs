@@ -20,7 +20,8 @@ use crate::{
     collect::{DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode},
     error::{SemanticError, SemanticErrorKind},
     symbol::{
-        DeclarationSite, FileId, Symbol, SymbolId, SymbolKind, SymbolTable, SyntaxRef, new_symbol,
+        Accessibility, DeclarationSite, FileId, Symbol, SymbolId, SymbolKind, SymbolTable,
+        SyntaxRef, new_symbol,
     },
 };
 
@@ -225,6 +226,16 @@ impl<'ast> Merger<'ast> {
 
                 let mut symbol = new_symbol(node.kind, node.name, node.arity, site);
                 symbol.is_partial = node.is_partial;
+                symbol.is_static = node.is_static;
+                symbol.accessibility = node.accessibility.unwrap_or(
+                    // top-level types default to internal, nested ones to private
+                    // (public inside an interface)
+                    match self.table.symbol(parent).kind {
+                        SymbolKind::Namespace => Accessibility::Internal,
+                        SymbolKind::Interface => Accessibility::Public,
+                        _ => Accessibility::Private,
+                    },
+                );
                 let id = self.table.add_member(parent, symbol);
 
                 // type parameters come from the first declaration only; C# requires
@@ -256,6 +267,14 @@ impl<'ast> Merger<'ast> {
         let mut symbol = new_symbol(node.kind, node.name, node.arity, site);
         symbol.is_partial = node.is_partial;
         symbol.is_explicit_implementation = node.is_explicit_implementation;
+        symbol.is_static = node.is_static;
+        symbol.accessibility = node.accessibility.unwrap_or(
+            // interface and enum members default to public, everything else private
+            match self.table.symbol(parent).kind {
+                SymbolKind::Interface | SymbolKind::Enum => Accessibility::Public,
+                _ => Accessibility::Private,
+            },
+        );
         let id = self.table.add_member(parent, symbol);
 
         self.add_type_parameters(id, file, &node.type_parameters);
