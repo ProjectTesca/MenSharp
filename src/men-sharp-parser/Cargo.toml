@@ -1,0 +1,11 @@
+[package]
+name = "men-sharp-parser"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+regex = "1.11.1"
+bumpalo = { version = "3.17.0", features = ["allocator-api2"] }
+allocator-api2 = "0.2.21"
+extension-fn = "1.2.0"
+typeid = "1.0.3"
