@@ -103,6 +103,8 @@ pub enum SemanticErrorKind {
     },
     /// `return` with a value in a `void` member, or without one elsewhere.
     ReturnValueMismatch,
+    /// A lambda whose parameter list does not fit the target delegate.
+    LambdaParameterMismatch,
     /// A construct the checker does not handle yet. Temporary scaffolding: each of
     /// these becomes a real implementation or a precise "unsupported on Udon"
     /// diagnostic as the checker grows.

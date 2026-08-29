@@ -198,6 +198,8 @@ pub struct Symbol<'ast> {
     /// Written accessibility, or the container's default (members `private`,
     /// interface members `public`, top-level types `internal`, ...).
     pub accessibility: Accessibility,
+    /// `out`/`in` on a type-parameter symbol; `Invariant` everywhere else.
+    pub variance: crate::types::TypeVariance,
     /// `void IFoo.Bar()` — excluded from ordinary member lookup and name-clash rules.
     pub is_explicit_implementation: bool,
     /// Nested symbols in declaration order: namespace members, type members and
@@ -239,6 +241,7 @@ impl<'ast> SymbolTable<'ast> {
             is_partial: false,
             is_static: false,
             accessibility: Accessibility::Public,
+            variance: crate::types::TypeVariance::Invariant,
             is_explicit_implementation: false,
             members: Vec::new(),
             type_parameters: Vec::new(),
@@ -343,6 +346,7 @@ pub(crate) fn new_symbol<'ast>(
         is_partial: false,
         is_static: false,
         accessibility: Accessibility::Public,
+        variance: crate::types::TypeVariance::Invariant,
         is_explicit_implementation: false,
         members: Vec::new(),
         type_parameters: Vec::new(),

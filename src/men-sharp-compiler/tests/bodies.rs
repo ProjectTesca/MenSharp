@@ -172,6 +172,78 @@ fn real_mistakes_are_caught_with_real_types() {
 }
 
 #[test]
+fn spec_inference_against_the_real_core_library() {
+    let Some(dir) = dotnet_shared_dir() else {
+        eprintln!("skipped: no .NET runtime on this machine");
+        return;
+    };
+
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let files = compiler.parse(vec![SourceCode::new(
+        "inference.cs",
+        r#"
+        using System;
+        using System.Collections.Generic;
+
+        public class Inference
+        {
+            // IEnumerable<T> parameters accept List<T> and T[] through lower-bound
+            // inference; the probes prove what T became
+            T FirstOf<T>(IEnumerable<T> items) { return default; }
+
+            void Run(List<string> names, int[] numbers)
+            {
+                string a = FirstOf(names);
+                int b = FirstOf(numbers);
+                int wrongA = FirstOf(names);
+
+                // List<T>.Find takes Predicate<T>: the lambda's x is a string here
+                var found = names.Find(x => x.Length > 2);
+                string c = found;
+
+                // ForEach takes Action<T>
+                names.ForEach(x => { var upper = x.ToUpper(); });
+
+                // Func/Action locals with their natural types, then as targets
+                Func<int, int> twice = x => x * 2;
+                Comparison<string> compare = (left, right) => left.Length - right.Length;
+                names.Sort(compare);
+
+                // a lambda body error surfaces inside the lambda
+                names.ForEach(x => { int broken = x; });
+            }
+        }
+        "#,
+    )]);
+
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+
+    let kinds: Vec<&SemanticErrorKind> = bodies.errors.iter().map(|error| &error.kind).collect();
+    assert_eq!(kinds.len(), 2, "{kinds:?}");
+    // wrongA: T really became string
+    assert_eq!(
+        *kinds[0],
+        SemanticErrorKind::TypeMismatch {
+            expected: "System.Int32".to_string(),
+            found: "System.String".to_string(),
+        }
+    );
+    // int broken = x; inside the ForEach lambda, where x: string
+    assert_eq!(
+        *kinds[1],
+        SemanticErrorKind::TypeMismatch {
+            expected: "System.Int32".to_string(),
+            found: "System.String".to_string(),
+        }
+    );
+}
+
+#[test]
 fn core_library_generics_flow_through_bodies() {
     let Some(dir) = dotnet_shared_dir() else {
         eprintln!("skipped: no .NET runtime on this machine");

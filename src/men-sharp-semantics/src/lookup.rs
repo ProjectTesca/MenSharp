@@ -306,7 +306,7 @@ impl TypeSystem<'_, '_> {
         }
     }
 
-    fn instantiate_signature(
+    pub(crate) fn instantiate_signature(
         &self,
         signature: &MemberSignature,
         owner: &TypeTarget,

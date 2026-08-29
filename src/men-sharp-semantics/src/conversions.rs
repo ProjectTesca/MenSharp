@@ -235,6 +235,34 @@ impl TypeSystem<'_, '_> {
             return true;
         }
 
+        // a single-dimensional array implements the generic collection interfaces
+        if let Type::Array { element, rank: 1 } = from
+            && let Type::Named {
+                target: TypeTarget::External(id),
+                arguments,
+            } = to
+            && arguments.len() == 1
+        {
+            let array_interface = [
+                "IEnumerable",
+                "ICollection",
+                "IList",
+                "IReadOnlyCollection",
+                "IReadOnlyList",
+            ]
+            .iter()
+            .any(|name| {
+                self.external
+                    .find_type(&["System", "Collections", "Generic"], name, 1)
+                    == Some(*id)
+            });
+            if array_interface {
+                return **element == arguments[0]
+                    || (self.is_reference_type(element)
+                        && self.is_implicitly_convertible(element, &arguments[0]));
+            }
+        }
+
         // a type parameter converts to its bounds (and whatever they convert to)
         if let Type::TypeParameter(symbol) = from {
             return self

@@ -27,7 +27,7 @@ use men_sharp_dotnet::{
 use men_sharp_semantics::{
     Accessibility, ExternalMember, ExternalMemberKind, ExternalTypeId, ExternalTypeInfo,
     ExternalTypeKind, ExternalTypes, FunctionSignature, MemberSignature, ParameterPassing,
-    ParameterSignature, Type, TypeTarget,
+    ParameterSignature, Type, TypeTarget, TypeVariance,
 };
 
 pub struct ReferenceSet<'data> {
@@ -509,6 +509,18 @@ impl ExternalTypes for ReferenceSet<'_> {
 
     fn display_name(&self, id: ExternalTypeId) -> String {
         ReferenceSet::display_name(self, id)
+    }
+
+    fn variances(&self, id: ExternalTypeId) -> Vec<TypeVariance> {
+        self.type_definition(id)
+            .generic_parameters
+            .iter()
+            .map(|parameter| match parameter.variance {
+                men_sharp_dotnet::Variance::Covariant => TypeVariance::Covariant,
+                men_sharp_dotnet::Variance::Contravariant => TypeVariance::Contravariant,
+                men_sharp_dotnet::Variance::Invariant => TypeVariance::Invariant,
+            })
+            .collect()
     }
 }
 

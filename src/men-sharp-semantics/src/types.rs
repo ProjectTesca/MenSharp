@@ -22,6 +22,17 @@ pub struct ExternalTypeId {
     pub type_index: u32,
 }
 
+/// Declaration-site variance of a generic parameter (`out T` / `in T`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum TypeVariance {
+    #[default]
+    Invariant,
+    /// `out T`.
+    Covariant,
+    /// `in T`.
+    Contravariant,
+}
+
 /// What a resolved type name refers to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TypeTarget {

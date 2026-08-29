@@ -15,7 +15,7 @@
 
 use crate::{
     symbol::Accessibility,
-    types::{ExternalTypeId, MemberSignature, Type},
+    types::{ExternalTypeId, MemberSignature, Type, TypeVariance},
 };
 
 /// What kind of thing an external type is.
@@ -99,6 +99,10 @@ pub trait ExternalTypes: Sync {
 
     /// A human-readable name (`UnityEngine.Debug`) for diagnostics.
     fn display_name(&self, id: ExternalTypeId) -> String;
+
+    /// Declaration-site variance per generic parameter, `IEnumerable<out T>`-style.
+    /// An empty vec means all parameters are invariant.
+    fn variances(&self, id: ExternalTypeId) -> Vec<TypeVariance>;
 }
 
 /// A provider with no types at all. Resolution still works for purely
@@ -141,5 +145,9 @@ impl ExternalTypes for NoExternalTypes {
 
     fn display_name(&self, id: ExternalTypeId) -> String {
         format!("<external {}:{}>", id.assembly, id.type_index)
+    }
+
+    fn variances(&self, _: ExternalTypeId) -> Vec<TypeVariance> {
+        Vec::new()
     }
 }

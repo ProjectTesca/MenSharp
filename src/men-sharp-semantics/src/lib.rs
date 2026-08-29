@@ -30,6 +30,7 @@ pub mod collect;
 pub mod conversions;
 pub mod error;
 pub mod external;
+mod infer;
 pub mod lookup;
 pub mod merge;
 pub mod resolve;
@@ -54,7 +55,7 @@ pub use symbol::{
 };
 pub use types::{
     ExternalTypeId, FunctionSignature, MemberSignature, ParameterPassing, ParameterSignature,
-    TupleElement, Type, TypeTarget,
+    TupleElement, Type, TypeTarget, TypeVariance,
 };
 
 #[cfg(test)]
@@ -369,6 +370,11 @@ mod tests {
                     ("System", "Array", 0),
                     ("System", "ValueType", 0),
                     ("System", "Enum", 0),
+                    ("System", "Func", 1),
+                    ("System", "Func", 2),
+                    ("System", "Func", 3),
+                    ("System", "Action", 0),
+                    ("System", "Action", 1),
                     ("System.Collections.Generic", "List", 1),
                     ("UnityEngine", "MonoBehaviour", 0),
                     ("UnityEngine", "Debug", 0),
@@ -466,6 +472,10 @@ mod tests {
                 .get(id.type_index as usize)
                 .map(|&(ns, name, _)| format!("{ns}.{name}"))
                 .unwrap_or_else(|| "<nested>".to_string())
+        }
+
+        fn variances(&self, _: crate::types::ExternalTypeId) -> Vec<crate::TypeVariance> {
+            Vec::new()
         }
     }
 
@@ -1254,7 +1264,6 @@ mod tests {
             {
                 void Run()
                 {
-                    var f = () => 1;
                     var q = from x in "abc" select x;
                 }
             }
@@ -1268,7 +1277,199 @@ mod tests {
                 .all(|kind| matches!(kind, SemanticErrorKind::UnsupportedExpression)),
             "{kinds:?}"
         );
-        assert_eq!(kinds.len(), 2);
+        assert_eq!(kinds.len(), 1);
+    }
+
+    // ---------------------------------------------- spec-shaped inference
+
+    #[test]
+    fn lower_bound_inference_sees_through_interfaces() {
+        checked!(
+            check,
+            r#"
+            public interface IContainer<T> { }
+            public class Box : IContainer<string> { }
+            public class App
+            {
+                T First<T>(IContainer<T> container) { return default; }
+
+                void Run(Box box)
+                {
+                    string ok = First(box);
+                    int probe = First(box);
+                }
+            }
+            "#,
+        );
+
+        // the probe proves T was fixed to string through Box : IContainer<string>
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert_eq!(
+            *kinds[0],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.Int32".to_string(),
+                found: "System.String".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn lambdas_check_against_delegates() {
+        checked!(
+            check,
+            r#"
+            public delegate bool Filter(int value);
+            public class App
+            {
+                int Count(Filter filter) { return 0; }
+
+                void Run()
+                {
+                    var a = Count(x => x > 0);
+                    Filter direct = x => x != 1;
+                    Count((int x) => true);
+                    Count(x => x + 1);
+                    Count((string s) => true);
+                    string probe = a;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 3, "{kinds:?}");
+        // `x + 1` is int, the delegate wants bool
+        assert!(matches!(kinds[0], SemanticErrorKind::TypeMismatch { .. }));
+        // `(string s)` disagrees with the delegate's int
+        assert!(matches!(kinds[1], SemanticErrorKind::TypeMismatch { .. }));
+        // the probe proves Count(...) returned int
+        assert_eq!(
+            *kinds[2],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Int32".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn two_phase_inference_flows_through_lambda_returns() {
+        checked!(
+            check,
+            r#"
+            public delegate R Map<T, R>(T value);
+            public class App
+            {
+                R Apply<T, R>(T value, Map<T, R> mapper) { return default; }
+
+                void Run()
+                {
+                    string probe = Apply(1, x => x > 0);
+                }
+            }
+            "#,
+        );
+
+        // T = int fixes from the first argument, the lambda's body then types as
+        // bool, and R = bool comes back out — visible in the probe
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert_eq!(
+            *kinds[0],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Boolean".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn natural_lambda_and_best_common_types() {
+        checked!(
+            check,
+            r#"
+            public class Animal { }
+            public class Dog : Animal { }
+            public class App
+            {
+                void Run(bool flag, Animal animal, Dog dog)
+                {
+                    var f = (int x) => x + 1;
+                    string probe_f = f;
+
+                    var pick = flag ? dog : animal;
+                    string probe_pick = pick;
+
+                    var mixed = flag ? 1 : 2.0;
+                    string probe_mixed = mixed;
+
+                    var xs = new[] { 1, 2L };
+                    string probe_xs = xs;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 4, "{kinds:?}");
+        assert_eq!(
+            *kinds[0],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Func<System.Int32, System.Int32>".to_string(),
+            }
+        );
+        assert_eq!(
+            *kinds[1],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "Animal".to_string(),
+            }
+        );
+        assert_eq!(
+            *kinds[2],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Double".to_string(),
+            }
+        );
+        assert_eq!(
+            *kinds[3],
+            SemanticErrorKind::TypeMismatch {
+                expected: "System.String".to_string(),
+                found: "System.Int64[]".to_string(),
+            }
+        );
+    }
+
+    #[test]
+    fn target_typed_new_and_default() {
+        checked!(
+            check,
+            r#"
+            public class Config
+            {
+                public int retries;
+                public Config() { }
+                public Config(int retries) { this.retries = retries; }
+            }
+            public class App
+            {
+                void Run()
+                {
+                    Config a = new();
+                    Config b = new(3);
+                    int c = default;
+                    Config d = new("wrong");
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 1, "{kinds:?}");
+        assert!(matches!(kinds[0], SemanticErrorKind::NoMatchingOverload));
     }
 
     #[test]

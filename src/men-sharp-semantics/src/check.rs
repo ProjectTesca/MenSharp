@@ -32,21 +32,23 @@ use std::ops::Range;
 
 use men_sharp_parser::ast::{
     Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator, Block, EntityID,
-    Expression, ForInitializer, FunctionBody, InitializerValue, InterpolationPart,
-    LiteralExpression, LocalVariableDeclaration, Pattern, PrimaryExpression, PrimaryLeft,
-    PrimaryRight, Statement, SwitchLabel, UnaryOperator, UsingResource, VariableDesignation,
+    Expression, ForInitializer, FunctionBody, InitializerValue, InterpolationPart, LambdaBody,
+    LambdaExpression, LambdaParameters, LiteralExpression, LocalVariableDeclaration, Pattern,
+    PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, SwitchLabel, UnaryOperator,
+    UsingResource, VariableDesignation,
 };
 
 use crate::{
     collect::{DeclarationNode, MemberNode, NamespaceNode, TypeNode},
     conversions::NumericKind,
     error::{SemanticError, SemanticErrorKind},
-    external::ExternalTypes,
+    external::{ExternalTypeKind, ExternalTypes},
+    infer::{Inference, InferenceKey, best_common_type},
     lookup::{MemberCandidate, MemberOrigin, TypeSystem},
     merge::Declarations,
     resolve::{NamespaceScope, Resolution, Resolver, Signatures, apply_suffixes},
     symbol::{SymbolId, SymbolKind},
-    types::{MemberSignature, TupleElement, Type, TypeTarget},
+    types::{FunctionSignature, MemberSignature, TupleElement, Type, TypeTarget},
 };
 
 /// The output of body checking for one file (or, merged, a compilation).
@@ -91,6 +93,7 @@ pub fn check_file(
         this_type: None,
         static_context: true,
         return_type: Type::Void,
+        lambda_probe_returns: None,
         expression_types: HashMap::new(),
     };
 
@@ -158,15 +161,33 @@ struct MethodGroup {
     span: Range<usize>,
 }
 
-/// One evaluated call argument.
+/// One call argument. Lambdas are *deferred*: their bodies are typed during
+/// overload resolution, against each candidate's parameter type, exactly as the
+/// spec's two-phase inference demands.
+enum ArgumentShape<'ast> {
+    Value(Type),
+    Lambda(&'ast LambdaExpression<'ast, 'ast>),
+}
+
 struct CallArgument<'ast> {
-    ty: Type,
+    shape: ArgumentShape<'ast>,
+    /// The argument's expression node, for recording its final type.
+    expression: Option<&'ast Expression<'ast, 'ast>>,
     modifier: Option<ArgumentModifier>,
     /// Allows the constant narrowing rule (`byte b = F(5)`-ish positions).
     is_integer_literal: bool,
     /// `out var x` / `out int x` — the local to bind once an overload is chosen.
     out_declaration: Option<(&'ast str, bool)>,
     span: Range<usize>,
+}
+
+impl CallArgument<'_> {
+    fn value_type(&self) -> Type {
+        match &self.shape {
+            ArgumentShape::Value(ty) => ty.clone(),
+            ArgumentShape::Lambda(_) => Type::Error,
+        }
+    }
 }
 
 struct Checker<'a, 'ast> {
@@ -178,6 +199,9 @@ struct Checker<'a, 'ast> {
     this_type: Option<Type>,
     static_context: bool,
     return_type: Type,
+    /// When probing a lambda body for its return type, `return` statements push
+    /// here instead of being validated against `return_type`.
+    lambda_probe_returns: Option<Vec<Type>>,
     expression_types: HashMap<EntityID, Type>,
 }
 
@@ -489,7 +513,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     };
                     self.enter_body(&function, &[], node.is_static, |checker| {
                         let literal = Self::is_integer_literal(initializer);
-                        let ty = checker.check_expression(initializer);
+                        let ty =
+                            checker.check_expression_expecting(initializer, Some(&property_type));
                         checker.require_convertible(
                             &ty,
                             &property_type,
@@ -525,7 +550,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     };
                     self.enter_body(&function, &[], node.is_static, |checker| {
                         let literal = Self::is_integer_literal(initializer);
-                        let ty = checker.check_expression(initializer);
+                        let ty = checker.check_expression_expecting(initializer, Some(&field_type));
                         checker.require_convertible(&ty, &field_type, literal, initializer.span());
                     });
                 }
@@ -596,10 +621,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 ..
             } => {
                 let literal = Self::is_integer_literal(expression);
-                let ty = self.check_expression(expression);
                 if self.return_type != Type::Void {
                     let expected = self.return_type.clone();
+                    let ty = self.check_expression_expecting(expression, Some(&expected));
                     self.require_convertible(&ty, &expected, literal, expression.span());
+                } else {
+                    self.check_expression(expression);
                 }
             }
             _ => {}
@@ -630,7 +657,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 ..
             } => {
                 let literal = Self::is_integer_literal(expression);
-                let ty = self.check_expression(expression);
+                let ty = self.check_expression_expecting(expression, Some(member_type));
                 self.require_convertible(&ty, member_type, literal, expression.span());
             }
             FunctionBody::Accessors(list) => {
@@ -873,11 +900,22 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 self.locals.pop();
             }
             Statement::Return(statement) => {
+                if self.lambda_probe_returns.is_some() {
+                    let ty = statement
+                        .value
+                        .as_ref()
+                        .map(|value| self.check_expression(value))
+                        .unwrap_or(Type::Void);
+                    if let Some(returns) = &mut self.lambda_probe_returns {
+                        returns.push(ty);
+                    }
+                    return;
+                }
                 let expected = self.return_type.clone();
                 match (&statement.value, expected == Type::Void) {
                     (Some(value), false) => {
                         let literal = Self::is_integer_literal(value);
-                        let ty = self.check_expression(value);
+                        let ty = self.check_expression_expecting(value, Some(&expected));
                         self.require_convertible(&ty, &expected, literal, value.span());
                     }
                     (Some(value), true) => {
@@ -964,9 +1002,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
                 (declared, Some(InitializerValue::Expression(initializer))) => {
                     let literal = Self::is_integer_literal(initializer);
-                    let ty = self.check_expression(initializer);
-                    self.require_convertible(&ty, declared, literal, initializer.span());
-                    declared.clone()
+                    let declared = declared.clone();
+                    let ty = self.check_expression_expecting(initializer, Some(&declared));
+                    self.require_convertible(&ty, &declared, literal, initializer.span());
+                    declared
                 }
                 (declared, _) => declared.clone(),
             };
@@ -1061,26 +1100,37 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     // ---------------------------------------------------------- expressions
 
     fn check_expression(&mut self, expression: &'ast Expression<'ast, 'ast>) -> Type {
-        let ty = self.check_expression_inner(expression);
+        self.check_expression_expecting(expression, None)
+    }
+
+    /// `expected` is the target type the context supplies — what makes lambdas,
+    /// `default`, and target-typed `new` well-typed where C# says they are.
+    fn check_expression_expecting(
+        &mut self,
+        expression: &'ast Expression<'ast, 'ast>,
+        expected: Option<&Type>,
+    ) -> Type {
+        let ty = self.check_expression_inner(expression, expected);
         self.record(expression, ty)
     }
 
-    fn check_expression_inner(&mut self, expression: &'ast Expression<'ast, 'ast>) -> Type {
+    fn check_expression_inner(
+        &mut self,
+        expression: &'ast Expression<'ast, 'ast>,
+        expected: Option<&Type>,
+    ) -> Type {
         match expression {
-            Expression::Primary(primary) => self.check_primary(primary),
+            Expression::Primary(primary) => self.check_primary(primary, expected),
             Expression::Assignment(assignment) => {
                 let target = self.check_expression(&assignment.target);
                 let Ok(value) = &assignment.value else {
                     return target;
                 };
                 let literal = Self::is_integer_literal(value);
-                let value_type = self.check_expression(value);
+                let value_type = self.check_expression_expecting(value, Some(&target));
 
                 match assignment.operator.value {
-                    AssignmentOperator::Assign => {
-                        self.require_convertible(&value_type, &target, literal, value.span());
-                    }
-                    AssignmentOperator::Coalesce => {
+                    AssignmentOperator::Assign | AssignmentOperator::Coalesce => {
                         self.require_convertible(&value_type, &target, literal, value.span());
                     }
                     compound => {
@@ -1124,30 +1174,28 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             Expression::Conditional(conditional) => {
                 self.check_condition(&conditional.condition);
                 let then_type = match &conditional.then_value {
-                    Ok(value) => self.check_expression(value),
+                    Ok(value) => self.check_expression_expecting(value, expected),
                     Err(()) => Type::Error,
                 };
                 let else_type = match &conditional.else_value {
-                    Ok(value) => self.check_expression(value),
+                    Ok(value) => self.check_expression_expecting(value, expected),
                     Err(()) => Type::Error,
                 };
 
                 let system = self.system();
-                if matches!(then_type, Type::Null) {
-                    else_type
-                } else if matches!(else_type, Type::Null)
-                    || system.is_implicitly_convertible(&else_type, &then_type)
-                {
-                    then_type
-                } else if system.is_implicitly_convertible(&then_type, &else_type) {
-                    else_type
-                } else {
-                    let kind = SemanticErrorKind::TypeMismatch {
-                        expected: self.display(&then_type),
-                        found: self.display(&else_type),
-                    };
-                    self.error(kind, conditional.span.clone());
-                    Type::Error
+                match best_common_type(&system, &[then_type.clone(), else_type.clone()]) {
+                    Some(common) => common,
+                    None if matches!(then_type, Type::Null) && matches!(else_type, Type::Null) => {
+                        Type::Null
+                    }
+                    None => {
+                        let kind = SemanticErrorKind::TypeMismatch {
+                            expected: self.display(&then_type),
+                            found: self.display(&else_type),
+                        };
+                        self.error(kind, conditional.span.clone());
+                        Type::Error
+                    }
                 }
             }
             Expression::Binary(binary) => {
@@ -1246,13 +1294,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 );
                 Type::Error
             }
-            Expression::Lambda(lambda) => {
-                self.error(
-                    SemanticErrorKind::UnsupportedExpression,
-                    lambda.span.clone(),
-                );
-                Type::Error
-            }
+            Expression::Lambda(lambda) => self.check_lambda(lambda, expected),
             Expression::AnonymousMethod(method) => {
                 self.error(
                     SemanticErrorKind::UnsupportedExpression,
@@ -1301,15 +1343,30 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
     // ------------------------------------------------------------- primary
 
-    fn check_primary(&mut self, primary: &'ast PrimaryExpression<'ast, 'ast>) -> Type {
-        let mut meaning = self.check_primary_left(&primary.left);
+    fn check_primary(
+        &mut self,
+        primary: &'ast PrimaryExpression<'ast, 'ast>,
+        expected: Option<&Type>,
+    ) -> Type {
+        // the context's target type applies to the head only when nothing follows it
+        let head_expected = if primary.chain.is_empty() {
+            expected
+        } else {
+            None
+        };
+        let mut meaning = self.check_primary_left(&primary.left, head_expected);
         for right in primary.chain {
             meaning = self.apply_primary_right(meaning, right);
         }
-        self.value_of(meaning, primary.span.clone())
+        self.value_of(meaning, primary.span.clone(), expected)
     }
 
-    fn value_of(&mut self, meaning: Meaning<'ast>, span: Range<usize>) -> Type {
+    fn value_of(
+        &mut self,
+        meaning: Meaning<'ast>,
+        span: Range<usize>,
+        expected: Option<&Type>,
+    ) -> Type {
         match meaning {
             Meaning::Value(ty) => ty,
             Meaning::TypeName(_) => {
@@ -1321,16 +1378,69 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 Type::Error
             }
             Meaning::Group(group) => {
-                // method groups become delegate values only via conversion, which
-                // is not modelled yet
-                self.error(SemanticErrorKind::UnsupportedExpression, group.span);
+                // a method group converts to a delegate type
+                if let Some(expected) = expected
+                    && let Some(delegate) = self.delegate_signature(expected)
+                {
+                    let system = self.system();
+                    let compatible =
+                        group
+                            .candidates
+                            .iter()
+                            .any(|candidate| match &candidate.signature {
+                                Some(MemberSignature::Function(function)) => {
+                                    function.parameters.len() == delegate.parameters.len()
+                                        && function.parameters.iter().zip(&delegate.parameters).all(
+                                            |(method, target)| {
+                                                system.is_implicitly_convertible(
+                                                    &target.parameter_type,
+                                                    &method.parameter_type,
+                                                )
+                                            },
+                                        )
+                                        && (delegate.return_type == Type::Void
+                                            || system.is_implicitly_convertible(
+                                                &function.return_type,
+                                                &delegate.return_type,
+                                            ))
+                                }
+                                _ => false,
+                            });
+                    if compatible {
+                        return expected.clone();
+                    }
+                    self.error(SemanticErrorKind::NoMatchingOverload, group.span);
+                    return Type::Error;
+                }
+
+                // C# 10 natural function type for a unique non-generic candidate
+                if group.candidates.len() == 1
+                    && group.candidates[0].arity == 0
+                    && let Some(MemberSignature::Function(function)) =
+                        group.candidates[0].signature.clone()
+                {
+                    let parameters: Vec<Type> = function
+                        .parameters
+                        .iter()
+                        .map(|parameter| parameter.parameter_type.clone())
+                        .collect();
+                    if let Some(ty) = self.func_or_action(&parameters, &function.return_type) {
+                        return ty;
+                    }
+                }
+
+                self.error(SemanticErrorKind::TypeAnnotationNeeded, group.span);
                 Type::Error
             }
             Meaning::Error => Type::Error,
         }
     }
 
-    fn check_primary_left(&mut self, left: &'ast PrimaryLeft<'ast, 'ast>) -> Meaning<'ast> {
+    fn check_primary_left(
+        &mut self,
+        left: &'ast PrimaryLeft<'ast, 'ast>,
+        expected: Option<&Type>,
+    ) -> Meaning<'ast> {
         match left {
             PrimaryLeft::Literal(literal) => self.check_literal(literal),
             PrimaryLeft::Identifier {
@@ -1439,7 +1549,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     .collect();
                 Meaning::Value(Type::Tuple(elements))
             }
-            PrimaryLeft::New(new_expression) => self.check_new(new_expression),
+            PrimaryLeft::New(new_expression) => self.check_new(new_expression, expected),
             PrimaryLeft::Typeof { .. } => Meaning::Value(self.corlib("Type")),
             PrimaryLeft::Sizeof { .. } => Meaning::Value(self.corlib("Int32")),
             // nameof's operand may be a method group or type; C# only reads its
@@ -1447,13 +1557,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             PrimaryLeft::Nameof { .. } => Meaning::Value(self.corlib("String")),
             PrimaryLeft::Default {
                 target_type, span, ..
-            } => match target_type {
-                Some(target_type) => {
+            } => match (target_type, expected) {
+                (Some(target_type), _) => {
                     let target = self.resolve_type(target_type);
                     Meaning::Value(target)
                 }
-                None => {
-                    // target-typed `default` needs the context type flowed in
+                (None, Some(expected)) => Meaning::Value(expected.clone()),
+                (None, None) => {
                     self.error(SemanticErrorKind::TypeAnnotationNeeded, span.clone());
                     Meaning::Error
                 }
@@ -1655,11 +1765,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             PrimaryRight::ElementAccess {
                 arguments, span, ..
             } => {
-                let receiver = self.value_of(meaning, span.clone());
+                let receiver = self.value_of(meaning, span.clone(), None);
                 self.index(receiver, arguments.arguments, span)
             }
             PrimaryRight::Postfix { operator, span } => {
-                let ty = self.value_of(meaning, span.clone());
+                let ty = self.value_of(meaning, span.clone(), None);
                 use men_sharp_parser::ast::PostfixOperator;
                 match operator.value {
                     PostfixOperator::Increment | PostfixOperator::Decrement => Meaning::Value(ty),
@@ -1873,13 +1983,26 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         argument: &'ast Argument<'ast, 'ast>,
     ) -> CallArgument<'ast> {
         match &argument.value {
-            ArgumentValue::Expression(expression) => CallArgument {
-                ty: self.check_expression(expression),
-                modifier: argument.modifier.as_ref().map(|modifier| modifier.value),
-                is_integer_literal: Self::is_integer_literal(expression),
-                out_declaration: None,
-                span: argument.span.clone(),
-            },
+            ArgumentValue::Expression(expression) => {
+                if let Expression::Lambda(lambda) = expression {
+                    return CallArgument {
+                        shape: ArgumentShape::Lambda(lambda),
+                        expression: Some(expression),
+                        modifier: argument.modifier.as_ref().map(|modifier| modifier.value),
+                        is_integer_literal: false,
+                        out_declaration: None,
+                        span: argument.span.clone(),
+                    };
+                }
+                CallArgument {
+                    shape: ArgumentShape::Value(self.check_expression(expression)),
+                    expression: Some(expression),
+                    modifier: argument.modifier.as_ref().map(|modifier| modifier.value),
+                    is_integer_literal: Self::is_integer_literal(expression),
+                    out_declaration: None,
+                    span: argument.span.clone(),
+                }
+            }
             ArgumentValue::Declaration {
                 variable_type,
                 name,
@@ -1891,7 +2014,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.declare_local(name.value, declared.clone());
                 }
                 CallArgument {
-                    ty: if infer { Type::Infer } else { declared },
+                    shape: ArgumentShape::Value(if infer { Type::Infer } else { declared }),
+                    expression: None,
                     modifier: Some(ArgumentModifier::Out),
                     is_integer_literal: false,
                     out_declaration: Some((name.value, infer)),
@@ -1899,7 +2023,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
             ArgumentValue::Missing => CallArgument {
-                ty: Type::Error,
+                shape: ArgumentShape::Value(Type::Error),
+                expression: None,
                 modifier: None,
                 is_integer_literal: false,
                 out_declaration: None,
@@ -1908,56 +2033,103 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
-    /// Overload resolution over a method group.
+    /// Overload resolution over a method group, with §12.6.3 type inference.
     fn resolve_call(
         &mut self,
         group: MethodGroup,
         arguments: Vec<CallArgument<'ast>>,
         span: &Range<usize>,
     ) -> Type {
-        let system = self.system();
-        let mut viable: Vec<(usize, crate::types::FunctionSignature, usize)> = Vec::new();
+        let mut viable: Vec<(FunctionSignature, usize)> = Vec::new();
         let mut inference_failed = false;
 
-        for (index, candidate) in group.candidates.iter().enumerate() {
+        'candidates: for candidate in &group.candidates {
             let Some(MemberSignature::Function(signature)) = &candidate.signature else {
                 continue;
             };
-
-            // static/instance agreement
             if group.via_type && !candidate.is_static {
                 continue;
             }
-
-            // the method's own generic parameters: explicit, inferred, or absent
-            let signature = if !group.explicit_arguments.is_empty() {
-                if candidate.arity != group.explicit_arguments.len() as u32 {
-                    continue;
-                }
-                let bindings = method_parameter_keys(&system, candidate)
-                    .into_iter()
-                    .zip(group.explicit_arguments.iter().cloned())
-                    .collect::<HashMap<_, _>>();
-                apply_bindings(signature, &bindings)
-            } else if candidate.arity > 0 {
-                match infer_method_arguments(&system, signature, candidate, &arguments) {
-                    Some(bound) => bound,
-                    None => {
-                        inference_failed = true;
-                        continue;
-                    }
-                }
-            } else {
-                signature.clone()
-            };
-
             if signature.parameters.len() != arguments.len() {
                 continue;
             }
 
+            // the method's own generic parameters: explicit, inferred, or absent
+            let signature = if candidate.arity > 0 {
+                let keys = method_parameter_keys(&self.system(), candidate);
+                let mut engine = Inference::new(keys.clone());
+
+                if !group.explicit_arguments.is_empty() {
+                    if group.explicit_arguments.len() != keys.len() {
+                        continue;
+                    }
+                    for (key, ty) in keys.iter().zip(&group.explicit_arguments) {
+                        engine.preset(*key, ty.clone());
+                    }
+                } else {
+                    // phase 1: ordinary arguments contribute bounds
+                    for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+                        if let ArgumentShape::Value(ty) = &argument.shape {
+                            let system = self.system();
+                            engine.lower_bound(&system, &parameter.parameter_type, ty);
+                        }
+                    }
+                    {
+                        let system = self.system();
+                        engine.fix_where_possible(&system);
+                    }
+
+                    // phase 2: lambda bodies, typed against now-concrete inputs,
+                    // feed their return types back
+                    for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+                        let ArgumentShape::Lambda(lambda) = &argument.shape else {
+                            continue;
+                        };
+                        let parameter_type = engine.substitute(&parameter.parameter_type);
+                        let Some(delegate) = self.delegate_signature(&parameter_type) else {
+                            continue 'candidates;
+                        };
+                        if delegate
+                            .parameters
+                            .iter()
+                            .any(|parameter| engine.has_unfixed(&parameter.parameter_type))
+                        {
+                            inference_failed = true;
+                            continue 'candidates;
+                        }
+                        if !Self::lambda_shape_matches(lambda, &delegate) {
+                            continue 'candidates;
+                        }
+                        let Some(returned) = self.probe_lambda_return(lambda, &delegate) else {
+                            continue 'candidates;
+                        };
+                        let system = self.system();
+                        engine.lower_bound(&system, &delegate.return_type, &returned);
+                    }
+                    {
+                        let system = self.system();
+                        engine.fix_where_possible(&system);
+                    }
+                    if !engine.all_fixed() {
+                        inference_failed = true;
+                        continue;
+                    }
+                }
+
+                match engine.substitute_signature(&MemberSignature::Function((*signature).clone()))
+                {
+                    MemberSignature::Function(function) => function,
+                    _ => unreachable!(),
+                }
+            } else {
+                if !group.explicit_arguments.is_empty() {
+                    continue;
+                }
+                (*signature).clone()
+            };
+
             // applicability
             let mut exact = 0usize;
-            let mut applicable = true;
             for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
                 use crate::types::ParameterPassing;
                 let modifier_ok = match parameter.passing {
@@ -1970,42 +2142,50 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     ParameterPassing::Value => argument.modifier.is_none(),
                 };
                 if !modifier_ok {
-                    applicable = false;
-                    break;
+                    continue 'candidates;
                 }
 
-                if argument
-                    .out_declaration
-                    .map(|(_, infer)| infer)
-                    .unwrap_or(false)
-                {
-                    // `out var x` matches any out parameter
-                    continue;
-                }
-
-                if argument.ty == parameter.parameter_type {
-                    exact += 1;
-                    continue;
-                }
-                let convertible = system
-                    .is_implicitly_convertible(&argument.ty, &parameter.parameter_type)
-                    || (argument.is_integer_literal
-                        && system
-                            .numeric_kind(&parameter.parameter_type)
-                            .map(|kind| kind.is_integral())
-                            .unwrap_or(false));
-                if !convertible {
-                    applicable = false;
-                    break;
+                match &argument.shape {
+                    ArgumentShape::Value(ty) => {
+                        if argument
+                            .out_declaration
+                            .map(|(_, infer)| infer)
+                            .unwrap_or(false)
+                        {
+                            // `out var x` matches any out parameter
+                            continue;
+                        }
+                        if *ty == parameter.parameter_type {
+                            exact += 1;
+                            continue;
+                        }
+                        let system = self.system();
+                        let convertible = system
+                            .is_implicitly_convertible(ty, &parameter.parameter_type)
+                            || (argument.is_integer_literal
+                                && system
+                                    .numeric_kind(&parameter.parameter_type)
+                                    .map(|kind| kind.is_integral())
+                                    .unwrap_or(false));
+                        if !convertible {
+                            continue 'candidates;
+                        }
+                    }
+                    ArgumentShape::Lambda(lambda) => {
+                        let Some(delegate) = self.delegate_signature(&parameter.parameter_type)
+                        else {
+                            continue 'candidates;
+                        };
+                        if !Self::lambda_shape_matches(lambda, &delegate) {
+                            continue 'candidates;
+                        }
+                    }
                 }
             }
-
-            if applicable {
-                viable.push((index, signature, exact));
-            }
+            viable.push((signature, exact));
         }
 
-        let best = viable.iter().map(|(_, _, exact)| *exact).max();
+        let best = viable.iter().map(|(_, exact)| *exact).max();
         let Some(best) = best else {
             let kind = if inference_failed {
                 SemanticErrorKind::CannotInferTypeArguments
@@ -2013,20 +2193,41 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 SemanticErrorKind::NoMatchingOverload
             };
             self.error(kind, span.clone());
+            for argument in &arguments {
+                if let (ArgumentShape::Lambda(_), Some(expression)) =
+                    (&argument.shape, argument.expression)
+                {
+                    self.expression_types
+                        .insert(EntityID::from(expression), Type::Error);
+                }
+            }
             return Type::Error;
         };
 
-        let mut winners = viable.into_iter().filter(|(_, _, exact)| *exact == best);
-        let (_, signature, _) = winners.next().unwrap();
+        let mut winners = viable.into_iter().filter(|(_, exact)| *exact == best);
+        let (signature, _) = winners.next().unwrap();
         if winners.next().is_some() {
             self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
             return Type::Error;
         }
 
-        // bind `out var` locals to the chosen parameter types
+        // side effects of the chosen overload: lambda bodies for real, out-vars
         for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
-            if let Some((name, true)) = argument.out_declaration {
-                self.declare_local(name, parameter.parameter_type.clone());
+            match &argument.shape {
+                ArgumentShape::Lambda(lambda) => {
+                    if let Some(delegate) = self.delegate_signature(&parameter.parameter_type) {
+                        self.check_lambda_against(lambda, &delegate);
+                    }
+                    if let Some(expression) = argument.expression {
+                        self.expression_types
+                            .insert(EntityID::from(expression), parameter.parameter_type.clone());
+                    }
+                }
+                ArgumentShape::Value(_) => {
+                    if let Some((name, true)) = argument.out_declaration {
+                        self.declare_local(name, parameter.parameter_type.clone());
+                    }
+                }
             }
         }
 
@@ -2034,12 +2235,307 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         signature.return_type
     }
 
+    // -------------------------------------------------------------- lambdas
+
+    /// The `Invoke` shape of a delegate type: what a lambda checks against.
+    fn delegate_signature(&self, ty: &Type) -> Option<FunctionSignature> {
+        match ty {
+            Type::Named {
+                target: TypeTarget::Source(symbol),
+                arguments,
+            } => {
+                if self.resolver.declarations.table.symbol(*symbol).kind != SymbolKind::Delegate {
+                    return None;
+                }
+                let MemberSignature::Function(function) =
+                    self.signatures.members.get(symbol)?.clone()
+                else {
+                    return None;
+                };
+                let system = self.system();
+                match system.instantiate_signature(
+                    &MemberSignature::Function(function),
+                    &TypeTarget::Source(*symbol),
+                    arguments,
+                ) {
+                    MemberSignature::Function(function) => Some(function),
+                    _ => None,
+                }
+            }
+            Type::Named {
+                target: TypeTarget::External(id),
+                ..
+            } => {
+                if self.resolver.external.type_info(*id).kind != ExternalTypeKind::Delegate {
+                    return None;
+                }
+                self.system()
+                    .members_named(ty, "Invoke")
+                    .into_iter()
+                    .find_map(|candidate| match candidate.signature {
+                        Some(MemberSignature::Function(function)) => Some(function),
+                        _ => None,
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    fn lambda_parameter_names(
+        lambda: &'ast LambdaExpression<'ast, 'ast>,
+    ) -> Vec<Option<&'ast str>> {
+        match &lambda.parameters {
+            LambdaParameters::Single(name) => vec![Some(name.value)],
+            LambdaParameters::List(list) => list
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.as_ref().ok().map(|name| name.value))
+                .collect(),
+        }
+    }
+
+    fn lambda_shape_matches(
+        lambda: &'ast LambdaExpression<'ast, 'ast>,
+        delegate: &FunctionSignature,
+    ) -> bool {
+        Self::lambda_parameter_names(lambda).len() == delegate.parameters.len()
+    }
+
+    /// Types a lambda body with known parameter types to learn its return type,
+    /// then rolls every diagnostic back — this is inference, not checking.
+    fn probe_lambda_return(
+        &mut self,
+        lambda: &'ast LambdaExpression<'ast, 'ast>,
+        delegate: &FunctionSignature,
+    ) -> Option<Type> {
+        let error_mark = self.resolver.out.errors.len();
+        let saved_probe = self.lambda_probe_returns.take();
+        let saved_return = std::mem::replace(&mut self.return_type, Type::Infer);
+
+        let mut scope = HashMap::new();
+        for (name, parameter) in Self::lambda_parameter_names(lambda)
+            .into_iter()
+            .zip(&delegate.parameters)
+        {
+            if let Some(name) = name {
+                scope.insert(name, parameter.parameter_type.clone());
+            }
+        }
+        self.locals.push(scope);
+
+        let result = match &lambda.body {
+            Ok(LambdaBody::Expression(expression)) => Some(self.check_expression(expression)),
+            Ok(LambdaBody::Block(block)) => {
+                self.lambda_probe_returns = Some(Vec::new());
+                self.check_block(block);
+                let returns = self.lambda_probe_returns.take().unwrap_or_default();
+                if returns.is_empty() {
+                    Some(Type::Void)
+                } else {
+                    let system = self.system();
+                    best_common_type(&system, &returns)
+                }
+            }
+            Err(()) => None,
+        };
+
+        self.locals.pop();
+        self.return_type = saved_return;
+        self.lambda_probe_returns = saved_probe;
+        self.resolver.out.errors.truncate(error_mark);
+        result
+    }
+
+    /// Checks a lambda against a concrete delegate signature, for real.
+    fn check_lambda_against(
+        &mut self,
+        lambda: &'ast LambdaExpression<'ast, 'ast>,
+        delegate: &FunctionSignature,
+    ) {
+        let names = Self::lambda_parameter_names(lambda);
+        if names.len() != delegate.parameters.len() {
+            self.error(
+                SemanticErrorKind::LambdaParameterMismatch,
+                lambda.parameters.span(),
+            );
+            return;
+        }
+
+        let mut scope = HashMap::new();
+        for (name, parameter) in names.iter().zip(&delegate.parameters) {
+            if let Some(name) = name {
+                scope.insert(*name, parameter.parameter_type.clone());
+            }
+        }
+        // explicitly written parameter types must agree with the delegate
+        if let LambdaParameters::List(list) = &lambda.parameters {
+            for (parameter, delegate_parameter) in list.parameters.iter().zip(&delegate.parameters)
+            {
+                if let Some(written) = &parameter.parameter_type {
+                    let resolved = self.resolve_type(written);
+                    if resolved != delegate_parameter.parameter_type
+                        && !matches!(resolved, Type::Error)
+                    {
+                        let kind = SemanticErrorKind::TypeMismatch {
+                            expected: self.display(&delegate_parameter.parameter_type),
+                            found: self.display(&resolved),
+                        };
+                        self.error(kind, written.span.clone());
+                    }
+                }
+            }
+        }
+
+        self.locals.push(scope);
+        let saved_return = std::mem::replace(&mut self.return_type, delegate.return_type.clone());
+
+        match &lambda.body {
+            Ok(LambdaBody::Expression(expression)) => {
+                if delegate.return_type == Type::Void {
+                    self.check_expression(expression);
+                } else {
+                    let expected = delegate.return_type.clone();
+                    let literal = Self::is_integer_literal(expression);
+                    let ty = self.check_expression_expecting(expression, Some(&expected));
+                    self.require_convertible(&ty, &expected, literal, expression.span());
+                }
+            }
+            Ok(LambdaBody::Block(block)) => self.check_block(block),
+            Err(()) => {}
+        }
+
+        self.return_type = saved_return;
+        self.locals.pop();
+    }
+
+    /// A lambda in a non-argument position: against the context's expected type,
+    /// or with its C# 10 natural `Func<>`/`Action<>` type.
+    fn check_lambda(
+        &mut self,
+        lambda: &'ast LambdaExpression<'ast, 'ast>,
+        expected: Option<&Type>,
+    ) -> Type {
+        if let Some(expected) = expected {
+            if let Some(delegate) = self.delegate_signature(expected) {
+                self.check_lambda_against(lambda, &delegate);
+                return expected.clone();
+            }
+            if !matches!(expected, Type::Error) {
+                let kind = SemanticErrorKind::TypeMismatch {
+                    expected: self.display(expected),
+                    found: "lambda".to_string(),
+                };
+                self.error(kind, lambda.span.clone());
+                return Type::Error;
+            }
+            return Type::Error;
+        }
+
+        // natural type: every parameter must carry a written type
+        let Some(parameter_types) = self.lambda_written_parameter_types(lambda) else {
+            self.error(SemanticErrorKind::TypeAnnotationNeeded, lambda.span.clone());
+            return Type::Error;
+        };
+        let probe = FunctionSignature {
+            return_type: Type::Void,
+            parameters: parameter_types
+                .iter()
+                .map(|ty| crate::types::ParameterSignature {
+                    passing: crate::types::ParameterPassing::Value,
+                    is_params: false,
+                    parameter_type: ty.clone(),
+                })
+                .collect(),
+        };
+        let Some(returned) = self.probe_lambda_return(lambda, &probe) else {
+            return Type::Error;
+        };
+        let Some(delegate_type) = self.func_or_action(&parameter_types, &returned) else {
+            self.error(SemanticErrorKind::TypeAnnotationNeeded, lambda.span.clone());
+            return Type::Error;
+        };
+
+        self.check_lambda_against(
+            lambda,
+            &FunctionSignature {
+                return_type: returned,
+                parameters: probe.parameters,
+            },
+        );
+        delegate_type
+    }
+
+    /// `Some` only when every parameter has an explicit type (zero parameters
+    /// qualifies); `x => ...` has no natural type in C# either.
+    fn lambda_written_parameter_types(
+        &mut self,
+        lambda: &'ast LambdaExpression<'ast, 'ast>,
+    ) -> Option<Vec<Type>> {
+        match &lambda.parameters {
+            LambdaParameters::Single(_) => None,
+            LambdaParameters::List(list) => {
+                let mut types = Vec::with_capacity(list.parameters.len());
+                for parameter in list.parameters {
+                    let written = parameter.parameter_type.as_ref()?;
+                    types.push(self.resolve_type(written));
+                }
+                Some(types)
+            }
+        }
+    }
+
+    /// `System.Func<..., R>` / `System.Action<...>` for a signature.
+    fn func_or_action(&self, parameters: &[Type], returned: &Type) -> Option<Type> {
+        let (name, arity, arguments) = if *returned == Type::Void {
+            ("Action", parameters.len() as u32, parameters.to_vec())
+        } else {
+            let mut arguments = parameters.to_vec();
+            arguments.push(returned.clone());
+            ("Func", parameters.len() as u32 + 1, arguments)
+        };
+
+        let id = self.resolver.external.find_type(&["System"], name, arity)?;
+        Some(Type::Named {
+            target: TypeTarget::External(id),
+            arguments,
+        })
+    }
+
     // ------------------------------------------------------------- new / []
 
     fn check_new(
         &mut self,
         new_expression: &'ast men_sharp_parser::ast::NewExpression<'ast, 'ast>,
+        expected: Option<&Type>,
     ) -> Meaning<'ast> {
+        // `new[] { ... }`: the element type is the best common type of the elements
+        if new_expression.created_type.is_none() && !new_expression.array_suffixes.is_empty() {
+            use men_sharp_parser::ast::{CollectionElement, Initializer};
+            let mut element_types = Vec::new();
+            if let Some(Initializer::Collection { elements, .. }) = &new_expression.initializer {
+                for element in *elements {
+                    if let CollectionElement::Expression(expression) = element {
+                        element_types.push(self.check_expression(expression));
+                    }
+                }
+            }
+            let system = self.system();
+            let element = match best_common_type(&system, &element_types) {
+                Some(element) => element,
+                None => {
+                    self.error(
+                        SemanticErrorKind::TypeAnnotationNeeded,
+                        new_expression.span.clone(),
+                    );
+                    Type::Error
+                }
+            };
+            return Meaning::Value(Type::Array {
+                element: Box::new(element),
+                rank: 1,
+            });
+        }
+
         // array creation
         if new_expression.is_array_creation() {
             let element = match &new_expression.created_type {
@@ -2063,15 +2559,18 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             return Meaning::Value(ty);
         }
 
-        let Some(created_type) = &new_expression.created_type else {
-            // target-typed `new(...)` needs the context type flowed in
-            self.error(
-                SemanticErrorKind::TypeAnnotationNeeded,
-                new_expression.span.clone(),
-            );
-            return Meaning::Error;
+        let ty = match (&new_expression.created_type, expected) {
+            (Some(created_type), _) => self.resolve_type(created_type),
+            // target-typed `new(...)` takes the context's type
+            (None, Some(expected)) => expected.clone(),
+            (None, None) => {
+                self.error(
+                    SemanticErrorKind::TypeAnnotationNeeded,
+                    new_expression.span.clone(),
+                );
+                return Meaning::Error;
+            }
         };
-        let ty = self.resolve_type(created_type);
         if matches!(ty, Type::Error) {
             return Meaning::Error;
         }
@@ -2146,7 +2645,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         };
                         if let Ok(InitializerValue::Expression(value)) = &element.value {
                             let literal = Self::is_integer_literal(value);
-                            let value_type = self.check_expression(value);
+                            let value_type =
+                                self.check_expression_expecting(value, Some(&member_type));
                             self.require_convertible(
                                 &value_type,
                                 &member_type,
@@ -2192,7 +2692,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let int32 = self.corlib("Int32");
                 for argument in &call_arguments {
                     self.require_convertible(
-                        &argument.ty.clone(),
+                        &argument.value_type(),
                         &int32,
                         argument.is_integer_literal,
                         argument.span.clone(),
@@ -2599,20 +3099,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 }
 
 // ---------------------------------------------------------------------------
-// generic method inference
-// ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-enum MethodParameterKey {
-    Source(SymbolId),
-    External(u32),
-}
-
-/// The keys a method's own type parameters bind under.
-fn method_parameter_keys(
-    system: &TypeSystem,
-    candidate: &MemberCandidate,
-) -> Vec<MethodParameterKey> {
+/// The inference keys of a method's own type parameters.
+fn method_parameter_keys(system: &TypeSystem, candidate: &MemberCandidate) -> Vec<InferenceKey> {
     match &candidate.origin {
         MemberOrigin::Source(symbol) => system
             .declarations
@@ -2620,155 +3109,8 @@ fn method_parameter_keys(
             .symbol(*symbol)
             .type_parameters
             .iter()
-            .map(|&parameter| MethodParameterKey::Source(parameter))
+            .map(|&parameter| InferenceKey::Source(parameter))
             .collect(),
-        MemberOrigin::External { .. } => (0..candidate.arity)
-            .map(MethodParameterKey::External)
-            .collect(),
-    }
-}
-
-fn apply_bindings(
-    signature: &crate::types::FunctionSignature,
-    bindings: &HashMap<MethodParameterKey, Type>,
-) -> crate::types::FunctionSignature {
-    let member = MemberSignature::Function(signature.clone()).map(&|ty| match ty {
-        Type::TypeParameter(symbol) => bindings
-            .get(&MethodParameterKey::Source(symbol))
-            .cloned()
-            .unwrap_or(Type::TypeParameter(symbol)),
-        Type::ExternalMethodTypeParameter(index) => bindings
-            .get(&MethodParameterKey::External(index))
-            .cloned()
-            .unwrap_or(Type::ExternalMethodTypeParameter(index)),
-        other => other,
-    });
-    match member {
-        MemberSignature::Function(function) => function,
-        _ => unreachable!(),
-    }
-}
-
-/// Structural inference: match each parameter against its argument, binding the
-/// method's own type parameters. `None` when any stays unbound — the caller turns
-/// that into "write the type arguments explicitly".
-fn infer_method_arguments(
-    system: &TypeSystem,
-    signature: &crate::types::FunctionSignature,
-    candidate: &MemberCandidate,
-    arguments: &[CallArgument],
-) -> Option<crate::types::FunctionSignature> {
-    if signature.parameters.len() != arguments.len() {
-        return None;
-    }
-
-    // which keys need binding
-    let keys: Vec<MethodParameterKey> = match &candidate.origin {
-        MemberOrigin::Source(symbol) => system
-            .declarations
-            .table
-            .symbol(*symbol)
-            .type_parameters
-            .iter()
-            .map(|&parameter| MethodParameterKey::Source(parameter))
-            .collect(),
-        MemberOrigin::External { .. } => (0..candidate.arity)
-            .map(MethodParameterKey::External)
-            .collect(),
-    };
-
-    let mut bindings: HashMap<MethodParameterKey, Type> = HashMap::new();
-    for (parameter, argument) in signature.parameters.iter().zip(arguments) {
-        unify(
-            &parameter.parameter_type,
-            &argument.ty,
-            &keys,
-            &mut bindings,
-        );
-    }
-
-    if keys.iter().all(|key| bindings.contains_key(key)) {
-        Some(apply_bindings(signature, &bindings))
-    } else {
-        None
-    }
-}
-
-fn unify(
-    parameter: &Type,
-    argument: &Type,
-    keys: &[MethodParameterKey],
-    bindings: &mut HashMap<MethodParameterKey, Type>,
-) {
-    // the null literal and error types carry no inference information
-    if matches!(argument, Type::Null | Type::Error | Type::Infer) {
-        return;
-    }
-
-    match parameter {
-        Type::TypeParameter(symbol) if keys.contains(&MethodParameterKey::Source(*symbol)) => {
-            bindings
-                .entry(MethodParameterKey::Source(*symbol))
-                .or_insert_with(|| argument.clone());
-        }
-        Type::ExternalMethodTypeParameter(index)
-            if keys.contains(&MethodParameterKey::External(*index)) =>
-        {
-            bindings
-                .entry(MethodParameterKey::External(*index))
-                .or_insert_with(|| argument.clone());
-        }
-        Type::Named {
-            target,
-            arguments: parameter_arguments,
-        } => {
-            if let Type::Named {
-                target: argument_target,
-                arguments: argument_arguments,
-            } = argument
-                && target == argument_target
-                && parameter_arguments.len() == argument_arguments.len()
-            {
-                for (parameter, argument) in parameter_arguments.iter().zip(argument_arguments) {
-                    unify(parameter, argument, keys, bindings);
-                }
-            }
-        }
-        Type::Array {
-            element: parameter_element,
-            rank,
-        } => {
-            if let Type::Array {
-                element: argument_element,
-                rank: argument_rank,
-            } = argument
-                && rank == argument_rank
-            {
-                unify(parameter_element, argument_element, keys, bindings);
-            }
-        }
-        Type::Nullable(parameter_inner) => {
-            if let Type::Nullable(argument_inner) = argument {
-                unify(parameter_inner, argument_inner, keys, bindings);
-            } else {
-                unify(parameter_inner, argument, keys, bindings);
-            }
-        }
-        Type::ByRef {
-            element: parameter_element,
-            ..
-        } => {
-            unify(parameter_element, argument, keys, bindings);
-        }
-        Type::Tuple(parameter_elements) => {
-            if let Type::Tuple(argument_elements) = argument
-                && parameter_elements.len() == argument_elements.len()
-            {
-                for (parameter, argument) in parameter_elements.iter().zip(argument_elements) {
-                    unify(&parameter.element, &argument.element, keys, bindings);
-                }
-            }
-        }
-        _ => {}
+        MemberOrigin::External { .. } => (0..candidate.arity).map(InferenceKey::External).collect(),
     }
 }

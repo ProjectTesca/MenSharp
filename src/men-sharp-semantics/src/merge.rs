@@ -310,10 +310,15 @@ impl<'ast> Merger<'ast> {
             }
             seen.insert(parameter.name.value, site);
 
-            let id = self.table.add_type_parameter(
-                owner,
-                new_symbol(SymbolKind::TypeParameter, parameter.name.value, 0, site),
-            );
+            let mut symbol = new_symbol(SymbolKind::TypeParameter, parameter.name.value, 0, site);
+            symbol.variance = match parameter.variance.as_ref().map(|variance| variance.value) {
+                Some(men_sharp_parser::ast::Variance::Out) => crate::types::TypeVariance::Covariant,
+                Some(men_sharp_parser::ast::Variance::In) => {
+                    crate::types::TypeVariance::Contravariant
+                }
+                None => crate::types::TypeVariance::Invariant,
+            };
+            let id = self.table.add_type_parameter(owner, symbol);
             self.symbol_of
                 .insert(SyntaxRef::TypeParameter(parameter).entity_id(), id);
         }
