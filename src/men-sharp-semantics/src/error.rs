@@ -43,4 +43,12 @@ pub enum SemanticErrorKind {
         first_file: FileId,
         first_span: Range<usize>,
     },
+    /// No type or namespace with this name (and arity) is in scope.
+    UnresolvedTypeName,
+    /// Two `using` imports supply different types under the same name.
+    AmbiguousTypeName,
+    /// A namespace name where a type was required.
+    NamespaceUsedAsType,
+    /// The target of a `using` directive does not exist.
+    UnresolvedUsingTarget,
 }

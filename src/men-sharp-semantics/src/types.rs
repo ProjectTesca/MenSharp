@@ -1,0 +1,107 @@
+//! The semantic type model.
+//!
+//! A [`Type`] is what a written type *means* once names are resolved: `int` becomes
+//! the external `System.Int32`, `Player` becomes a source symbol, `List<Player>`
+//! becomes a named type with an argument. Written spellings and spans stay in the
+//! syntax tree; this model is fully owned (no lifetimes) so side tables of types can
+//! be stored, merged across threads and kept after individual analyses finish.
+//!
+//! [`Type::Error`] is the recovery value: resolution reports one diagnostic and then
+//! answers `Error`, which downstream phases treat as compatible-with-anything to
+//! avoid error cascades — the same philosophy as the parser's holes.
+
+use crate::symbol::SymbolId;
+
+/// A type defined outside the compilation, in a referenced assembly. Opaque here:
+/// only the [`crate::external::ExternalTypes`] provider can look inside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExternalTypeId {
+    /// Which referenced assembly, in the provider's numbering.
+    pub assembly: u32,
+    /// The type within it, in the provider's numbering.
+    pub type_index: u32,
+}
+
+/// What a resolved type name refers to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TypeTarget {
+    Source(SymbolId),
+    External(ExternalTypeId),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Type {
+    /// A class, struct, interface, enum or delegate, with any generic arguments.
+    /// For a nested type inside a generic type the outer arguments come first,
+    /// mirroring metadata.
+    Named {
+        target: TypeTarget,
+        arguments: Vec<Type>,
+    },
+    /// A generic parameter, by its symbol in the table.
+    TypeParameter(SymbolId),
+    /// A generic parameter of an external type or method, by position.
+    ExternalTypeParameter {
+        owner: ExternalTypeId,
+        index: u32,
+    },
+    Array {
+        element: Box<Type>,
+        rank: u32,
+    },
+    Pointer(Box<Type>),
+    /// Written `T?`. Whether that means `Nullable<T>` or a reference annotation
+    /// depends on `T`, which is a later phase's question; the spelling is kept.
+    Nullable(Box<Type>),
+    /// `ref T` in a return type or parameter.
+    ByRef {
+        readonly: bool,
+        element: Box<Type>,
+    },
+    Tuple(Vec<TupleElement>),
+    Dynamic,
+    Void,
+    /// `var` — to be filled in by type inference.
+    Infer,
+    /// Resolution failed; a diagnostic has been reported.
+    Error,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct TupleElement {
+    pub name: Option<Box<str>>,
+    pub element: Type,
+}
+
+/// The resolved signature of a callable: methods, constructors, operators,
+/// indexers, delegates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionSignature {
+    pub return_type: Type,
+    pub parameters: Vec<ParameterSignature>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParameterSignature {
+    pub passing: ParameterPassing,
+    /// `params` on the last parameter.
+    pub is_params: bool,
+    pub parameter_type: Type,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParameterPassing {
+    Value,
+    Ref,
+    Out,
+    In,
+}
+
+/// The resolved type side of one member symbol.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MemberSignature {
+    Field(Type),
+    Property(Type),
+    Event(Type),
+    Function(FunctionSignature),
+}

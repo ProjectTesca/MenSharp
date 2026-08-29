@@ -4,6 +4,7 @@ resolver = "2"
 members = [
     "src/men-sharp",
     "src/men-sharp-compiler",
+    "src/men-sharp-dotnet",
     "src/men-sharp-parser",
     "src/men-sharp-semantics",
 ]
@@ -12,6 +13,7 @@ members = [
 men-sharp-parser = { path = "src/men-sharp-parser" }
 men-sharp-semantics = { path = "src/men-sharp-semantics" }
 men-sharp-compiler = { path = "src/men-sharp-compiler" }
+men-sharp-dotnet = { path = "src/men-sharp-dotnet" }
 regex = "1.11.1"
 bumpalo = { version = "3.17.0", features = ["allocator-api2"] }
 allocator-api2 = "0.2.21"

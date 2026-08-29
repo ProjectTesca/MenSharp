@@ -95,10 +95,15 @@ dependencies = [
 name = "men-sharp-compiler"
 version = "0.1.0"
 dependencies = [
+ "men-sharp-dotnet",
  "men-sharp-parser",
  "men-sharp-semantics",
  "rayon",
 ]
+
+[[package]]
+name = "men-sharp-dotnet"
+version = "0.1.0"
 
 [[package]]
 name = "men-sharp-parser"

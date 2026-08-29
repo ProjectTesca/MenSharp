@@ -30,9 +30,16 @@
 
 use std::sync::Arc;
 
+use men_sharp_dotnet::DotNetAssembly;
 use men_sharp_parser::MenSharpAST;
-use men_sharp_semantics::{Declarations, FileId, collect_file, merge_declarations};
+use men_sharp_semantics::{
+    Declarations, ExternalTypes, FileId, Signatures, collect_file, merge_declarations, resolve_file,
+};
 use rayon::prelude::*;
+
+pub mod references;
+
+pub use references::{ReferenceError, ReferenceSet};
 
 /// Settings the driver is constructed with. Kept as a plain struct so growing it
 /// (optimization level, language version, ...) never changes any signature.
@@ -121,5 +128,53 @@ impl Compiler {
         });
 
         merge_declarations(collected)
+    }
+
+    /// Parses every referenced dll in parallel and indexes them as an external
+    /// type provider. The byte buffers stay with the caller, which is what ties
+    /// the provider's lifetime to them.
+    pub fn load_references<'data>(
+        &self,
+        references: &'data [Vec<u8>],
+    ) -> Result<ReferenceSet<'data>, ReferenceError> {
+        let assemblies: Vec<Result<DotNetAssembly, ReferenceError>> = self.pool.install(|| {
+            references
+                .par_iter()
+                .enumerate()
+                .map(|(index, bytes)| {
+                    DotNetAssembly::parse(bytes).map_err(|error| ReferenceError {
+                        reference: index,
+                        error,
+                    })
+                })
+                .collect()
+        });
+
+        Ok(ReferenceSet::new(
+            assemblies.into_iter().collect::<Result<Vec<_>, _>>()?,
+        ))
+    }
+
+    /// Resolves every declaration-level type reference: one task per file, results
+    /// merged and sorted so the outcome does not depend on the thread count.
+    pub fn resolve_signatures(
+        &self,
+        declarations: &Declarations<'_>,
+        external: &(dyn ExternalTypes + Sync),
+    ) -> Signatures {
+        let per_file: Vec<Signatures> = self.pool.install(|| {
+            (0..declarations.files.len())
+                .into_par_iter()
+                .map(|index| resolve_file(declarations, external, index))
+                .collect()
+        });
+
+        let mut all = Signatures::default();
+        for signatures in per_file {
+            all.merge(signatures);
+        }
+        all.errors
+            .sort_by_key(|error| (error.file, error.span.start, error.span.end));
+        all
     }
 }
