@@ -1,0 +1,7 @@
+[package]
+name = "men-sharp-semantics"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+men-sharp-parser = { workspace = true }

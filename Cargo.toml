@@ -3,5 +3,18 @@
 resolver = "2"
 members = [
     "src/men-sharp",
+    "src/men-sharp-compiler",
     "src/men-sharp-parser",
+    "src/men-sharp-semantics",
 ]
+
+[workspace.dependencies]
+men-sharp-parser = { path = "src/men-sharp-parser" }
+men-sharp-semantics = { path = "src/men-sharp-semantics" }
+men-sharp-compiler = { path = "src/men-sharp-compiler" }
+regex = "1.11.1"
+bumpalo = { version = "3.17.0", features = ["allocator-api2"] }
+allocator-api2 = "0.2.21"
+extension-fn = "1.2.0"
+typeid = "1.0.3"
+rayon = "1.10.0"

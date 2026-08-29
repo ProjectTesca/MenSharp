@@ -1,9 +1,9 @@
 [package]
-name = "men-sharp"
+name = "men-sharp-compiler"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-men-sharp-compiler = { workspace = true }
 men-sharp-parser = { workspace = true }
 men-sharp-semantics = { workspace = true }
+rayon = { workspace = true }
