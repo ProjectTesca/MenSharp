@@ -1,0 +1,101 @@
+name: Release
+
+# Tag a commit `v0.1.0` (etc.) and push the tag: this builds the compiler for
+# every platform, assembles the VPM package zip, publishes a GitHub Release,
+# and refreshes the VPM repository listing on GitHub Pages — the URL users add
+# to ALCOM / VRChat Creator Companion:
+#
+#     https://projecttesca.github.io/MenSharp/index.json
+#
+# (Repository settings must have Pages set to "Deploy from branch: gh-pages".)
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            artifact: men-sharp-linux-x64
+            binary: target/release/men-sharp
+          - os: windows-latest
+            artifact: men-sharp-windows-x64.exe
+            binary: target/release/men-sharp.exe
+          - os: macos-latest
+            artifact: men-sharp-macos-arm64
+            binary: target/release/men-sharp
+          - os: macos-13
+            artifact: men-sharp-macos-x64
+            binary: target/release/men-sharp
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p men-sharp
+      - run: cp "${{ matrix.binary }}" "${{ matrix.artifact }}"
+        shell: bash
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: binaries
+          merge-multiple: true
+
+      - name: Assemble the VPM package
+        id: assemble
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          PKG=com.projecttesca.mensharp
+          ZIP="$PKG-$VERSION.zip"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "zip=$ZIP" >> "$GITHUB_OUTPUT"
+
+          mkdir -p staging
+          cp -r "unity/$PKG/." staging/
+          mkdir -p "staging/Compiler~"
+          cp binaries/* "staging/Compiler~/"
+          chmod +x staging/Compiler~/men-sharp-linux-x64 staging/Compiler~/men-sharp-macos-* || true
+
+          export VERSION
+          export ZIP_URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}/$ZIP"
+          python3 tools/release/patch_manifest.py
+
+          (cd staging && zip -r "../$ZIP" .)
+          echo "sha256=$(sha256sum "$ZIP" | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+
+      - name: Publish the GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ steps.assemble.outputs.zip }}
+          generate_release_notes: true
+
+      - name: Build the VPM repository listing
+        env:
+          VERSION: ${{ steps.assemble.outputs.version }}
+          SHA256: ${{ steps.assemble.outputs.sha256 }}
+          REPOSITORY: ${{ github.repository }}
+        run: python3 tools/release/build_listing.py
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: pages
