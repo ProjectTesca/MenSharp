@@ -18,14 +18,16 @@ use men_sharp_semantics::{
 };
 
 const USAGE: &str = "usage: men-sharp [--threads N] [--reference lib.dll]... \
-[--emit-udon Namespace.EntryClass --out name] <file.cs>...";
+[--emit-udon Namespace.EntryClass --out name | --emit-udon-all --out-dir dir] <file.cs>...";
 
 fn main() -> ExitCode {
     let mut thread_count = None;
     let mut paths = Vec::new();
     let mut reference_paths = Vec::new();
     let mut udon_entry: Option<String> = None;
+    let mut udon_all = false;
     let mut out_name = "program".to_string();
+    let mut out_dir = ".".to_string();
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -51,12 +53,20 @@ fn main() -> ExitCode {
                 };
                 udon_entry = Some(entry);
             }
+            "--emit-udon-all" => udon_all = true,
             "--out" | "-o" => {
                 let Some(name) = arguments.next() else {
                     eprintln!("--out needs a name");
                     return ExitCode::FAILURE;
                 };
                 out_name = name;
+            }
+            "--out-dir" => {
+                let Some(dir) = arguments.next() else {
+                    eprintln!("--out-dir needs a directory");
+                    return ExitCode::FAILURE;
+                };
+                out_dir = dir;
             }
             "--help" | "-h" => {
                 println!("{USAGE}");
@@ -81,7 +91,7 @@ fn main() -> ExitCode {
             }
         }
     }
-    if udon_entry.is_some() {
+    if udon_entry.is_some() || udon_all {
         // the Udon target compiles the mini-corlib along with user code
         sources.extend(Compiler::corlib_sources());
     }
@@ -120,6 +130,62 @@ fn main() -> ExitCode {
 
     let error_count = report(&files, &declarations, &signatures, &bodies);
     println!("checked {} expressions", bodies.expression_types.len());
+
+    if udon_all {
+        if error_count > 0 {
+            eprintln!("{error_count} error(s); not emitting Udon assembly");
+            return ExitCode::FAILURE;
+        }
+        let programs =
+            compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+        if programs.is_empty() {
+            eprintln!("no MenSharpBehaviour subclasses found — nothing to compile for Udon");
+            return ExitCode::FAILURE;
+        }
+        let mut failed = 0usize;
+        for program in &programs {
+            for error in &program.output.errors {
+                let file = &files[error.file.0 as usize];
+                let (line, column) = line_column(file.ast.source(), error.span.start);
+                eprintln!("{}:{line}:{column}: error: {}", file.name, error.message);
+            }
+            if !program.output.errors.is_empty() {
+                failed += 1;
+                continue;
+            }
+            let uasm = match program.output.program.to_uasm() {
+                Ok(uasm) => uasm,
+                Err(error) => {
+                    eprintln!("{}: assembly error: {error:?}", program.class_path);
+                    failed += 1;
+                    continue;
+                }
+            };
+            let meta = program
+                .output
+                .program
+                .to_meta_json()
+                .expect("assembled above");
+            // the class path contains dots, so extensions are appended, not
+            // swapped in (`Game.Door` must not become `Game.uasm`)
+            let directory = std::path::Path::new(&out_dir);
+            let uasm_path = directory.join(format!("{}.uasm", program.class_path));
+            let meta_path = directory.join(format!("{}.meta.json", program.class_path));
+            if let Err(error) =
+                std::fs::write(&uasm_path, uasm).and_then(|()| std::fs::write(&meta_path, meta))
+            {
+                eprintln!("{}: {error}", uasm_path.display());
+                failed += 1;
+                continue;
+            }
+            println!("wrote {}", uasm_path.display());
+        }
+        if failed > 0 {
+            eprintln!("{failed} program(s) failed");
+            return ExitCode::FAILURE;
+        }
+        return ExitCode::SUCCESS;
+    }
 
     if let Some(entry) = &udon_entry {
         if error_count > 0 {

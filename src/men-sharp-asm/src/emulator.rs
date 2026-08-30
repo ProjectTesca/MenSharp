@@ -148,7 +148,18 @@ impl Emulator {
         for (index, symbol) in program.data.iter().enumerate() {
             names.insert(symbol.name.clone(), index);
             heap.push(match &symbol.init {
-                HeapInit::Null => Value::Null,
+                // value-typed slots default to their type's default, exactly
+                // as the Unity importer initialises the real heap
+                HeapInit::Null => match symbol.udon_type.as_str() {
+                    "SystemInt32" => Value::Int32(0),
+                    "SystemInt64" => Value::Int64(0),
+                    "SystemUInt32" => Value::UInt32(0),
+                    "SystemBoolean" => Value::Boolean(false),
+                    "SystemSingle" => Value::Single(0.0),
+                    "SystemDouble" => Value::Double(0.0),
+                    "SystemChar" => Value::Char('\0'),
+                    _ => Value::Null,
+                },
                 HeapInit::Boolean(v) => Value::Boolean(*v),
                 HeapInit::Int32(v) => Value::Int32(*v),
                 HeapInit::Int64(v) => Value::Int64(*v),
@@ -173,6 +184,19 @@ impl Emulator {
     /// The value of a named heap slot — how tests read program results.
     pub fn value_of(&self, name: &str) -> Option<&Value> {
         self.names.get(name).map(|&index| &self.heap[index])
+    }
+
+    /// Overwrites a named heap slot before running — how tests model the
+    /// Unity inspector's public-variable values, which are applied after the
+    /// heap loads and before any event fires.
+    pub fn set_value(&mut self, name: &str, value: Value) -> bool {
+        match self.names.get(name) {
+            Some(&index) => {
+                self.heap[index] = value;
+                true
+            }
+            None => false,
+        }
     }
 
     pub fn run(&mut self, assembled: &Assembled, entry: &str) -> Result<(), EmulatorError> {

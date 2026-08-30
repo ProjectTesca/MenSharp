@@ -94,6 +94,7 @@ pub fn generate(
         dispatchers: HashMap::new(),
         call_edges: HashMap::new(),
         temp_counter: 0,
+        entry_class: None,
     };
     generator.run(entry_path);
     CodegenOutput {
@@ -172,6 +173,10 @@ struct Generator<'a, 'ast> {
     dispatchers: HashMap<FunctionKey, Dispatcher>,
     call_edges: HashMap<FunctionKey, HashSet<FunctionKey>>,
     temp_counter: usize,
+    /// Set when the entry class is a `MenSharpBehaviour` subclass: its
+    /// instance fields live in named heap slots and its instance methods have
+    /// no `this` — the behaviour is the program.
+    entry_class: Option<SymbolId>,
 }
 
 /// Per-function compilation state.
@@ -258,18 +263,39 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return;
         };
 
-        // static fields of the entry class become exported, observable slots
-        self.collect_statics(entry, true);
+        // a MenSharpBehaviour subclass gets the behaviour treatment: its
+        // instance members become the program's surface
+        if is_behaviour_class(self.declarations, self.signatures, entry) {
+            if self.declarations.table.symbol(entry).arity > 0 {
+                self.errors.push(CodegenError {
+                    message: "a behaviour class cannot be generic".into(),
+                    file: FileId(0),
+                    span: 0..0,
+                });
+                return;
+            }
+            self.entry_class = Some(entry);
+        }
 
-        // every public static method of the entry class is an event
+        // static fields of the entry class become exported, observable slots;
+        // on a behaviour, instance fields (and auto-properties) do too — the
+        // behaviour has exactly one instance, so its fields are the program's
+        // public variables
+        self.collect_statics(entry, true);
+        if self.entry_class.is_some() {
+            self.collect_entry_instance_fields(entry);
+        }
+
+        // public methods of the entry class are events (instance ones only on
+        // a behaviour; static ones always, which is also what tests use)
         let mut entries = Vec::new();
         let members: Vec<SymbolId> = self.declarations.table.symbol(entry).members.to_vec();
         for member in members {
             let symbol = self.declarations.table.symbol(member);
-            if symbol.kind == SymbolKind::Method
-                && symbol.is_static
+            let eligible = symbol.kind == SymbolKind::Method
                 && symbol.accessibility == Accessibility::Public
-            {
+                && (symbol.is_static || self.entry_class.is_some());
+            if eligible {
                 let name = udon_event_name(symbol.name);
                 let key = FunctionKey {
                     symbol: member,
@@ -283,7 +309,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if entries.is_empty() {
             self.errors.push(CodegenError {
                 message: format!(
-                    "entry class `{}` has no public static methods",
+                    "entry class `{}` has no public methods to export as events",
                     entry_path.join(".")
                 ),
                 file: FileId(0),
@@ -816,12 +842,41 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// On a behaviour entry class, instance fields and auto-properties become
+    /// exported heap slots — the program's public variables. They reuse the
+    /// `statics` machinery: the behaviour has exactly one instance.
+    fn collect_entry_instance_fields(&mut self, class: SymbolId) {
+        let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
+        for member in members {
+            let symbol = self.declarations.table.symbol(member);
+            if symbol.is_static {
+                continue;
+            }
+            let stores_value = match symbol.kind {
+                SymbolKind::Field => true,
+                SymbolKind::Property => self.is_auto_property(member),
+                _ => false,
+            };
+            if stores_value {
+                self.ensure_static(member, true);
+            }
+        }
+    }
+
+    /// Does this member symbol belong to the behaviour entry class?
+    pub(super) fn is_entry_member(&self, member: SymbolId) -> bool {
+        let Some(entry) = self.entry_class else {
+            return false;
+        };
+        self.declarations.table.symbol(member).parent == Some(entry)
+    }
+
     fn ensure_static(&mut self, field: SymbolId, export: bool) -> DataId {
         if let Some(&slot) = self.statics.get(&field) {
             return slot;
         }
         let ty = match self.signatures.members.get(&field) {
-            Some(MemberSignature::Field(ty)) => ty.clone(),
+            Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => ty.clone(),
             _ => Type::Error,
         };
         let udon_type = self.heap_type(&ty);
@@ -832,23 +887,177 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             format!("static_{}", self.symbol_path(field))
         };
         let file = symbol.declarations.first().map(|site| site.file);
-        let has_initializer = symbol.declarations.first().is_some_and(|site| {
-            matches!(&site.syntax, SyntaxRef::Field { declarator, .. }
-                if declarator.initializer.is_some())
-        });
+        let initializer = symbol
+            .declarations
+            .first()
+            .and_then(|site| match &site.syntax {
+                SyntaxRef::Field { declarator, .. } => declarator.initializer.as_ref(),
+                SyntaxRef::Property(property) => property.initializer.as_ref(),
+                _ => None,
+            })
+            .and_then(|initializer| match initializer {
+                InitializerValue::Expression(expression) => Some(expression),
+                _ => None,
+            });
+
+        // literal initializers bake into the heap default instead of running
+        // as code. This matters for exported behaviour fields: the inspector's
+        // public-variable values are applied *after* the heap loads, so a
+        // baked default lets them win — runtime initializer code would
+        // overwrite them on the first event
+        let baked = initializer.and_then(|expression| literal_heap_init(expression, &udon_type));
+        let runs_at_startup = initializer.is_some() && baked.is_none();
+
         let slot = self.program.add_data(DataSymbol {
             name,
             udon_type,
-            init: HeapInit::Null,
+            init: baked.unwrap_or(HeapInit::Null),
             export,
             sync: None,
         });
         self.statics.insert(field, slot);
-        if has_initializer && let Some(file) = file {
+        if runs_at_startup && let Some(file) = file {
             self.static_init.push((field, file));
         }
         slot
     }
+}
+
+/// A literal (possibly negated) initializer as a heap default, when its kind
+/// matches the slot's declared Udon type. Anything else returns `None` and
+/// stays runtime-initialized.
+fn literal_heap_init(expression: &Expression, udon_type: &str) -> Option<HeapInit> {
+    fn literal_of<'e>(expression: &'e Expression) -> Option<(&'e LiteralExpression<'e, 'e>, bool)> {
+        match expression {
+            Expression::Primary(primary) if primary.chain.is_empty() => match &primary.left {
+                PrimaryLeft::Literal(literal) => Some((literal, false)),
+                _ => None,
+            },
+            Expression::Unary(unary) if unary.operator.value == UnaryOperator::Minus => {
+                let operand = unary.operand.as_ref().ok()?;
+                let (literal, negated) = literal_of(operand)?;
+                Some((literal, !negated))
+            }
+            _ => None,
+        }
+    }
+
+    let (literal, negated) = literal_of(expression)?;
+    match (literal, udon_type) {
+        (LiteralExpression::Integer(text), "SystemInt32") => {
+            let raw: String = text.value.chars().filter(|c| *c != '_').collect();
+            let value = raw.parse::<i64>().ok()?;
+            let value = if negated { -value } else { value };
+            i32::try_from(value).ok().map(HeapInit::Int32)
+        }
+        (LiteralExpression::Real(text), "SystemSingle") => {
+            let raw: String = text.value.chars().filter(|c| *c != '_').collect();
+            let value = raw.strip_suffix(['f', 'F'])?.parse::<f32>().ok()?;
+            Some(HeapInit::Single(if negated { -value } else { value }))
+        }
+        (LiteralExpression::Real(text), "SystemDouble") => {
+            let raw: String = text.value.chars().filter(|c| *c != '_').collect();
+            let trimmed = raw.trim_end_matches(['d', 'D']);
+            let value = trimmed.parse::<f64>().ok()?;
+            Some(HeapInit::Double(if negated { -value } else { value }))
+        }
+        (LiteralExpression::True(_), "SystemBoolean") if !negated => Some(HeapInit::Boolean(true)),
+        (LiteralExpression::False(_), "SystemBoolean") if !negated => {
+            Some(HeapInit::Boolean(false))
+        }
+        (LiteralExpression::String(text), "SystemString") if !negated => {
+            let inner = text
+                .value
+                .strip_prefix('"')
+                .and_then(|rest| rest.strip_suffix('"'))?;
+            // escape-free strings only; anything fancier initializes at runtime
+            if inner.contains('\\') {
+                return None;
+            }
+            Some(HeapInit::Str(inner.to_string()))
+        }
+        _ => None,
+    }
+}
+
+/// Is this class a `MenSharp.MenSharpBehaviour` subclass?
+fn is_behaviour_class(
+    declarations: &Declarations,
+    signatures: &Signatures,
+    class: SymbolId,
+) -> bool {
+    let Some(base_marker) = behaviour_marker(declarations) else {
+        return false;
+    };
+    let mut current = class;
+    loop {
+        if current == base_marker {
+            return true;
+        }
+        let base = signatures
+            .base_types
+            .get(&current)
+            .into_iter()
+            .flatten()
+            .find_map(|base| match base {
+                Type::Named {
+                    target: TypeTarget::Source(symbol),
+                    ..
+                } => Some(*symbol),
+                _ => None,
+            });
+        match base {
+            Some(base) => current = base,
+            None => return false,
+        }
+    }
+}
+
+fn behaviour_marker(declarations: &Declarations) -> Option<SymbolId> {
+    let root = declarations.table.root();
+    let namespace = *declarations
+        .table
+        .symbol(root)
+        .members_named("MenSharp")
+        .first()?;
+    declarations
+        .table
+        .symbol(namespace)
+        .members_named("MenSharpBehaviour")
+        .first()
+        .copied()
+}
+
+/// Every `MenSharp.MenSharpBehaviour` subclass in the compilation, as dotted
+/// paths — the auto-discovered entry set.
+pub fn behaviour_classes(declarations: &Declarations, signatures: &Signatures) -> Vec<String> {
+    let Some(marker) = behaviour_marker(declarations) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    let mut stack = vec![(declarations.table.root(), String::new())];
+    while let Some((symbol_id, path)) = stack.pop() {
+        let symbol = declarations.table.symbol(symbol_id);
+        for &member in &symbol.members {
+            let child = declarations.table.symbol(member);
+            let child_path = if path.is_empty() {
+                child.name.to_string()
+            } else {
+                format!("{path}.{}", child.name)
+            };
+            match child.kind {
+                SymbolKind::Namespace => stack.push((member, child_path)),
+                SymbolKind::Class
+                    if member != marker && is_behaviour_class(declarations, signatures, member) =>
+                {
+                    found.push(child_path);
+                }
+                _ => {}
+            }
+        }
+    }
+    found.sort();
+    found
 }
 
 /// Unity/VRChat lifecycle methods map to Udon's built-in event names; other

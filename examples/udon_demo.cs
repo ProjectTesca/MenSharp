@@ -1,15 +1,14 @@
-// MenSharp Udon demo: compile with
+// MenSharp Udon demo, behaviour style: any class inheriting MenSharpBehaviour
+// becomes one Udon program — no configuration. Its public methods are Udon
+// events (Start runs on world load) and its public fields are the program's
+// public variables, visible on the UdonBehaviour.
 //
-//   men-sharp --reference System.Private.CoreLib.dll \
-//             --reference UnityEngine.CoreModule.dll \
-//             --emit-udon Demo.Greeter --out greeter examples/udon_demo.cs
-//
-// then import greeter.uasm + greeter.meta.json with the Unity editor script
-// in tools/unity/MenSharpProgramImporter.cs and drop the produced program
-// asset onto an UdonBehaviour. `Start` runs on world load and logs greetings
-// built with a generic List<T>, string interpolation and a class.
+// In a Unity project with the MenSharp package: drop this under
+// Assets/MenSharp/, press MenSharp > Compile All, and attach
+// Assets/MenSharp/Programs/Greeter.asset to an UdonBehaviour.
 
 using System.Collections.Generic;
+using MenSharp;
 using UnityEngine;
 
 namespace Demo
@@ -31,17 +30,18 @@ namespace Demo
         }
     }
 
-    public class Greeter
+    public class Greeter : MenSharpBehaviour
     {
-        public static int total;
+        // a public variable: the inspector's value survives into Udon, so
+        // setting it to 100 on the component makes the total come out at 103
+        public int total;
 
-        public static void Start()
+        public void Start()
         {
             var visitors = new List<Visitor>();
             visitors.Add(new Visitor("beatrice", 1));
             visitors.Add(new Visitor("claude", 2));
 
-            total = 0;
             for (int i = 0; i < visitors.Count; i++)
             {
                 Debug.Log(visitors[i].Greeting());

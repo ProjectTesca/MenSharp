@@ -52,6 +52,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn function_has_this(&self, key: &FunctionKey) -> bool {
+        // the behaviour entry class has exactly one instance — the program
+        // itself — so its members carry no `this` and its fields are globals
+        if self.is_entry_member(key.symbol) {
+            return false;
+        }
         match key.role {
             Role::Constructor | Role::DefaultConstructor => true,
             _ => !self.declarations.table.symbol(key.symbol).is_static,

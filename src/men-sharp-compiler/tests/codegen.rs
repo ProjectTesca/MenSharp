@@ -497,3 +497,233 @@ fn the_shipped_demo_runs_in_the_emulator() {
         ]
     );
 }
+
+/// Compile with the corlib included (MenSharpBehaviour lives there) and run
+/// one behaviour program.
+fn run_behaviour(source: &str, class_path: &str, event: &str) -> Option<Emulator> {
+    let dir = dotnet_shared_dir()?;
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+    let program = programs
+        .iter()
+        .find(|program| program.class_path == class_path)
+        .unwrap_or_else(|| {
+            panic!(
+                "behaviour {class_path} was not discovered; found {:?}",
+                programs.iter().map(|p| &p.class_path).collect::<Vec<_>>()
+            )
+        });
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+
+    let assembled = program.output.program.assemble().unwrap();
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    emulator.run(&assembled, event).unwrap_or_else(|error| {
+        panic!(
+            "emulator error: {error:?}\n{}",
+            program.output.program.dump()
+        )
+    });
+    Some(emulator)
+}
+
+#[test]
+fn behaviour_instance_fields_become_public_variables() {
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour
+            {
+                public int openCount;
+                public float speed = 1.5f;
+                public string label = "front door";
+
+                private int Bump()
+                {
+                    openCount = openCount + 1;
+                    return openCount;
+                }
+
+                public void Interact()
+                {
+                    Bump();
+                    this.Bump();
+                    this.openCount += 40;
+                }
+            }
+        }
+        "#,
+        "Game.Door",
+        "_interact",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    // two bumps + 40
+    assert_eq!(int_of(&emulator, "openCount"), 42);
+    assert_eq!(string_of(&emulator, "label"), "front door");
+    match emulator.value_of("speed") {
+        Some(Value::Single(value)) => assert_eq!(*value, 1.5),
+        other => panic!("speed = {other:?}"),
+    }
+}
+
+#[test]
+fn every_behaviour_in_the_compilation_is_discovered() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour { public void Interact() { } }
+            public class Lamp : MenSharpBehaviour { public void Interact() { } }
+            public class Helper { }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+    let names: Vec<&str> = programs.iter().map(|p| p.class_path.as_str()).collect();
+    assert_eq!(names, vec!["Game.Door", "Game.Lamp"]);
+    for program in &programs {
+        assert!(
+            program.output.errors.is_empty(),
+            "{:#?}",
+            program.output.errors
+        );
+    }
+}
+
+#[test]
+fn constructing_a_behaviour_is_an_error() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour
+            {
+                public void Interact() { var other = new Door(); }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+    assert!(
+        programs[0]
+            .output
+            .errors
+            .iter()
+            .any(|error| error.message.contains("cannot be constructed")),
+        "{:#?}",
+        programs[0].output.errors
+    );
+}
+
+#[test]
+fn inspector_values_survive_field_initializers() {
+    // the Unity inspector applies public variables after the heap loads;
+    // literal field initializers must be baked heap defaults, not runtime
+    // code, or they would overwrite the inspector's values on the first event
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour
+            {
+                public int bonus = 7;
+                public string label = "default";
+                public int result;
+
+                public void Interact()
+                {
+                    result = bonus;
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+    let program = &programs[0];
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+
+    let assembled = program.output.program.assemble().unwrap();
+
+    // without inspector overrides: the baked defaults
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    emulator.run(&assembled, "_interact").unwrap();
+    assert_eq!(int_of(&emulator, "result"), 7);
+    assert_eq!(string_of(&emulator, "label"), "default");
+
+    // with inspector overrides applied before the first event: they win
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    assert!(emulator.set_value("bonus", Value::Int32(300)));
+    assert!(emulator.set_value("label", Value::Str("from inspector".into())));
+    emulator.run(&assembled, "_interact").unwrap();
+    assert_eq!(int_of(&emulator, "result"), 300);
+    assert_eq!(string_of(&emulator, "label"), "from inspector");
+}

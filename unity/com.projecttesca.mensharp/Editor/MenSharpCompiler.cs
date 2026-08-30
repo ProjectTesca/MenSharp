@@ -1,14 +1,14 @@
 // MenSharp: one-button compilation inside Unity.
 //
-// Workflow (v0.1):
+// Workflow:
 //   - M# sources live under Assets/MenSharp/ (plain .cs — Unity compiles them
 //     too, which is what gives you IDE completion for free)
-//   - Assets/MenSharp/mensharp.json lists the entry classes:
-//         { "entries": [ "Demo.Greeter" ] }
+//   - Every class inheriting MenSharp.MenSharpBehaviour is an entry point:
+//     no configuration, the compiler discovers them
 //   - Menu: MenSharp > Compile All (or Ctrl+Shift+M) runs the bundled Rust
-//     compiler; diagnostics land in the Console; one program asset per entry
-//     is created/updated under Assets/MenSharp/Programs/ with a stable GUID,
-//     so scene references survive recompiles.
+//     compiler; diagnostics land in the Console; one program asset per
+//     behaviour is created/updated under Assets/MenSharp/Programs/ with a
+//     stable GUID, so scene references survive recompiles.
 
 #if UNITY_EDITOR
 using System;
@@ -23,15 +23,8 @@ using Debug = UnityEngine.Debug;
 public static class MenSharpCompiler
 {
     private const string SourceRoot = "Assets/MenSharp";
-    private const string ConfigPath = SourceRoot + "/mensharp.json";
     private const string ProgramsFolder = SourceRoot + "/Programs";
     private const string PackageName = "com.projecttesca.mensharp";
-
-    [Serializable]
-    private class Config
-    {
-        public string[] entries;
-    }
 
     [MenuItem("MenSharp/Compile All %#m")]
     public static void CompileAll()
@@ -39,26 +32,14 @@ public static class MenSharpCompiler
         if (!Directory.Exists(SourceRoot))
         {
             Directory.CreateDirectory(SourceRoot);
-            File.WriteAllText(
-                ConfigPath,
-                "{\n  \"entries\": [\n  ]\n}\n");
+            EnsureAssemblyDefinition();
             AssetDatabase.Refresh();
             Debug.Log(
-                $"MenSharp: created {SourceRoot}. Put your .cs sources there and list entry "
-                + $"classes in {ConfigPath}, then compile again.");
+                $"MenSharp: created {SourceRoot}. Put your .cs sources there (classes "
+                + "inheriting MenSharpBehaviour become programs) and compile again.");
             return;
         }
-        if (!File.Exists(ConfigPath))
-        {
-            Debug.LogError($"MenSharp: missing {ConfigPath} — list your entry classes there.");
-            return;
-        }
-        var config = JsonUtility.FromJson<Config>(File.ReadAllText(ConfigPath));
-        if (config?.entries == null || config.entries.Length == 0)
-        {
-            Debug.LogError($"MenSharp: {ConfigPath} lists no entries.");
-            return;
-        }
+        EnsureAssemblyDefinition();
 
         var sources = Directory.GetFiles(SourceRoot, "*.cs", SearchOption.AllDirectories);
         if (sources.Length == 0)
@@ -75,45 +56,38 @@ public static class MenSharpCompiler
 
         string outputDirectory = Path.Combine("Library", "MenSharp");
         Directory.CreateDirectory(outputDirectory);
+        foreach (string stale in Directory.GetFiles(outputDirectory))
+        {
+            File.Delete(stale);
+        }
 
         var stopwatch = Stopwatch.StartNew();
-        int failures = 0;
-        foreach (string entry in config.entries)
+        if (!RunCompiler(binary, outputDirectory, sources))
         {
-            string safeName = entry.Replace('.', '_');
-            string outputBase = Path.Combine(outputDirectory, safeName);
-            if (!RunCompiler(binary, entry, outputBase, sources))
-            {
-                failures++;
-                continue;
-            }
+            Debug.LogError("MenSharp: compilation failed.");
+            return;
+        }
 
-            string className = entry.Substring(entry.LastIndexOf('.') + 1);
-            Directory.CreateDirectory(ProgramsFolder);
+        // one program asset per produced behaviour
+        var produced = Directory.GetFiles(outputDirectory, "*.uasm");
+        Directory.CreateDirectory(ProgramsFolder);
+        foreach (string uasmPath in produced)
+        {
+            string classPath = Path.GetFileNameWithoutExtension(uasmPath); // "Demo.Door"
+            string className = classPath.Substring(classPath.LastIndexOf('.') + 1);
+            string metaPath = Path.Combine(
+                outputDirectory, classPath + ".meta.json");
             MenSharpImporter.CreateOrUpdate(
-                outputBase + ".uasm",
-                outputBase + ".meta.json",
-                $"{ProgramsFolder}/{className}.asset");
+                uasmPath, metaPath, $"{ProgramsFolder}/{className}.asset");
         }
         AssetDatabase.SaveAssets();
 
-        if (failures == 0)
-        {
-            Debug.Log(
-                $"MenSharp: compiled {config.entries.Length} program(s) from {sources.Length} "
-                + $"file(s) in {stopwatch.ElapsedMilliseconds}ms.");
-        }
-        else
-        {
-            Debug.LogError($"MenSharp: {failures} program(s) failed to compile.");
-        }
+        Debug.Log(
+            $"MenSharp: compiled {produced.Length} behaviour(s) from {sources.Length} "
+            + $"file(s) in {stopwatch.ElapsedMilliseconds}ms.");
     }
 
-    private static bool RunCompiler(
-        string binary,
-        string entry,
-        string outputBase,
-        string[] sources)
+    private static bool RunCompiler(string binary, string outputDirectory, string[] sources)
     {
         var arguments = new List<string>();
         foreach (string reference in ReferenceAssemblies())
@@ -121,10 +95,9 @@ public static class MenSharpCompiler
             arguments.Add("--reference");
             arguments.Add(reference);
         }
-        arguments.Add("--emit-udon");
-        arguments.Add(entry);
-        arguments.Add("--out");
-        arguments.Add(outputBase);
+        arguments.Add("--emit-udon-all");
+        arguments.Add("--out-dir");
+        arguments.Add(outputDirectory);
         arguments.AddRange(sources);
 
         var info = new ProcessStartInfo
@@ -156,6 +129,37 @@ public static class MenSharpCompiler
             Debug.LogError($"[MenSharp] compiler exited with {process.ExitCode}\n{stdout}");
         }
         return process.ExitCode == 0;
+    }
+
+    /// An assembly definition keeps these sources out of Assembly-CSharp —
+    /// which keeps them out of *UdonSharp's* compilation pass (U# compiles
+    /// every Assembly-CSharp script and cannot resolve MenSharpBehaviour).
+    /// Unity still compiles them normally, so IDE completion keeps working.
+    private static void EnsureAssemblyDefinition()
+    {
+        string path = SourceRoot + "/MenSharp.Scripts.asmdef";
+        if (File.Exists(path))
+        {
+            return;
+        }
+        File.WriteAllText(path, @"{
+    ""name"": ""MenSharp.Scripts"",
+    ""rootNamespace"": """",
+    ""references"": [
+        ""ProjectTesca.MenSharp.Runtime""
+    ],
+    ""includePlatforms"": [],
+    ""excludePlatforms"": [],
+    ""allowUnsafeCode"": false,
+    ""overrideReferences"": false,
+    ""precompiledReferences"": [],
+    ""autoReferenced"": true,
+    ""defineConstraints"": [],
+    ""versionDefines"": [],
+    ""noEngineReferences"": false
+}
+");
+        AssetDatabase.Refresh();
     }
 
     private static string QuoteArguments(List<string> arguments)

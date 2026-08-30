@@ -209,10 +209,13 @@ impl Compiler {
     /// target, append these to the user's sources before [`Compiler::parse`];
     /// they compile, monomorphize and tree-shake like any other code.
     pub fn corlib_sources() -> Vec<SourceCode> {
-        vec![SourceCode::new(
-            "corlib/List.cs",
-            include_str!("../../../corlib/List.cs"),
-        )]
+        vec![
+            SourceCode::new("corlib/List.cs", include_str!("../../../corlib/List.cs")),
+            SourceCode::new(
+                "corlib/MenSharpBehaviour.cs",
+                include_str!("../../../corlib/MenSharpBehaviour.cs"),
+            ),
+        ]
     }
 
     /// Lowers a fully checked compilation to one Udon program. `entry_path`
@@ -235,4 +238,31 @@ impl Compiler {
             entry_path,
         )
     }
+
+    /// Discovers every `MenSharp.MenSharpBehaviour` subclass and lowers each
+    /// to its own Udon program — the auto-discovery path the Unity package
+    /// uses (no entry list needed).
+    pub fn generate_udon_behaviours(
+        &self,
+        declarations: &Declarations<'_>,
+        signatures: &Signatures,
+        bodies: &BodyCheck,
+        external: &(dyn ExternalTypes + Sync),
+    ) -> Vec<UdonBehaviourProgram> {
+        men_sharp_codegen::behaviour_classes(declarations, signatures)
+            .into_iter()
+            .map(|class_path| {
+                let segments: Vec<&str> = class_path.split('.').collect();
+                let output =
+                    self.generate_udon(declarations, signatures, bodies, external, &segments);
+                UdonBehaviourProgram { class_path, output }
+            })
+            .collect()
+    }
+}
+
+/// One behaviour's compiled program, tagged with its class path (`Demo.Door`).
+pub struct UdonBehaviourProgram {
+    pub class_path: String,
+    pub output: men_sharp_codegen::CodegenOutput,
 }

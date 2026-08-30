@@ -1,14 +1,8 @@
 {
-    "name": "ProjectTesca.MenSharp.Editor",
+    "name": "ProjectTesca.MenSharp.Runtime",
     "rootNamespace": "",
-    "references": [
-        "VRC.Udon",
-        "VRC.Udon.Editor",
-        "ProjectTesca.MenSharp.Runtime"
-    ],
-    "includePlatforms": [
-        "Editor"
-    ],
+    "references": [],
+    "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,
     "overrideReferences": false,

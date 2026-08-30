@@ -814,6 +814,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match &member.origin {
             MemberOrigin::Source(symbol) => {
                 let symbol = *symbol;
+                // fields (and auto-property stores) of the behaviour entry
+                // class are the program's named, exported heap slots
+                if self.is_entry_member(symbol)
+                    && matches!(member.kind, SymbolKind::Field | SymbolKind::Property)
+                    && (member.kind == SymbolKind::Field || self.is_auto_property(symbol))
+                {
+                    let slot = self.ensure_static(symbol, true);
+                    return Place::Slot(slot, member_type);
+                }
                 match member.kind {
                     SymbolKind::Field if member.is_static => {
                         let slot = self.ensure_static(symbol, false);
@@ -1220,6 +1229,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             PrimaryLeft::This(span) => match (ctx.this_slot, ctx.this_type.clone()) {
                 (Some(slot), Some(ty)) => Piece::Value(slot, ty),
+                // inside a behaviour method `this` is the program itself: it
+                // has no slot, but `this.field` / `this.Method()` still work
+                // because the member targets resolve without a receiver value
+                _ if self.is_entry_member(ctx.key.symbol) => Piece::Pending { receiver: None },
                 _ => {
                     self.error(ctx, "`this` is unavailable here", span.clone());
                     Piece::Error
@@ -1468,7 +1481,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 } else {
                     receiver.as_ref().map(|(slot, _)| *slot).or(ctx.this_slot)
                 };
-                let key = if !call.is_static && self.is_virtual(symbol) {
+                let key = if !call.is_static
+                    && self.is_virtual(symbol)
+                    && !self.is_entry_member(symbol)
+                {
                     self.dispatcher_for(ctx, call, symbol, &call.declaring_type)
                 } else {
                     FunctionKey {
@@ -1591,6 +1607,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .targets
             .get(&EntityID::from(new_expression))
             .cloned();
+
+        if let Type::Named {
+            target: TypeTarget::Source(created_symbol),
+            ..
+        } = &created
+            && self.entry_class == Some(*created_symbol)
+        {
+            self.error(
+                ctx,
+                "a behaviour cannot be constructed with `new` — Unity creates it when the component is added",
+                span,
+            );
+            return Piece::Error;
+        }
 
         if self.is_source_class(&created) {
             let Some(layout) = self.layout_of(&created) else {
