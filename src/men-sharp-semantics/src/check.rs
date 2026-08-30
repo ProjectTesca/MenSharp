@@ -1268,7 +1268,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             Expression::Switch(switch) => {
                 let value = self.check_expression(&switch.value);
-                let mut result: Option<Type> = None;
+                let mut arm_types: Vec<Type> = Vec::new();
                 if let Ok(arms) = switch.arms {
                     for arm in arms {
                         self.locals.push(HashMap::new());
@@ -1277,28 +1277,37 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             self.check_condition(guard);
                         }
                         if let Ok(arm_value) = &arm.value {
-                            let arm_type = self.check_expression(arm_value);
-                            match &result {
-                                None => result = Some(arm_type),
-                                Some(previous) => {
-                                    if !matches!(arm_type, Type::Null)
-                                        && !self
-                                            .system()
-                                            .is_implicitly_convertible(&arm_type, previous)
-                                    {
-                                        let kind = SemanticErrorKind::TypeMismatch {
-                                            expected: self.display(previous),
-                                            found: self.display(&arm_type),
-                                        };
-                                        self.error(kind, arm_value.span());
-                                    }
-                                }
-                            }
+                            arm_types.push(self.check_expression_expecting(arm_value, expected));
                         }
                         self.locals.pop();
                     }
                 }
-                result.unwrap_or(Type::Error)
+                if arm_types.is_empty() {
+                    return Type::Error;
+                }
+
+                let system = self.system();
+                match best_common_type(&system, &arm_types) {
+                    Some(common) => common,
+                    None if arm_types.iter().all(|arm| matches!(arm, Type::Null)) => Type::Null,
+                    None => {
+                        let first = arm_types[0].clone();
+                        let clash = arm_types
+                            .iter()
+                            .find(|arm| {
+                                best_common_type(&system, &[first.clone(), (*arm).clone()])
+                                    .is_none()
+                            })
+                            .cloned()
+                            .unwrap_or_else(|| first.clone());
+                        let kind = SemanticErrorKind::TypeMismatch {
+                            expected: self.display(&first),
+                            found: self.display(&clash),
+                        };
+                        self.error(kind, switch.span.clone());
+                        Type::Error
+                    }
+                }
             }
             Expression::Declaration(declaration) => {
                 // deconstruction targets; not modelled yet

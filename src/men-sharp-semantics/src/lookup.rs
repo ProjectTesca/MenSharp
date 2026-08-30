@@ -13,8 +13,10 @@
 //! - arrays look up in `System.Array`, `T?` in `System.Nullable<T>`.
 //!
 //! Candidates come back nearest-first (the derived type's members before the base's),
-//! and *all* of them come back: hiding, overload resolution and accessibility
-//! checks belong to the caller, which has the context this layer does not.
+//! with hidden members removed per §7.7.1.2: an override's base declaration, a
+//! same-signature base method, or any base member shadowed by a nearer non-method.
+//! Overload resolution and accessibility checks belong to the caller, which has
+//! the context this layer does not.
 //!
 //! Everything here is read-only over the phase outputs, so the driver may call it
 //! from any number of threads at once.
@@ -88,7 +90,7 @@ impl TypeSystem<'_, '_> {
             }
         }
 
-        out
+        remove_hidden(out)
     }
 
     /// Where lookup starts for each shape of receiver.
@@ -390,5 +392,44 @@ impl TypeSystem<'_, '_> {
             ) => *id == expected,
             _ => false,
         }
+    }
+}
+
+/// C# hiding (§7.7.1.2), applied to a nearest-first candidate list: a member
+/// hides base-class members of the same name — methods hide by signature
+/// (which also removes the base declarations of overrides), everything else
+/// hides by name. Members of the same declaring type never hide each other.
+fn remove_hidden(candidates: Vec<MemberCandidate>) -> Vec<MemberCandidate> {
+    let mut kept: Vec<MemberCandidate> = Vec::new();
+    'candidates: for candidate in candidates {
+        for nearer in &kept {
+            if nearer.declaring_type != candidate.declaring_type && hides(nearer, &candidate) {
+                continue 'candidates;
+            }
+        }
+        kept.push(candidate);
+    }
+    kept
+}
+
+fn hides(nearer: &MemberCandidate, farther: &MemberCandidate) -> bool {
+    let nearer_is_method = matches!(nearer.kind, SymbolKind::Method);
+    let farther_is_method = matches!(farther.kind, SymbolKind::Method);
+    if !nearer_is_method || !farther_is_method {
+        // non-methods hide by name; a method hides non-method base members too
+        return true;
+    }
+    if nearer.arity != farther.arity {
+        return false;
+    }
+    match (&nearer.signature, &farther.signature) {
+        (Some(MemberSignature::Function(a)), Some(MemberSignature::Function(b))) => {
+            a.parameters.len() == b.parameters.len()
+                && a.parameters
+                    .iter()
+                    .zip(&b.parameters)
+                    .all(|(x, y)| x.passing == y.passing && x.parameter_type == y.parameter_type)
+        }
+        _ => false,
     }
 }
