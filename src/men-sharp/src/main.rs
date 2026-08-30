@@ -17,10 +17,15 @@ use men_sharp_semantics::{
     BodyCheck, Declarations, MemberSignature, Signatures, SymbolId, SymbolKind, Type, TypeTarget,
 };
 
+const USAGE: &str = "usage: men-sharp [--threads N] [--reference lib.dll]... \
+[--emit-udon Namespace.EntryClass --out name] <file.cs>...";
+
 fn main() -> ExitCode {
     let mut thread_count = None;
     let mut paths = Vec::new();
     let mut reference_paths = Vec::new();
+    let mut udon_entry: Option<String> = None;
+    let mut out_name = "program".to_string();
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -39,8 +44,22 @@ fn main() -> ExitCode {
                 };
                 reference_paths.push(path);
             }
+            "--emit-udon" => {
+                let Some(entry) = arguments.next() else {
+                    eprintln!("--emit-udon needs an entry class (Namespace.Class)");
+                    return ExitCode::FAILURE;
+                };
+                udon_entry = Some(entry);
+            }
+            "--out" | "-o" => {
+                let Some(name) = arguments.next() else {
+                    eprintln!("--out needs a name");
+                    return ExitCode::FAILURE;
+                };
+                out_name = name;
+            }
             "--help" | "-h" => {
-                println!("usage: men-sharp [--threads N] [--reference lib.dll]... <file.cs>...");
+                println!("{USAGE}");
                 return ExitCode::SUCCESS;
             }
             path => paths.push(path.to_string()),
@@ -48,7 +67,7 @@ fn main() -> ExitCode {
     }
 
     if paths.is_empty() {
-        eprintln!("usage: men-sharp [--threads N] [--reference lib.dll]... <file.cs>...");
+        eprintln!("{USAGE}");
         return ExitCode::FAILURE;
     }
 
@@ -61,6 +80,10 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+    }
+    if udon_entry.is_some() {
+        // the Udon target compiles the mini-corlib along with user code
+        sources.extend(Compiler::corlib_sources());
     }
 
     let mut reference_bytes = Vec::with_capacity(reference_paths.len());
@@ -97,6 +120,50 @@ fn main() -> ExitCode {
 
     let error_count = report(&files, &declarations, &signatures, &bodies);
     println!("checked {} expressions", bodies.expression_types.len());
+
+    if let Some(entry) = &udon_entry {
+        if error_count > 0 {
+            eprintln!("{error_count} error(s); not emitting Udon assembly");
+            return ExitCode::FAILURE;
+        }
+        let entry_path: Vec<&str> = entry.split('.').collect();
+        let output = compiler.generate_udon(
+            &declarations,
+            &signatures,
+            &bodies,
+            &references,
+            &entry_path,
+        );
+        for error in &output.errors {
+            let file = &files[error.file.0 as usize];
+            let (line, column) = line_column(file.ast.source(), error.span.start);
+            eprintln!("{}:{line}:{column}: error: {}", file.name, error.message);
+        }
+        if !output.errors.is_empty() {
+            eprintln!("{} error(s)", output.errors.len());
+            return ExitCode::FAILURE;
+        }
+        let uasm = match output.program.to_uasm() {
+            Ok(uasm) => uasm,
+            Err(error) => {
+                eprintln!("assembly error: {error:?}");
+                return ExitCode::FAILURE;
+            }
+        };
+        let meta = output.program.to_meta_json().expect("assembled above");
+        let uasm_path = format!("{out_name}.uasm");
+        let meta_path = format!("{out_name}.meta.json");
+        if let Err(error) = std::fs::write(&uasm_path, uasm) {
+            eprintln!("{uasm_path}: {error}");
+            return ExitCode::FAILURE;
+        }
+        if let Err(error) = std::fs::write(&meta_path, meta) {
+            eprintln!("{meta_path}: {error}");
+            return ExitCode::FAILURE;
+        }
+        println!("wrote {uasm_path} and {meta_path}");
+        return ExitCode::SUCCESS;
+    }
 
     println!("symbols ({} threads):", compiler.thread_count());
     let printer = Printer {

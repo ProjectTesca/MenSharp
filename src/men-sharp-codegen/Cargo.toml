@@ -1,12 +1,10 @@
+# !tyml @cargo/Cargo
 [package]
-name = "men-sharp-compiler"
+name = "men-sharp-codegen"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 men-sharp-asm = { workspace = true }
-men-sharp-codegen = { workspace = true }
-men-sharp-dotnet = { workspace = true }
 men-sharp-parser = { workspace = true }
 men-sharp-semantics = { workspace = true }
-rayon = { workspace = true }

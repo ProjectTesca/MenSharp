@@ -1,0 +1,495 @@
+.data_start
+    .export total
+    total: %SystemInt32, null
+    fn_Demo_Greeter_Start_0__return: %SystemUInt32, null
+    __t1: %SystemObjectArray, null
+    __t2: %SystemObjectArray, null
+    __const_0_SystemInt32: %SystemInt32, null
+    __const_1_SystemInt32: %SystemInt32, null
+    fn_System_Collections_Generic_List__ctor_ctor_SystemObject_1__this: %SystemObjectArray, null
+    fn_System_Collections_Generic_List__ctor_ctor_SystemObject_1__return: %SystemUInt32, null
+    __retaddr_3: %SystemUInt32, null
+    __t4: %SystemObjectArray, null
+    __const_2_SystemInt32: %SystemInt32, null
+    __const_3_SystemString: %SystemString, null
+    fn_Demo_Visitor__ctor_ctor_2__this: %SystemObjectArray, null
+    fn_Demo_Visitor__ctor_ctor_2__p0: %SystemString, null
+    fn_Demo_Visitor__ctor_ctor_2__p1: %SystemInt32, null
+    fn_Demo_Visitor__ctor_ctor_2__return: %SystemUInt32, null
+    __retaddr_5: %SystemUInt32, null
+    fn_System_Collections_Generic_List_Add_SystemObject_3__this: %SystemObjectArray, null
+    fn_System_Collections_Generic_List_Add_SystemObject_3__p0: %SystemObjectArray, null
+    fn_System_Collections_Generic_List_Add_SystemObject_3__return: %SystemUInt32, null
+    __retaddr_6: %SystemUInt32, null
+    __t7: %SystemObjectArray, null
+    __const_4_SystemString: %SystemString, null
+    __const_5_SystemInt32: %SystemInt32, null
+    __retaddr_8: %SystemUInt32, null
+    __retaddr_9: %SystemUInt32, null
+    __t10: %SystemObjectArray, null
+    __const_6_SystemString: %SystemString, null
+    __retaddr_11: %SystemUInt32, null
+    __retaddr_12: %SystemUInt32, null
+    __t13: %SystemObjectArray, null
+    __const_7_SystemString: %SystemString, null
+    __retaddr_14: %SystemUInt32, null
+    __retaddr_15: %SystemUInt32, null
+    __t16: %SystemInt32, null
+    fn_System_Collections_Generic_List_Count_get_SystemObject_4__this: %SystemObjectArray, null
+    fn_System_Collections_Generic_List_Count_get_SystemObject_4__result: %SystemInt32, null
+    fn_System_Collections_Generic_List_Count_get_SystemObject_4__return: %SystemUInt32, null
+    __retaddr_20: %SystemUInt32, null
+    __t21: %SystemInt32, null
+    __t22: %SystemBoolean, null
+    fn_System_Collections_Generic_List_this___get_SystemObject_5__this: %SystemObjectArray, null
+    fn_System_Collections_Generic_List_this___get_SystemObject_5__p0: %SystemInt32, null
+    fn_System_Collections_Generic_List_this___get_SystemObject_5__result: %SystemObjectArray, null
+    fn_System_Collections_Generic_List_this___get_SystemObject_5__return: %SystemUInt32, null
+    __retaddr_23: %SystemUInt32, null
+    __t24: %SystemObjectArray, null
+    fn_Demo_Visitor_Greeting_6__this: %SystemObjectArray, null
+    fn_Demo_Visitor_Greeting_6__result: %SystemString, null
+    fn_Demo_Visitor_Greeting_6__return: %SystemUInt32, null
+    __retaddr_25: %SystemUInt32, null
+    __t26: %SystemString, null
+    __retaddr_27: %SystemUInt32, null
+    __t28: %SystemObjectArray, null
+    __t29: %SystemInt32, null
+    __t30: %SystemInt32, null
+    __t31: %SystemInt32, null
+    __t32: %SystemInt32, null
+    __const_8_SystemString: %SystemString, null
+    __t33: %SystemString, null
+    __t34: %SystemString, null
+    __const_9_SystemInt32: %SystemInt32, null
+    __t35: %SystemObjectArray, null
+    __t38: %SystemInt32, null
+    __t39: %SystemObjectArray, null
+    __t40: %SystemInt32, null
+    __t41: %SystemBoolean, null
+    __t42: %SystemObjectArray, null
+    __t43: %SystemInt32, null
+    __t44: %SystemInt32, null
+    __t45: %SystemObjectArray, null
+    __t46: %SystemObjectArray, null
+    __t47: %SystemInt32, null
+    __t48: %SystemObjectArray, null
+    __t49: %SystemInt32, null
+    __t50: %SystemInt32, null
+    __t51: %SystemInt32, null
+    __t52: %SystemInt32, null
+    __t53: %SystemInt32, null
+    __t54: %SystemObjectArray, null
+    __t55: %SystemObjectArray, null
+    __const_10_SystemString: %SystemString, null
+    __t56: %SystemString, null
+    __t57: %SystemString, null
+    __const_11_SystemString: %SystemString, null
+    __t58: %SystemString, null
+    __t59: %SystemInt32, null
+    __t60: %SystemString, null
+    __t61: %SystemString, null
+    __const_12_SystemString: %SystemString, null
+    __t62: %SystemString, null
+    __initialized: %SystemBoolean, null
+    __static_init__return: %SystemUInt32, null
+    __ret_event__start: %SystemUInt32, null
+    __halt__start: %SystemUInt32, null
+    __const_13_SystemBoolean: %SystemBoolean, null
+.data_end
+.code_start
+    .export _start
+        PUSH, __const_0_SystemInt32
+        PUSH, __t2
+        EXTERN, "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray"
+        PUSH, __t2
+        PUSH, __const_1_SystemInt32
+        PUSH, __const_1_SystemInt32
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        PUSH, __t2
+        PUSH, fn_System_Collections_Generic_List__ctor_ctor_SystemObject_1__this
+        COPY
+        PUSH, __retaddr_3
+        PUSH, fn_System_Collections_Generic_List__ctor_ctor_SystemObject_1__return
+        COPY
+        JUMP, 0x00000660
+        PUSH, __t2
+        PUSH, __t1
+        COPY
+        PUSH, __const_0_SystemInt32
+        PUSH, __t4
+        EXTERN, "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray"
+        PUSH, __t4
+        PUSH, __const_1_SystemInt32
+        PUSH, __const_2_SystemInt32
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        PUSH, __t4
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__this
+        COPY
+        PUSH, __const_3_SystemString
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p0
+        COPY
+        PUSH, __const_2_SystemInt32
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p1
+        COPY
+        PUSH, __retaddr_5
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__return
+        COPY
+        JUMP, 0x000006C0
+        PUSH, __t1
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        COPY
+        PUSH, __t4
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__p0
+        COPY
+        PUSH, __retaddr_6
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__return
+        COPY
+        JUMP, 0x00000708
+        PUSH, __const_0_SystemInt32
+        PUSH, __t7
+        EXTERN, "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray"
+        PUSH, __t7
+        PUSH, __const_1_SystemInt32
+        PUSH, __const_2_SystemInt32
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        PUSH, __t7
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__this
+        COPY
+        PUSH, __const_4_SystemString
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p0
+        COPY
+        PUSH, __const_5_SystemInt32
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p1
+        COPY
+        PUSH, __retaddr_8
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__return
+        COPY
+        JUMP, 0x000006C0
+        PUSH, __t1
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        COPY
+        PUSH, __t7
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__p0
+        COPY
+        PUSH, __retaddr_9
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__return
+        COPY
+        JUMP, 0x00000708
+        PUSH, __const_0_SystemInt32
+        PUSH, __t10
+        EXTERN, "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray"
+        PUSH, __t10
+        PUSH, __const_1_SystemInt32
+        PUSH, __const_2_SystemInt32
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        PUSH, __t10
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__this
+        COPY
+        PUSH, __const_6_SystemString
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p0
+        COPY
+        PUSH, __const_5_SystemInt32
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p1
+        COPY
+        PUSH, __retaddr_11
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__return
+        COPY
+        JUMP, 0x000006C0
+        PUSH, __t1
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        COPY
+        PUSH, __t10
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__p0
+        COPY
+        PUSH, __retaddr_12
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__return
+        COPY
+        JUMP, 0x00000708
+        PUSH, __const_0_SystemInt32
+        PUSH, __t13
+        EXTERN, "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray"
+        PUSH, __t13
+        PUSH, __const_1_SystemInt32
+        PUSH, __const_2_SystemInt32
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        PUSH, __t13
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__this
+        COPY
+        PUSH, __const_7_SystemString
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p0
+        COPY
+        PUSH, __const_2_SystemInt32
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p1
+        COPY
+        PUSH, __retaddr_14
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__return
+        COPY
+        JUMP, 0x000006C0
+        PUSH, __t1
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        COPY
+        PUSH, __t13
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__p0
+        COPY
+        PUSH, __retaddr_15
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__return
+        COPY
+        JUMP, 0x00000708
+        PUSH, __const_1_SystemInt32
+        PUSH, total
+        COPY
+        PUSH, __const_1_SystemInt32
+        PUSH, __t16
+        COPY
+        PUSH, __t1
+        PUSH, fn_System_Collections_Generic_List_Count_get_SystemObject_4__this
+        COPY
+        PUSH, __retaddr_20
+        PUSH, fn_System_Collections_Generic_List_Count_get_SystemObject_4__return
+        COPY
+        JUMP, 0x00000960
+        PUSH, fn_System_Collections_Generic_List_Count_get_SystemObject_4__result
+        PUSH, __t21
+        COPY
+        PUSH, __t16
+        PUSH, __t21
+        PUSH, __t22
+        EXTERN, "SystemInt32.__op_LessThan__SystemInt32_SystemInt32__SystemBoolean"
+        PUSH, __t22
+        JUMP_IF_FALSE, 0x00000610
+        PUSH, __t1
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__this
+        COPY
+        PUSH, __t16
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__p0
+        COPY
+        PUSH, __retaddr_23
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__return
+        COPY
+        JUMP, 0x0000099C
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__result
+        PUSH, __t24
+        COPY
+        PUSH, __t24
+        PUSH, fn_Demo_Visitor_Greeting_6__this
+        COPY
+        PUSH, __retaddr_25
+        PUSH, fn_Demo_Visitor_Greeting_6__return
+        COPY
+        JUMP, 0x00000A00
+        PUSH, fn_Demo_Visitor_Greeting_6__result
+        PUSH, __t26
+        COPY
+        PUSH, __t26
+        EXTERN, "UnityEngineDebug.__Log__SystemObject__SystemVoid"
+        PUSH, __t1
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__this
+        COPY
+        PUSH, __t16
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__p0
+        COPY
+        PUSH, __retaddr_27
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__return
+        COPY
+        JUMP, 0x0000099C
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__result
+        PUSH, __t28
+        COPY
+        PUSH, __t28
+        PUSH, __const_5_SystemInt32
+        PUSH, __t29
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, total
+        PUSH, __t29
+        PUSH, __t30
+        EXTERN, "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32"
+        PUSH, __t30
+        PUSH, total
+        COPY
+        PUSH, __t16
+        PUSH, __t31
+        COPY
+        PUSH, __t16
+        PUSH, __const_2_SystemInt32
+        PUSH, __t32
+        EXTERN, "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32"
+        PUSH, __t32
+        PUSH, __t16
+        COPY
+        JUMP, 0x000003F4
+        PUSH, total
+        PUSH, __t33
+        EXTERN, "SystemInt32.__ToString__SystemString"
+        PUSH, __const_8_SystemString
+        PUSH, __t33
+        PUSH, __t34
+        EXTERN, "SystemString.__Concat__SystemString_SystemString__SystemString"
+        PUSH, __t34
+        EXTERN, "UnityEngineDebug.__Log__SystemObject__SystemVoid"
+        JUMP_INDIRECT, fn_Demo_Greeter_Start_0__return
+        PUSH, __const_9_SystemInt32
+        PUSH, __t35
+        EXTERN, "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray"
+        PUSH, fn_System_Collections_Generic_List__ctor_ctor_SystemObject_1__this
+        PUSH, __const_2_SystemInt32
+        PUSH, __t35
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        PUSH, fn_System_Collections_Generic_List__ctor_ctor_SystemObject_1__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __const_1_SystemInt32
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        JUMP_INDIRECT, fn_System_Collections_Generic_List__ctor_ctor_SystemObject_1__return
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__this
+        PUSH, __const_2_SystemInt32
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p0
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__this
+        PUSH, __const_5_SystemInt32
+        PUSH, fn_Demo_Visitor__ctor_ctor_2__p1
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        JUMP_INDIRECT, fn_Demo_Visitor__ctor_ctor_2__return
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __t38
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_2_SystemInt32
+        PUSH, __t39
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t39
+        PUSH, __t40
+        EXTERN, "SystemArray.__get_Length__SystemInt32"
+        PUSH, __t38
+        PUSH, __t40
+        PUSH, __t41
+        EXTERN, "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean"
+        PUSH, __t41
+        JUMP_IF_FALSE, 0x00000884
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __t43
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t43
+        PUSH, __const_5_SystemInt32
+        PUSH, __t44
+        EXTERN, "SystemInt32.__op_Multiplication__SystemInt32_SystemInt32__SystemInt32"
+        PUSH, __t44
+        PUSH, __t45
+        EXTERN, "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray"
+        PUSH, __t45
+        PUSH, __t42
+        COPY
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_2_SystemInt32
+        PUSH, __t46
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __t47
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t46
+        PUSH, __t42
+        PUSH, __t47
+        EXTERN, "SystemArray.__Copy__SystemArray_SystemArray_SystemInt32__SystemVoid"
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_2_SystemInt32
+        PUSH, __t42
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        JUMP, 0x00000884
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_2_SystemInt32
+        PUSH, __t48
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __t49
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t48
+        PUSH, __t49
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__p0
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __t50
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t50
+        PUSH, __t51
+        COPY
+        PUSH, __t50
+        PUSH, __const_2_SystemInt32
+        PUSH, __t52
+        EXTERN, "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32"
+        PUSH, fn_System_Collections_Generic_List_Add_SystemObject_3__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __t52
+        EXTERN, "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid"
+        JUMP_INDIRECT, fn_System_Collections_Generic_List_Add_SystemObject_3__return
+        PUSH, fn_System_Collections_Generic_List_Count_get_SystemObject_4__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __t53
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t53
+        PUSH, fn_System_Collections_Generic_List_Count_get_SystemObject_4__result
+        COPY
+        JUMP_INDIRECT, fn_System_Collections_Generic_List_Count_get_SystemObject_4__return
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__this
+        PUSH, __const_2_SystemInt32
+        PUSH, __t54
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t54
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__p0
+        PUSH, __t55
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t55
+        PUSH, fn_System_Collections_Generic_List_this___get_SystemObject_5__result
+        COPY
+        JUMP_INDIRECT, fn_System_Collections_Generic_List_this___get_SystemObject_5__return
+        JUMP_INDIRECT, fn_System_Collections_Generic_List_this___get_SystemObject_5__return
+        PUSH, fn_Demo_Visitor_Greeting_6__this
+        PUSH, __const_2_SystemInt32
+        PUSH, __t56
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __const_10_SystemString
+        PUSH, __t56
+        PUSH, __t57
+        EXTERN, "SystemString.__Concat__SystemString_SystemString__SystemString"
+        PUSH, __t57
+        PUSH, __const_11_SystemString
+        PUSH, __t58
+        EXTERN, "SystemString.__Concat__SystemString_SystemString__SystemString"
+        PUSH, fn_Demo_Visitor_Greeting_6__this
+        PUSH, __const_5_SystemInt32
+        PUSH, __t59
+        EXTERN, "SystemObjectArray.__Get__SystemInt32__SystemObject"
+        PUSH, __t59
+        PUSH, __t60
+        EXTERN, "SystemInt32.__ToString__SystemString"
+        PUSH, __t58
+        PUSH, __t60
+        PUSH, __t61
+        EXTERN, "SystemString.__Concat__SystemString_SystemString__SystemString"
+        PUSH, __t61
+        PUSH, __const_12_SystemString
+        PUSH, __t62
+        EXTERN, "SystemString.__Concat__SystemString_SystemString__SystemString"
+        PUSH, __t62
+        PUSH, fn_Demo_Visitor_Greeting_6__result
+        COPY
+        JUMP_INDIRECT, fn_Demo_Visitor_Greeting_6__return
+        JUMP_INDIRECT, fn_Demo_Visitor_Greeting_6__return
+    _start:
+        PUSH, __ret_event__start
+        PUSH, __static_init__return
+        COPY
+        PUSH, __initialized
+        JUMP_IF_FALSE, 0x00000B3C
+        PUSH, __halt__start
+        PUSH, fn_Demo_Greeter_Start_0__return
+        COPY
+        JUMP, 0x00000000
+        PUSH, __const_13_SystemBoolean
+        PUSH, __initialized
+        COPY
+        JUMP_INDIRECT, __static_init__return
+.code_end

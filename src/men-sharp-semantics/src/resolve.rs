@@ -747,15 +747,19 @@ impl<'ast> Resolver<'_, 'ast> {
         for using in &scope.usings {
             match using {
                 ResolvedUsing::Namespace(path) => {
-                    if let Some(symbol) = self.source_namespace_at(path)
-                        && let Some(id) = self.source_type_in(symbol, name, arity)
-                    {
+                    // a source declaration and a referenced type with the same
+                    // fully-qualified name are not ambiguous: the source one
+                    // wins, as in C# (CS0436) — that is also how the shipped
+                    // mini-corlib shadows types Udon does not expose
+                    let source = self
+                        .source_namespace_at(path)
+                        .and_then(|symbol| self.source_type_in(symbol, name, arity));
+                    if let Some(id) = source {
                         offer(Resolution::Type {
                             target: TypeTarget::Source(id),
                             arguments: Vec::new(),
                         });
-                    }
-                    if let Some(id) = self.external.find_type(path, name, arity) {
+                    } else if let Some(id) = self.external.find_type(path, name, arity) {
                         offer(Resolution::Type {
                             target: TypeTarget::External(id),
                             arguments: Vec::new(),

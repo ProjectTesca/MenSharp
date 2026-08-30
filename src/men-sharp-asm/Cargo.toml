@@ -1,0 +1,7 @@
+# !tyml @cargo/Cargo
+[package]
+name = "men-sharp-asm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]

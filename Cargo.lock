@@ -92,9 +92,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "men-sharp-asm"
+version = "0.1.0"
+
+[[package]]
+name = "men-sharp-codegen"
+version = "0.1.0"
+dependencies = [
+ "men-sharp-asm",
+ "men-sharp-parser",
+ "men-sharp-semantics",
+]
+
+[[package]]
 name = "men-sharp-compiler"
 version = "0.1.0"
 dependencies = [
+ "men-sharp-asm",
+ "men-sharp-codegen",
  "men-sharp-dotnet",
  "men-sharp-parser",
  "men-sharp-semantics",

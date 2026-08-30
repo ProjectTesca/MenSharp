@@ -58,6 +58,9 @@ pub struct BodyCheck {
     pub expression_types: HashMap<EntityID, Type>,
     /// Expression-level type references (casts, `new T`, locals, ...), resolved.
     pub resolved_types: HashMap<EntityID, Type>,
+    /// What each name/call/member node *bound to* — the code generator's map
+    /// from syntax to program elements.
+    pub targets: HashMap<EntityID, ResolvedTarget>,
     pub errors: Vec<SemanticError>,
 }
 
@@ -65,8 +68,48 @@ impl BodyCheck {
     pub fn merge(&mut self, other: BodyCheck) {
         self.expression_types.extend(other.expression_types);
         self.resolved_types.extend(other.resolved_types);
+        self.targets.extend(other.targets);
         self.errors.extend(other.errors);
     }
+}
+
+/// What a checked node resolved to. Keyed by node identity in
+/// [`BodyCheck::targets`]:
+/// - identifiers and member segments that name a value → [`ResolvedTarget::Local`]
+///   or [`ResolvedTarget::Member`];
+/// - invocation suffixes, `new` expressions, indexer accesses and user-defined
+///   operator applications → [`ResolvedTarget::Call`].
+#[derive(Debug, Clone)]
+pub enum ResolvedTarget {
+    /// A local variable or parameter; the code generator tracks scopes itself.
+    Local,
+    Member(ResolvedMember),
+    Call(ResolvedCall),
+}
+
+/// A field, property, event or enum-member access, receiver-instantiated.
+#[derive(Debug, Clone)]
+pub struct ResolvedMember {
+    pub origin: MemberOrigin,
+    pub kind: SymbolKind,
+    pub is_static: bool,
+    pub declaring_type: Type,
+    /// The member's value type after generic substitution.
+    pub member_type: Type,
+}
+
+/// A resolved invocation: the chosen overload with everything substituted.
+#[derive(Debug, Clone)]
+pub struct ResolvedCall {
+    pub origin: MemberOrigin,
+    pub is_static: bool,
+    /// The receiver was prepended as argument 0 (extension-method form).
+    pub is_extension: bool,
+    pub declaring_type: Type,
+    /// Parameter and return types, fully instantiated for this call site.
+    pub signature: FunctionSignature,
+    /// The method's own generic arguments, explicit or inferred.
+    pub type_arguments: Vec<Type>,
 }
 
 /// Checks every member body in one file. Pure over shared state; the driver runs
@@ -95,6 +138,7 @@ pub fn check_file(
         return_type: Type::Void,
         lambda_probe_returns: None,
         expression_types: HashMap::new(),
+        targets: HashMap::new(),
     };
 
     // rebuild the same file scope signature resolution used
@@ -126,6 +170,7 @@ pub fn check_file(
     BodyCheck {
         expression_types: checker.expression_types,
         resolved_types: checker.resolver.out.type_of,
+        targets: checker.targets,
         errors: checker.resolver.out.errors,
     }
 }
@@ -170,9 +215,19 @@ struct MethodGroup<'ast> {
 
 /// What one pass of overload resolution concluded.
 enum AttemptOutcome {
-    Selected(FunctionSignature),
+    Selected(SelectedOverload),
     Ambiguous,
     NoMatch { inference_failed: bool },
+}
+
+/// The winning candidate: its instantiated signature plus everything the code
+/// generator needs to identify it again.
+struct SelectedOverload {
+    signature: FunctionSignature,
+    /// Index into the group's candidate list.
+    candidate: usize,
+    /// The method's own generic arguments, explicit or inferred.
+    type_arguments: Vec<Type>,
 }
 
 /// One call argument. Lambdas are *deferred*: their bodies are typed during
@@ -217,6 +272,7 @@ struct Checker<'a, 'ast> {
     /// here instead of being validated against `return_type`.
     lambda_probe_returns: Option<Vec<Type>>,
     expression_types: HashMap<EntityID, Type>,
+    targets: HashMap<EntityID, ResolvedTarget>,
 }
 
 impl<'a, 'ast> Checker<'a, 'ast> {
@@ -1477,6 +1533,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if generics.is_none()
                     && let Some(ty) = self.local(name.value).cloned()
                 {
+                    self.targets
+                        .insert(EntityID::from(left), ResolvedTarget::Local);
                     return Meaning::Value(ty);
                 }
 
@@ -1494,6 +1552,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             explicit_arguments.clone(),
                             name.value,
                             span,
+                            Some(EntityID::from(left)),
                         )
                     {
                         return meaning;
@@ -1679,6 +1738,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         explicit_arguments: Vec<Type>,
         name: &'ast str,
         span: &Range<usize>,
+        node: Option<EntityID>,
     ) -> Option<Meaning<'ast>> {
         let AccessContext {
             receiver,
@@ -1760,6 +1820,18 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 Type::Error
             }
         };
+        if let Some(node) = node {
+            self.targets.insert(
+                node,
+                ResolvedTarget::Member(ResolvedMember {
+                    origin: first.origin.clone(),
+                    kind: first.kind,
+                    is_static: first.is_static,
+                    declaring_type: first.declaring_type.clone(),
+                    member_type: ty.clone(),
+                }),
+            );
+        }
         Some(Meaning::Value(ty))
     }
 
@@ -1783,16 +1855,30 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     return Meaning::Error;
                 };
                 let explicit_arguments = self.explicit_arguments(generics);
-                self.access_member(meaning, name.value, explicit_arguments, span)
+                self.access_member(
+                    meaning,
+                    name.value,
+                    explicit_arguments,
+                    span,
+                    Some(EntityID::from(right)),
+                )
             }
-            PrimaryRight::Invocation { arguments, span } => {
-                self.invoke(meaning, arguments.arguments, span)
-            }
+            PrimaryRight::Invocation { arguments, span } => self.invoke(
+                meaning,
+                arguments.arguments,
+                span,
+                Some(EntityID::from(right)),
+            ),
             PrimaryRight::ElementAccess {
                 arguments, span, ..
             } => {
                 let receiver = self.value_of(meaning, span.clone(), None);
-                self.index(receiver, arguments.arguments, span)
+                self.index(
+                    receiver,
+                    arguments.arguments,
+                    span,
+                    Some(EntityID::from(right)),
+                )
             }
             PrimaryRight::Postfix { operator, span } => {
                 let ty = self.value_of(meaning, span.clone(), None);
@@ -1814,6 +1900,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         name: &'ast str,
         explicit_arguments: Vec<Type>,
         span: &Range<usize>,
+        node: Option<EntityID>,
     ) -> Meaning<'ast> {
         match meaning {
             Meaning::Namespace(resolution) => {
@@ -1859,6 +1946,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     explicit_arguments,
                     name,
                     span,
+                    node,
                 )
                 .unwrap_or(Meaning::Error)
             }
@@ -1904,6 +1992,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     explicit_arguments,
                     name,
                     span,
+                    node,
                 )
                 .unwrap_or(Meaning::Error)
             }
@@ -1952,11 +2041,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         meaning: Meaning<'ast>,
         arguments: &'ast [Argument<'ast, 'ast>],
         span: &Range<usize>,
+        node: Option<EntityID>,
     ) -> Meaning<'ast> {
         match meaning {
             Meaning::Group(group) => {
                 let call_arguments = self.check_arguments(arguments);
-                Meaning::Value(self.resolve_call(group, call_arguments, span))
+                Meaning::Value(self.resolve_call(group, call_arguments, span, node))
             }
             Meaning::Value(ty) => {
                 // calling a value: a delegate invocation
@@ -1979,7 +2069,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             span: span.clone(),
                         };
                         let call_arguments = self.check_arguments(arguments);
-                        Meaning::Value(self.resolve_call(group, call_arguments, span))
+                        Meaning::Value(self.resolve_call(group, call_arguments, span, node))
                     }
                     None => {
                         if !matches!(ty, Type::Error) {
@@ -2084,10 +2174,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         group: MethodGroup<'ast>,
         arguments: Vec<CallArgument<'ast>>,
         span: &Range<usize>,
+        node: Option<EntityID>,
     ) -> Type {
         let instance_failure = match self.attempt_call(&group, &arguments) {
-            AttemptOutcome::Selected(signature) => {
-                return self.finish_call(&signature, &arguments);
+            AttemptOutcome::Selected(selected) => {
+                self.record_call(node, &group, &selected, false);
+                return self.finish_call(&selected.signature, &arguments);
             }
             AttemptOutcome::Ambiguous => {
                 self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
@@ -2112,8 +2204,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             extension_arguments.extend(arguments);
 
             match self.attempt_call(&extension_group, &extension_arguments) {
-                AttemptOutcome::Selected(signature) => {
-                    return self.finish_call(&signature, &extension_arguments);
+                AttemptOutcome::Selected(selected) => {
+                    self.record_call(node, &extension_group, &selected, true);
+                    return self.finish_call(&selected.signature, &extension_arguments);
                 }
                 AttemptOutcome::Ambiguous => {
                     self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
@@ -2133,6 +2226,31 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         self.report_call_failure(&group, &arguments, instance_failure, span);
         Type::Error
+    }
+
+    /// Remembers which overload a call node bound to, for the code generator.
+    fn record_call(
+        &mut self,
+        node: Option<EntityID>,
+        group: &MethodGroup<'ast>,
+        selected: &SelectedOverload,
+        is_extension: bool,
+    ) {
+        let Some(node) = node else {
+            return;
+        };
+        let candidate = &group.candidates[selected.candidate];
+        self.targets.insert(
+            node,
+            ResolvedTarget::Call(ResolvedCall {
+                origin: candidate.origin.clone(),
+                is_static: candidate.is_static,
+                is_extension,
+                declaring_type: candidate.declaring_type.clone(),
+                signature: selected.signature.clone(),
+                type_arguments: selected.type_arguments.clone(),
+            }),
+        );
     }
 
     fn report_call_failure(
@@ -2170,10 +2288,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         group: &MethodGroup<'ast>,
         arguments: &[CallArgument<'ast>],
     ) -> AttemptOutcome {
-        let mut viable: Vec<(FunctionSignature, usize)> = Vec::new();
+        let mut viable: Vec<(SelectedOverload, usize)> = Vec::new();
         let mut inference_failed = false;
 
-        'candidates: for candidate in &group.candidates {
+        'candidates: for (candidate_index, candidate) in group.candidates.iter().enumerate() {
             let Some(MemberSignature::Function(signature)) = &candidate.signature else {
                 continue;
             };
@@ -2185,7 +2303,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
 
             // the method's own generic parameters: explicit, inferred, or absent
-            let signature = if candidate.arity > 0 {
+            let (signature, type_arguments) = if candidate.arity > 0 {
                 let keys = method_parameter_keys(&self.system(), candidate);
                 let mut engine = Inference::new(keys.clone());
 
@@ -2246,16 +2364,29 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                 }
 
-                match engine.substitute_signature(&MemberSignature::Function((*signature).clone()))
+                let type_arguments: Vec<Type> = keys
+                    .iter()
+                    .map(|key| {
+                        engine.substitute(&match key {
+                            InferenceKey::Source(symbol) => Type::TypeParameter(*symbol),
+                            InferenceKey::External(index) => {
+                                Type::ExternalMethodTypeParameter(*index)
+                            }
+                        })
+                    })
+                    .collect();
+                let function = match engine
+                    .substitute_signature(&MemberSignature::Function((*signature).clone()))
                 {
                     MemberSignature::Function(function) => function,
                     _ => unreachable!(),
-                }
+                };
+                (function, type_arguments)
             } else {
                 if !group.explicit_arguments.is_empty() {
                     continue;
                 }
-                (*signature).clone()
+                ((*signature).clone(), Vec::new())
             };
 
             // applicability
@@ -2312,7 +2443,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                 }
             }
-            viable.push((signature, exact));
+            viable.push((
+                SelectedOverload {
+                    signature,
+                    candidate: candidate_index,
+                    type_arguments,
+                },
+                exact,
+            ));
         }
 
         let best = viable.iter().map(|(_, exact)| *exact).max();
@@ -2321,11 +2459,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         };
 
         let mut winners = viable.into_iter().filter(|(_, exact)| *exact == best);
-        let (signature, _) = winners.next().unwrap();
+        let (selected, _) = winners.next().unwrap();
         if winners.next().is_some() {
             return AttemptOutcome::Ambiguous;
         }
-        AttemptOutcome::Selected(signature)
+        AttemptOutcome::Selected(selected)
     }
 
     /// The chosen overload's side effects: lambda bodies checked for real,
@@ -2815,7 +2953,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 receiver_display,
                 span: new_expression.span.clone(),
             };
-            self.resolve_call(group, arguments, &new_expression.span);
+            self.resolve_call(
+                group,
+                arguments,
+                &new_expression.span,
+                Some(EntityID::from(new_expression)),
+            );
         }
 
         self.check_initializer(&new_expression.initializer, &ty);
@@ -2889,6 +3032,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         receiver: Type,
         arguments: &'ast [Argument<'ast, 'ast>],
         span: &Range<usize>,
+        node: Option<EntityID>,
     ) -> Meaning<'ast> {
         let call_arguments = self.check_arguments(arguments);
 
@@ -2937,7 +3081,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     receiver_display,
                     span: span.clone(),
                 };
-                Meaning::Value(self.resolve_call(group, call_arguments, span))
+                Meaning::Value(self.resolve_call(group, call_arguments, span, node))
             }
         }
     }

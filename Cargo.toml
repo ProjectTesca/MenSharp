@@ -3,6 +3,8 @@
 resolver = "2"
 members = [
     "src/men-sharp",
+    "src/men-sharp-asm",
+    "src/men-sharp-codegen",
     "src/men-sharp-compiler",
     "src/men-sharp-dotnet",
     "src/men-sharp-parser",
@@ -14,6 +16,8 @@ men-sharp-parser = { path = "src/men-sharp-parser" }
 men-sharp-semantics = { path = "src/men-sharp-semantics" }
 men-sharp-compiler = { path = "src/men-sharp-compiler" }
 men-sharp-dotnet = { path = "src/men-sharp-dotnet" }
+men-sharp-asm = { path = "src/men-sharp-asm" }
+men-sharp-codegen = { path = "src/men-sharp-codegen" }
 regex = "1.11.1"
 bumpalo = { version = "3.17.0", features = ["allocator-api2"] }
 allocator-api2 = "0.2.21"

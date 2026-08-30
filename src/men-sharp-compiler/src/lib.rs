@@ -203,4 +203,36 @@ impl Compiler {
             .sort_by_key(|error| (error.file, error.span.start, error.span.end));
         all
     }
+
+    /// The mini-corlib sources shipped inside the compiler: source ports of
+    /// BCL types Udon does not whitelist (`List<T>`, ...). For the Udon
+    /// target, append these to the user's sources before [`Compiler::parse`];
+    /// they compile, monomorphize and tree-shake like any other code.
+    pub fn corlib_sources() -> Vec<SourceCode> {
+        vec![SourceCode::new(
+            "corlib/List.cs",
+            include_str!("../../../corlib/List.cs"),
+        )]
+    }
+
+    /// Lowers a fully checked compilation to one Udon program. `entry_path`
+    /// names the entry class; see [`men_sharp_codegen::generate`].
+    pub fn generate_udon(
+        &self,
+        declarations: &Declarations<'_>,
+        signatures: &Signatures,
+        bodies: &BodyCheck,
+        external: &(dyn ExternalTypes + Sync),
+        entry_path: &[&str],
+    ) -> men_sharp_codegen::CodegenOutput {
+        let nodes = men_sharp_codegen::UdonNodes::for_unity_version(None);
+        men_sharp_codegen::generate(
+            declarations,
+            signatures,
+            bodies,
+            external,
+            nodes,
+            entry_path,
+        )
+    }
 }
