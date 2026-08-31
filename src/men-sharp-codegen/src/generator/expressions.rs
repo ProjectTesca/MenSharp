@@ -148,6 +148,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .unwrap_or(Type::Error),
             };
             let ty = self.substitute(&ty, &ctx.key.bindings);
+            // only when the type was written out: a `var` takes its type from
+            // the initializer, which reports its own problem — saying it twice
+            // for one line helps nobody
+            if !matches!(&declared, None | Some(Type::Infer)) {
+                let file = ctx.file;
+                self.reject_behaviour_type(&ty, "this local's type", file, declarator.span.clone());
+            }
             let slot = self.temp_for(&ty);
             if let Some(value) = initializer
                 && let Some(lowered) = self.lower_expression(ctx, value)

@@ -94,6 +94,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let (parameter_types, return_type) = self.function_shape(key);
         let has_this = self.function_has_this(key);
 
+        // a behaviour is a whole program, so it cannot be passed or returned
+        let (file, span) = self.declaration_site(key.symbol);
+        for parameter in &parameter_types {
+            self.reject_behaviour_type(parameter, "a parameter type", file, span.clone());
+        }
+        self.reject_behaviour_type(&return_type, "the return type", file, span);
+
         let mut parameters = Vec::new();
         if has_this {
             let slot = self.program.add_data(DataSymbol {

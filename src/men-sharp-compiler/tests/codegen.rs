@@ -1174,3 +1174,99 @@ fn a_program_records_the_file_it_came_from() {
     let meta = program.output.program.to_meta_json().unwrap();
     assert!(meta.contains("\"source\": \"Doors.cs\""), "{meta}");
 }
+
+#[test]
+fn referring_to_another_behaviour_is_an_error() {
+    // this used to compile: the field became an `object[]` public variable and
+    // the other behaviour's method was inlined into this program, so nothing
+    // said a word until it failed on the VM
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        public void Open() { }
+                    }
+
+                    public class Switch : MenSharp.MenSharpBehaviour
+                    {
+                        public Door door;
+                        public Door[] doors;
+                        public void Interact() { door.Open(); }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Switch",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    // both the single reference and the array of them
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.contains("is a MenSharpBehaviour"))
+            .count(),
+        2,
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn attributes_that_would_change_behaviour_are_errors() {
+    // `[UdonSynced]` used to be dropped on the floor: the program compiled,
+    // ran, and simply never synchronised
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Counter : MenSharp.MenSharpBehaviour
+                    {
+                        [UdonSynced] public int total;
+                        [Header("looks only")] public int shown;
+                        public void Interact() { total = total + 1; }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Counter",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("[UdonSynced]")),
+        "{messages:?}"
+    );
+    // cosmetic attributes stay silent: ignoring them costs nothing
+    assert!(
+        !messages.iter().any(|message| message.contains("[Header]")),
+        "{messages:?}"
+    );
+}

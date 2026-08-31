@@ -62,9 +62,17 @@ the others with an **Add** button next to each.
   called from a base always lands on the leaf's override. Because the public
   variables share one inspector namespace, a name may not be declared twice
   in a hierarchy.
-- Not supported yet (each is a clear compile error, never silent breakage):
-  recursion, exceptions, `ref`/`out` arguments, enums, user-defined structs,
-  generic externs such as `GetComponent<T>`.
+- Not supported yet. Each is a compile error rather than a program that runs
+  and does the wrong thing:
+  - **networking** — `[UdonSynced]`, `RequestSerialization`, ownership;
+  - **one behaviour referring to another** — `public Door door;` and
+    `door.Open()`, which need Udon custom events;
+  - `SendCustomEvent`, `GetComponent<T>`, `Instantiate`/`Destroy`, and the
+    VRChat events that take parameters (`OnPlayerJoined`, ...);
+  - `[SerializeField]`, `[FieldChangeCallback]`, `[RecursiveMethod]` (purely
+    cosmetic attributes like `[Header]` are ignored without complaint);
+  - recursion, exceptions, `ref`/`out` arguments, user-defined structs, and
+    `switch` over enum values (enums otherwise work).
 
 ## Links
 

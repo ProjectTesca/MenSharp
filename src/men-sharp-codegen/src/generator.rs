@@ -38,7 +38,7 @@ use men_sharp_asm::{
 use men_sharp_parser::ast::{
     Argument, ArgumentValue, AssignmentOperator, BinaryOperator, Block, EntityID, Expression,
     ForInitializer, FunctionBody, InitializerValue, InterpolationPart, LiteralExpression,
-    PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, UnaryOperator,
+    PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, TypeRefBase, UnaryOperator,
 };
 use men_sharp_semantics::{
     Accessibility, BodyCheck, Declarations, ExternalTypes, FileId, MemberOrigin, MemberSignature,
@@ -333,6 +333,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.collect_statics(entry, true);
         if self.entry_class.is_some() {
             self.collect_entry_instance_fields(entry);
+            for class in self.entry_chain.clone() {
+                self.check_unsupported_attributes(class);
+            }
         }
 
         // public methods are events (instance ones only on a behaviour; static
@@ -1006,7 +1009,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// Where a symbol was declared, for diagnostics that have no expression to
     /// point at.
-    fn declaration_site(&self, symbol: SymbolId) -> (FileId, Range<usize>) {
+    pub(super) fn declaration_site(&self, symbol: SymbolId) -> (FileId, Range<usize>) {
         match self.declarations.table.symbol(symbol).declarations.first() {
             Some(site) => {
                 let span = match &site.syntax {
@@ -1073,6 +1076,98 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         member
     }
 
+    /// The behaviour class a type refers to, looking through arrays. A
+    /// behaviour is a whole Udon program, not a value: nothing in this backend
+    /// can hold one yet, so every place a type like this could reach checks
+    /// here and reports instead of lowering it to a meaningless `object[]`.
+    pub(super) fn behaviour_in_type(&self, ty: &Type) -> Option<SymbolId> {
+        match ty {
+            Type::Named {
+                target: TypeTarget::Source(symbol),
+                ..
+            } if Some(*symbol) != self.marker
+                && is_behaviour_class(self.declarations, self.signatures, *symbol) =>
+            {
+                Some(*symbol)
+            }
+            Type::Array { element, .. } => self.behaviour_in_type(element),
+            Type::Nullable(inner) => self.behaviour_in_type(inner),
+            _ => None,
+        }
+    }
+
+    /// Reports a type that names another behaviour, and says so in terms of
+    /// what is missing rather than what went wrong internally.
+    pub(super) fn reject_behaviour_type(
+        &mut self,
+        ty: &Type,
+        what: &str,
+        file: FileId,
+        span: Range<usize>,
+    ) {
+        let Some(symbol) = self.behaviour_in_type(ty) else {
+            return;
+        };
+        let name = self.display_path(symbol);
+        self.errors.push(CodegenError {
+            message: format!(
+                "{what} names `{name}`, which is a MenSharpBehaviour — one Udon program \
+                 cannot hold a reference to another yet (that needs its calls to become \
+                 custom events), so this would compile to something that cannot work"
+            ),
+            file,
+            span,
+        });
+    }
+
+    /// The attributes a behaviour's members carry that this backend does not
+    /// implement *and* that change what the program does. Ignoring them would
+    /// produce a program that runs but does the wrong thing — an unsynced
+    /// variable looks exactly like a synced one until two people are in the
+    /// world.
+    fn check_unsupported_attributes(&mut self, class: SymbolId) {
+        let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
+        for member in members {
+            let sites: Vec<&men_sharp_semantics::DeclarationSite> = self
+                .declarations
+                .table
+                .symbol(member)
+                .declarations
+                .iter()
+                .collect();
+            for site in sites {
+                let sections = match &site.syntax {
+                    SyntaxRef::Field { field, .. } => field.attributes,
+                    SyntaxRef::Property(property) => property.attributes,
+                    SyntaxRef::Method(method) => method.attributes,
+                    _ => continue,
+                };
+                for section in sections {
+                    for attribute in section.attributes {
+                        let TypeRefBase::Name(name) = &attribute.name.base else {
+                            continue;
+                        };
+                        let Some(last) = name.segments.last() else {
+                            continue;
+                        };
+                        let spelling = last.name.value;
+                        let Some(explanation) = unimplemented_attribute(spelling) else {
+                            continue;
+                        };
+                        self.errors.push(CodegenError {
+                            message: format!(
+                                "`[{spelling}]` is not supported by the Udon backend yet: \
+                                 {explanation}"
+                            ),
+                            file: site.file,
+                            span: attribute.span.clone(),
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     /// The heap slot for a member declared directly on `MenSharpBehaviour`
     /// (`gameObject`, `transform`), or `None` for anything else.
     ///
@@ -1116,6 +1211,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => ty.clone(),
             _ => Type::Error,
         };
+        let (file, span) = self.declaration_site(field);
+        self.reject_behaviour_type(&ty, "this variable's type", file, span);
         let udon_type = self.heap_type(&ty);
         let symbol = self.declarations.table.symbol(field);
         let name = if export {
@@ -1213,6 +1310,29 @@ fn literal_heap_init(expression: &Expression, udon_type: &str) -> Option<HeapIni
             }
             Some(HeapInit::Str(inner.to_string()))
         }
+        _ => None,
+    }
+}
+
+/// Attributes that silently change a program's meaning and that this backend
+/// does not implement. Cosmetic ones (`Header`, `Tooltip`, `Space`, ...) are
+/// deliberately absent: ignoring those costs nothing but a label.
+fn unimplemented_attribute(name: &str) -> Option<&'static str> {
+    let name = name.strip_suffix("Attribute").unwrap_or(name);
+    match name {
+        "UdonSynced" => Some(
+            "network synchronisation is not implemented, so the variable would stay \
+             local and the world would only look right to you",
+        ),
+        "FieldChangeCallback" => Some("the callback would never run"),
+        "RecursiveMethod" => Some(
+            "calls use static frames, so recursion is rejected outright rather than \
+             given a stack",
+        ),
+        "SerializeField" | "NonSerialized" => Some(
+            "which fields become public variables is decided by `public` alone, so this \
+             would not change what the inspector shows",
+        ),
         _ => None,
     }
 }
