@@ -137,8 +137,13 @@ fn main() -> ExitCode {
             eprintln!("{error_count} error(s); not emitting Udon assembly");
             return ExitCode::FAILURE;
         }
-        let programs =
-            compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+        let programs = compiler.generate_udon_behaviours(
+            &declarations,
+            &signatures,
+            &bodies,
+            &references,
+            &files,
+        );
         if programs.is_empty() {
             eprintln!("no MenSharpBehaviour subclasses found — nothing to compile for Udon");
             return ExitCode::FAILURE;

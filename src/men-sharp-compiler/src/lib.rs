@@ -279,13 +279,19 @@ impl Compiler {
         signatures: &Signatures,
         bodies: &BodyCheck,
         external: &(dyn ExternalTypes + Sync),
+        files: &[ParsedFile],
     ) -> Vec<UdonBehaviourProgram> {
         men_sharp_codegen::behaviour_classes(declarations, signatures)
             .into_iter()
             .map(|class_path| {
                 let segments: Vec<&str> = class_path.split('.').collect();
-                let output =
+                let mut output =
                     self.generate_udon(declarations, signatures, bodies, external, &segments);
+                // codegen deals in file ids; the names live here
+                output.program.source = output
+                    .source_file
+                    .and_then(|file| files.get(file.0 as usize))
+                    .map(|file| file.name.to_string());
                 UdonBehaviourProgram { class_path, output }
             })
             .collect()

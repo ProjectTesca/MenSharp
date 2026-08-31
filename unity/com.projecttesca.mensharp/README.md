@@ -39,7 +39,13 @@ at compile time.
 Program assets keep their GUID across recompiles, so scenes never break.
 The component you added is a *proxy*: at play/build time its values transfer
 to the paired UdonBehaviour and the proxy itself is stripped, so code never
-runs twice.
+runs twice. Its inspector shows which program is actually wired up, and the
+UdonBehaviours on a GameObject are kept in sync with the components on it —
+swap or delete a behaviour and the program that went with it goes too.
+
+One `.cs` file may declare several behaviours, but dragging the file onto a
+GameObject only ever adds the class named after the file. The inspector lists
+the others with an **Add** button next to each.
 
 ## Notes
 
@@ -51,11 +57,14 @@ runs twice.
   resolves them against the UdonBehaviour that owns the program, so there is
   no way to ask another object for its `transform` through them (give the
   behaviour a `public GameObject` field and assign it in the inspector).
+- Behaviours inherit from one another. The leaf class is the whole instance:
+  it exports its bases' public variables and events too, and a virtual method
+  called from a base always lands on the leaf's override. Because the public
+  variables share one inspector namespace, a name may not be declared twice
+  in a hierarchy.
 - Not supported yet (each is a clear compile error, never silent breakage):
   recursion, exceptions, `ref`/`out` arguments, enums, user-defined structs,
-  generic externs such as `GetComponent<T>`, and one MenSharpBehaviour
-  inheriting another (a behaviour is the program, so it has no `this` for
-  inherited members to live on — ordinary classes inherit freely).
+  generic externs such as `GetComponent<T>`.
 
 ## Links
 

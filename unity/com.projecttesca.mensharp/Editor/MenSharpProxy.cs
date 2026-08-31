@@ -6,8 +6,11 @@
 // inspector for free. The component itself never runs, though — it is a
 // *proxy* for the real thing:
 //
-//   - when one is added to a GameObject, an UdonBehaviour with the class's
-//     compiled program asset is paired next to it;
+//   - the UdonBehaviours on a GameObject are kept in sync with the proxies on
+//     it: one per proxy, carrying that proxy's compiled program, and none left
+//     over (see SyncPairs — pairing has to be a synchronisation, not an
+//     append, or replacing a component leaves the old program running from a
+//     hidden component nobody can see);
 //   - when entering play mode or building, every proxy's public fields are
 //     copied into the paired UdonBehaviour's public variables (this is how
 //     inspector-edited values and scene references reach the Udon heap), and
@@ -15,6 +18,7 @@
 
 #if UNITY_EDITOR
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using MenSharp;
 using UnityEditor;
@@ -29,7 +33,10 @@ using VRC.Udon.Common.Interfaces;
 [InitializeOnLoad]
 public static class MenSharpProxy
 {
-    private const string ProgramsFolder = "Assets/MenSharp/Programs";
+    public const string ProgramsFolder = "Assets/MenSharp/Programs";
+
+    private const string RevealPreference = "MenSharp.RevealBackingBehaviours";
+    private const string RevealMenu = "MenSharp/Show Backing UdonBehaviours";
 
     static MenSharpProxy()
     {
@@ -37,7 +44,7 @@ public static class MenSharpProxy
         {
             if (component is MenSharpBehaviour proxy)
             {
-                EnsurePaired(proxy);
+                SyncPairs(proxy.gameObject);
             }
         };
 
@@ -54,16 +61,50 @@ public static class MenSharpProxy
             }
         };
 
-        // hideFlags only persist when the scene is saved, so re-hide the
-        // backing UdonBehaviours whenever the editor (re)loads, a scene
-        // opens, or the hierarchy changes (which also catches proxies added
-        // by drag-and-drop, where componentWasAdded may not fire) — the
-        // pairing is self-repairing
-        EditorApplication.delayCall += HideAllPairedInOpenScenes;
+        // hideFlags only persist when the scene is saved, so re-run the sync
+        // whenever the editor (re)loads, a scene opens, or the hierarchy
+        // changes (which also catches proxies added by drag-and-drop, where
+        // componentWasAdded may not fire) — the pairing is self-repairing
+        EditorApplication.delayCall += SyncAllInOpenScenes;
         UnityEditor.SceneManagement.EditorSceneManager.sceneOpened +=
-            (_, _) => HideAllPairedInOpenScenes();
+            (_, _) => SyncAllInOpenScenes();
         EditorApplication.hierarchyChanged += ScheduleSweep;
     }
+
+    // ------------------------------------------------------------ visibility
+
+    /// The backing UdonBehaviour is an implementation detail, so it is hidden:
+    /// that leaves exactly one place to edit values — the proxy — and nothing
+    /// typed into the UdonBehaviour can be silently overwritten by a transfer.
+    /// Revealing them is for debugging, hence a preference rather than a
+    /// per-object flag the sync would have to remember.
+    public static bool Reveal
+    {
+        get => EditorPrefs.GetBool(RevealPreference, false);
+        set
+        {
+            if (Reveal == value)
+            {
+                return;
+            }
+            EditorPrefs.SetBool(RevealPreference, value);
+            Menu.SetChecked(RevealMenu, value);
+            SyncAllInOpenScenes();
+            UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
+        }
+    }
+
+    [MenuItem(RevealMenu)]
+    private static void ToggleReveal() => Reveal = !Reveal;
+
+    [MenuItem(RevealMenu, validate = true)]
+    private static bool ToggleRevealValidate()
+    {
+        Menu.SetChecked(RevealMenu, Reveal);
+        return true;
+    }
+
+    // ----------------------------------------------------------------- sweeps
 
     private static bool sweepPending;
 
@@ -77,109 +118,223 @@ public static class MenSharpProxy
         EditorApplication.delayCall += () =>
         {
             sweepPending = false;
-            HideAllPairedInOpenScenes();
+            SyncAllInOpenScenes();
         };
     }
 
-    private static void HideAllPairedInOpenScenes()
+    private static void SyncAllInOpenScenes()
     {
         if (EditorApplication.isPlayingOrWillChangePlaymode)
         {
             return;
         }
-        for (int index = 0; index < UnityEngine.SceneManagement.SceneManager.sceneCount; index++)
+        foreach (GameObject target in PairingTargetsInOpenScenes())
         {
-            Scene scene = UnityEngine.SceneManagement.SceneManager.GetSceneAt(index);
-            if (!scene.isLoaded)
-            {
-                continue;
-            }
-            foreach (GameObject root in scene.GetRootGameObjects())
-            {
-                foreach (MenSharpBehaviour proxy in
-                    root.GetComponentsInChildren<MenSharpBehaviour>(true))
-                {
-                    EnsurePaired(proxy, quiet: true);
-                }
-            }
+            SyncPairs(target, quiet: true);
         }
     }
 
     private static void TransferAllInOpenScenes()
     {
-        for (int index = 0; index < UnityEngine.SceneManagement.SceneManager.sceneCount; index++)
+        foreach (GameObject target in PairingTargetsInOpenScenes())
         {
-            Scene scene = UnityEngine.SceneManagement.SceneManager.GetSceneAt(index);
-            if (!scene.isLoaded)
+            foreach ((MenSharpBehaviour proxy, UdonBehaviour udon) in SyncPairs(target))
             {
-                continue;
+                TransferValues(proxy, udon);
             }
-            foreach (GameObject root in scene.GetRootGameObjects())
+        }
+    }
+
+    /// Every GameObject in a scene that either carries a MenSharp proxy or one
+    /// of our backing UdonBehaviours. The second half is the important one: it
+    /// is how a leftover whose proxy is already gone gets found at all — look
+    /// only where the proxies are and an orphan is invisible *and* immortal.
+    public static List<GameObject> PairingTargets(Scene scene)
+    {
+        var targets = new List<GameObject>();
+        var seen = new HashSet<int>();
+        foreach (GameObject root in scene.GetRootGameObjects())
+        {
+            foreach (MenSharpBehaviour proxy in
+                root.GetComponentsInChildren<MenSharpBehaviour>(true))
             {
-                foreach (MenSharpBehaviour proxy in
-                    root.GetComponentsInChildren<MenSharpBehaviour>(true))
+                if (seen.Add(proxy.gameObject.GetInstanceID()))
                 {
-                    UdonBehaviour udon = EnsurePaired(proxy);
-                    if (udon != null)
-                    {
-                        TransferValues(proxy, udon);
-                    }
+                    targets.Add(proxy.gameObject);
+                }
+            }
+            foreach (UdonBehaviour udon in root.GetComponentsInChildren<UdonBehaviour>(true))
+            {
+                if (IsBackingBehaviour(udon) && seen.Add(udon.gameObject.GetInstanceID()))
+                {
+                    targets.Add(udon.gameObject);
                 }
             }
         }
+        return targets;
     }
 
-    /// The UdonBehaviour carrying this proxy's compiled program, created on
-    /// the same GameObject when missing.
-    public static UdonBehaviour EnsurePaired(MenSharpBehaviour proxy, bool quiet = false)
+    private static List<GameObject> PairingTargetsInOpenScenes()
     {
-        string className = proxy.GetType().Name;
-        string assetPath = $"{ProgramsFolder}/{className}.asset";
-        var program = AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(assetPath);
+        var targets = new List<GameObject>();
+        for (int index = 0; index < SceneManager.sceneCount; index++)
+        {
+            Scene scene = SceneManager.GetSceneAt(index);
+            if (scene.isLoaded)
+            {
+                targets.AddRange(PairingTargets(scene));
+            }
+        }
+        return targets;
+    }
+
+    // ---------------------------------------------------------------- pairing
+
+    /// The compiled program for a behaviour class, or null when it has not
+    /// been compiled yet.
+    public static MenSharpProgramAsset FindProgram(Type behaviourType)
+    {
+        return AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(
+            $"{ProgramsFolder}/{behaviourType.Name}.asset");
+    }
+
+    /// The UdonBehaviour currently carrying this proxy's program, without
+    /// creating or destroying anything — for inspectors and diagnostics.
+    public static UdonBehaviour FindPaired(MenSharpBehaviour proxy)
+    {
+        MenSharpProgramAsset program = FindProgram(proxy.GetType());
         if (program == null)
         {
-            if (!quiet)
-            {
-                Debug.LogWarning(
-                    $"MenSharp: no compiled program for {className} yet — run MenSharp > "
-                    + "Compile All (it will pair automatically afterwards).",
-                    proxy);
-            }
             return null;
         }
-
-        foreach (UdonBehaviour existing in proxy.GetComponents<UdonBehaviour>())
+        foreach (UdonBehaviour udon in proxy.GetComponents<UdonBehaviour>())
         {
-            if (existing.programSource == program)
+            if (udon != null && udon.programSource == program)
             {
-                HideBackingBehaviour(existing);
-                return existing;
+                return udon;
             }
         }
-        var udon = Undo.AddComponent<UdonBehaviour>(proxy.gameObject);
-        udon.programSource = program;
-        HideBackingBehaviour(udon);
-        EditorUtility.SetDirty(udon);
-        return udon;
+        return null;
     }
 
-    /// The paired UdonBehaviour is an implementation detail: hiding it leaves
-    /// exactly one place to edit values — the proxy component — so nothing
-    /// typed into the UdonBehaviour's own inspector can be silently
-    /// overwritten by the transfer.
-    private static void HideBackingBehaviour(UdonBehaviour udon)
+    /// Is this an UdonBehaviour *we* placed? Only ones carrying a MenSharp
+    /// program qualify, so hand-authored Udon (graphs, UdonSharp) is never
+    /// touched — least of all removed.
+    private static bool IsBackingBehaviour(UdonBehaviour udon)
     {
-        if ((udon.hideFlags & HideFlags.HideInInspector) == 0)
-        {
-            udon.hideFlags |= HideFlags.HideInInspector;
-            EditorUtility.SetDirty(udon);
-            // the inspector does not notice hideFlags changes on its own
-            EditorApplication.delayCall += () =>
-            {
-                UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
-            };
-        }
+        return udon != null && udon.programSource is MenSharpProgramAsset;
     }
+
+    /// Makes this GameObject's backing UdonBehaviours match the MenSharp
+    /// proxies on it: one per proxy carrying that proxy's program, created
+    /// when missing and removed when its proxy is gone or now runs a
+    /// different class. Returns the resulting pairs.
+    ///
+    /// This has to be a synchronisation rather than "add if absent": swapping
+    /// one behaviour for another, or deleting the component, used to leave the
+    /// old UdonBehaviour behind — hidden, and still executing its program.
+    ///
+    /// `undoable` is off while a scene is being processed for play or a build:
+    /// that scene is a throwaway copy, and registering undo steps against it
+    /// would outlive the copy itself.
+    public static List<(MenSharpBehaviour proxy, UdonBehaviour udon)> SyncPairs(
+        GameObject target, bool quiet = false, bool undoable = true)
+    {
+        var pairs = new List<(MenSharpBehaviour, UdonBehaviour)>();
+        if (target == null)
+        {
+            return pairs;
+        }
+
+        var spare = new List<UdonBehaviour>();
+        foreach (UdonBehaviour udon in target.GetComponents<UdonBehaviour>())
+        {
+            if (IsBackingBehaviour(udon))
+            {
+                spare.Add(udon);
+            }
+        }
+
+        foreach (MenSharpBehaviour proxy in target.GetComponents<MenSharpBehaviour>())
+        {
+            MenSharpProgramAsset program = FindProgram(proxy.GetType());
+            if (program == null)
+            {
+                if (!quiet)
+                {
+                    Debug.LogWarning(
+                        $"MenSharp: no compiled program for {proxy.GetType().Name} yet — run "
+                        + "MenSharp > Compile All (it will pair automatically afterwards).",
+                        proxy);
+                }
+                continue;
+            }
+
+            UdonBehaviour paired = null;
+            for (int index = 0; index < spare.Count; index++)
+            {
+                if (spare[index].programSource == program)
+                {
+                    paired = spare[index];
+                    spare.RemoveAt(index);
+                    break;
+                }
+            }
+            if (paired == null)
+            {
+                paired = undoable
+                    ? Undo.AddComponent<UdonBehaviour>(target)
+                    : target.AddComponent<UdonBehaviour>();
+                paired.programSource = program;
+                EditorUtility.SetDirty(paired);
+            }
+            ApplyVisibility(paired);
+            pairs.Add((proxy, paired));
+        }
+
+        // whatever is left over belongs to a proxy that no longer exists (or
+        // no longer runs that program): it would keep executing, invisibly
+        foreach (UdonBehaviour leftover in spare)
+        {
+            string program = leftover.programSource == null
+                ? "<missing>"
+                : leftover.programSource.name;
+            Debug.Log(
+                $"MenSharp: removed the leftover Udon program `{program}` from "
+                + $"{target.name} — no MenSharp component on it uses that program any more.",
+                target);
+            if (undoable)
+            {
+                Undo.DestroyObjectImmediate(leftover);
+            }
+            else
+            {
+                UnityEngine.Object.DestroyImmediate(leftover);
+            }
+        }
+
+        return pairs;
+    }
+
+    private static void ApplyVisibility(UdonBehaviour udon)
+    {
+        HideFlags wanted = Reveal
+            ? udon.hideFlags & ~HideFlags.HideInInspector
+            : udon.hideFlags | HideFlags.HideInInspector;
+        if (udon.hideFlags == wanted)
+        {
+            return;
+        }
+        udon.hideFlags = wanted;
+        EditorUtility.SetDirty(udon);
+        // the inspector does not notice hideFlags changes on its own
+        EditorApplication.delayCall += () =>
+        {
+            UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
+        };
+    }
+
+    // --------------------------------------------------------------- transfer
 
     /// Copies the proxy's public instance fields into the UdonBehaviour's
     /// public variable table — the values the Udon heap starts from.
@@ -223,7 +378,7 @@ public static class MenSharpProxy
     }
 }
 
-/// Runs for every scene on play-mode entry and on world builds: pair,
+/// Runs for every scene on play-mode entry and on world builds: sync,
 /// transfer, strip.
 public class MenSharpSceneProcessor : IProcessSceneWithReport
 {
@@ -231,16 +386,23 @@ public class MenSharpSceneProcessor : IProcessSceneWithReport
 
     public void OnProcessScene(Scene scene, BuildReport report)
     {
+        // the same target set the editor sweep uses, orphans included: a
+        // leftover on a GameObject with no proxy would otherwise sail straight
+        // into play mode and run
+        foreach (GameObject target in MenSharpProxy.PairingTargets(scene))
+        {
+            foreach ((MenSharpBehaviour proxy, UdonBehaviour udon) in
+                MenSharpProxy.SyncPairs(target, quiet: false, undoable: false))
+            {
+                MenSharpProxy.TransferValues(proxy, udon);
+            }
+        }
+
         foreach (GameObject root in scene.GetRootGameObjects())
         {
             foreach (MenSharpBehaviour proxy in
                 root.GetComponentsInChildren<MenSharpBehaviour>(true))
             {
-                UdonBehaviour udon = MenSharpProxy.EnsurePaired(proxy);
-                if (udon != null)
-                {
-                    MenSharpProxy.TransferValues(proxy, udon);
-                }
                 UnityEngine.Object.DestroyImmediate(proxy);
             }
         }

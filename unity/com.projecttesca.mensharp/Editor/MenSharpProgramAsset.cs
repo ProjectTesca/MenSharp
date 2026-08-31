@@ -31,6 +31,21 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         ApplyMenSharpMeta();
     }
 
+    /// The .cs file this program came from, or null when unknown (an asset
+    /// imported before the compiler started recording it).
+    public string SourcePath
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(metaJson))
+            {
+                return null;
+            }
+            var meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
+            return string.IsNullOrEmpty(meta?.source) ? null : meta.source;
+        }
+    }
+
     public void ApplyMenSharpMeta()
     {
         IUdonProgram current = program;
@@ -99,6 +114,10 @@ public class MenSharpMeta
 {
     public MenSharpHeapEntry[] heap;
     public string[] entryPoints;
+    /// The .cs file this program was compiled from, as the compiler was given
+    /// it (so: project-relative). Unity cannot answer this — a .cs asset only
+    /// ever maps to the class named after the file — so the compiler tells us.
+    public string source;
 }
 
 [Serializable]

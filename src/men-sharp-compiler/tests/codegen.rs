@@ -357,7 +357,7 @@ fn recursion_is_a_codegen_error_not_a_crash() {
         output
             .errors
             .iter()
-            .any(|error| error.message.contains("recursive")),
+            .any(|error| error.message.contains("recursion is not supported")),
         "expected a recursion diagnostic, got {:#?}",
         output.errors
     );
@@ -517,7 +517,7 @@ fn compile_behaviour(
     assert_eq!(bodies.errors, vec![], "type errors");
 
     let programs =
-        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
     let found: Vec<&String> = programs.iter().map(|program| &program.class_path).collect();
     let index = programs
         .iter()
@@ -620,7 +620,7 @@ fn every_behaviour_in_the_compilation_is_discovered() {
     let signatures = compiler.resolve_signatures(&declarations, &references);
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
     let programs =
-        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
     let names: Vec<&str> = programs.iter().map(|p| p.class_path.as_str()).collect();
     assert_eq!(names, vec!["Game.Door", "Game.Lamp"]);
     for program in &programs {
@@ -660,7 +660,7 @@ fn constructing_a_behaviour_is_an_error() {
     let signatures = compiler.resolve_signatures(&declarations, &references);
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
     let programs =
-        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
     assert!(
         programs[0]
             .output
@@ -710,7 +710,7 @@ fn inspector_values_survive_field_initializers() {
     let signatures = compiler.resolve_signatures(&declarations, &references);
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
     let programs =
-        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
     let program = &programs[0];
     assert!(
         program.output.errors.is_empty(),
@@ -979,9 +979,79 @@ fn base_reaches_a_self_reference_without_a_second_slot() {
 }
 
 #[test]
-fn inheriting_one_behaviour_from_another_is_an_error() {
-    // a behaviour has no `this`, so an inherited instance member has nowhere
-    // to live; this used to vanish silently, taking the read with it
+fn a_behaviour_inherits_variables_events_and_overrides() {
+    // one behaviour, one instance: the leaf class owns everything its bases
+    // declare, so an inherited event calling a virtual method must land on
+    // the leaf's override, and that override's `base` call on the base body
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        namespace Game
+        {
+            public class Interactable : MenSharpBehaviour
+            {
+                public int useCount;
+                public virtual int Cost() { return 1; }
+                public void Interact() { useCount += Cost(); }
+            }
+
+            public class Door : Interactable
+            {
+                public int extra = 2;
+                public override int Cost() { return base.Cost() + extra; }
+            }
+        }
+        "#,
+        "Game.Door",
+        "_interact",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    // Interact is inherited, Cost resolves to Door's override, base.Cost() to
+    // Interactable's body: 1 + 2
+    assert_eq!(int_of(&emulator, "useCount"), 3);
+    // and the base class's public variable is the leaf program's too
+    assert_eq!(int_of(&emulator, "extra"), 2);
+}
+
+#[test]
+fn the_base_behaviour_still_compiles_on_its_own() {
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        namespace Game
+        {
+            public class Interactable : MenSharpBehaviour
+            {
+                public int useCount;
+                public virtual int Cost() { return 1; }
+                public void Interact() { useCount += Cost(); }
+            }
+
+            public class Door : Interactable
+            {
+                public override int Cost() { return 5; }
+            }
+        }
+        "#,
+        "Game.Interactable",
+        "_interact",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    // attached as itself, Interactable is the whole instance — Door's
+    // override belongs to a different program
+    assert_eq!(int_of(&emulator, "useCount"), 1);
+}
+
+#[test]
+fn a_public_variable_hidden_by_a_derived_class_is_an_error() {
+    // exported slots are named after the member, so two of one name would
+    // collapse into a single inspector variable
     let Some(program) = compile_behaviour(
         vec![
             SourceCode::new("base.cs", SELF_REFERENCE_BASE),
@@ -997,8 +1067,8 @@ fn inheriting_one_behaviour_from_another_is_an_error() {
 
                     public class Leaf : Middle
                     {
-                        public int total;
-                        public void Interact() { total = shared + 1; }
+                        public new int shared;
+                        public void Interact() { shared = 1; }
                     }
                 }
                 "#,
@@ -1016,7 +1086,91 @@ fn inheriting_one_behaviour_from_another_is_an_error() {
         .map(|error| error.message.as_str())
         .collect();
     assert!(
-        messages.iter().any(|message| message.contains("inherited")),
+        messages.iter().any(|message| message.contains("hides")),
         "{messages:?}"
     );
+}
+
+#[test]
+fn calling_a_behaviour_member_on_an_object_is_a_plain_error() {
+    // reachable only through `new Behaviour()`, which is itself an error —
+    // but it used to surface as an "internal:" argument-count mismatch
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        public void Interact()
+                        {
+                            var other = new Door();
+                            other.Interact();
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        !messages.iter().any(|message| message.contains("internal:")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("cannot be constructed")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("belongs to the behaviour itself")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_program_records_the_file_it_came_from() {
+    // the Unity inspector groups behaviours by source file to offer the ones
+    // drag-and-drop cannot add; Unity itself cannot answer that question, so
+    // the sidecar carries it
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "Doors.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        public void Interact() { }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert_eq!(program.output.program.source.as_deref(), Some("Doors.cs"));
+    let meta = program.output.program.to_meta_json().unwrap();
+    assert!(meta.contains("\"source\": \"Doors.cs\""), "{meta}");
 }

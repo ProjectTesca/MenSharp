@@ -60,6 +60,9 @@ pub struct CodegenError {
 pub struct CodegenOutput {
     pub program: Program,
     pub errors: Vec<CodegenError>,
+    /// The file the entry class was declared in. The driver turns this into
+    /// [`men_sharp_asm::Program::source`]; codegen only knows file ids.
+    pub source_file: Option<FileId>,
 }
 
 /// Lowers the checked compilation to one Udon program.
@@ -95,10 +98,13 @@ pub fn generate(
         call_edges: HashMap::new(),
         temp_counter: 0,
         entry_class: None,
+        entry_chain: Vec::new(),
         marker: behaviour_marker(declarations),
+        entry_file: None,
     };
     generator.run(entry_path);
     CodegenOutput {
+        source_file: generator.entry_file,
         program: generator.program,
         errors: generator.errors,
     }
@@ -184,8 +190,14 @@ struct Generator<'a, 'ast> {
     /// instance fields live in named heap slots and its instance methods have
     /// no `this` — the behaviour is the program.
     entry_class: Option<SymbolId>,
+    /// The entry class and every base class up to (excluding)
+    /// `MenSharpBehaviour`, most derived first. All of their instance members
+    /// belong to the one instance the program is.
+    entry_chain: Vec<SymbolId>,
     /// `MenSharp.MenSharpBehaviour` itself, when the compilation declares it.
     marker: Option<SymbolId>,
+    /// The file the entry class was declared in, once `run` has found it.
+    entry_file: Option<FileId>,
 }
 
 /// Per-function compilation state.
@@ -310,7 +322,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 return;
             }
             self.entry_class = Some(entry);
+            self.entry_chain = self.behaviour_chain(entry);
         }
+        self.entry_file = Some(self.declaration_site(entry).0);
 
         // static fields of the entry class become exported, observable slots;
         // on a behaviour, instance fields (and auto-properties) do too — the
@@ -321,17 +335,31 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.collect_entry_instance_fields(entry);
         }
 
-        // public methods of the entry class are events (instance ones only on
-        // a behaviour; static ones always, which is also what tests use)
+        // public methods are events (instance ones only on a behaviour; static
+        // ones always, which is also what tests use). A behaviour exports its
+        // inherited events too — walking the chain most-derived first means an
+        // override claims the event name before the method it overrides.
         let mut entries = Vec::new();
-        let members: Vec<SymbolId> = self.declarations.table.symbol(entry).members.to_vec();
-        for member in members {
-            let symbol = self.declarations.table.symbol(member);
-            let eligible = symbol.kind == SymbolKind::Method
-                && symbol.accessibility == Accessibility::Public
-                && (symbol.is_static || self.entry_class.is_some());
-            if eligible {
+        let mut claimed: HashSet<String> = HashSet::new();
+        let classes = if self.entry_chain.is_empty() {
+            vec![entry]
+        } else {
+            self.entry_chain.clone()
+        };
+        for class in classes {
+            let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
+            for member in members {
+                let symbol = self.declarations.table.symbol(member);
+                let eligible = symbol.kind == SymbolKind::Method
+                    && symbol.accessibility == Accessibility::Public
+                    && (symbol.is_static || self.entry_class.is_some());
+                if !eligible {
+                    continue;
+                }
                 let name = udon_event_name(symbol.name);
+                if !claimed.insert(name.clone()) {
+                    continue;
+                }
                 let key = FunctionKey {
                     symbol: member,
                     role: Role::Method,
@@ -341,7 +369,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 entries.push((name, key));
             }
         }
-        if entries.is_empty() {
+        // a behaviour may legitimately be all public variables and no events —
+        // an explicit entry class was asked for by name, so it must have one
+        if entries.is_empty() && self.entry_class.is_none() {
             self.errors.push(CodegenError {
                 message: format!(
                     "entry class `{}` has no public methods to export as events",
@@ -540,17 +570,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         for node in cycles {
             if reported.insert(node.clone()) {
-                let name = self
-                    .functions
-                    .get(node)
-                    .map(|f| f.name.clone())
-                    .unwrap_or_else(|| "<unknown>".into());
+                let name = self.display_path(node.symbol);
+                let (file, span) = self.declaration_site(node.symbol);
                 self.errors.push(CodegenError {
                     message: format!(
-                        "`{name}` is recursive; recursion is not supported by the Udon backend yet"
+                        "`{name}` calls itself, directly or through the methods it calls; \
+                         recursion is not supported by the Udon backend yet"
                     ),
-                    file: FileId(0),
-                    span: 0..0,
+                    file,
+                    span,
                 });
             }
         }
@@ -591,6 +619,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         parts.reverse();
         parts.join("_")
+    }
+
+    /// The same path as [`Generator::symbol_path`], but spelled the way the
+    /// user wrote it — for diagnostics, where a mangled name means nothing.
+    fn display_path(&self, symbol: SymbolId) -> String {
+        let mut parts = Vec::new();
+        let mut current = Some(symbol);
+        while let Some(id) = current {
+            let entry = self.declarations.table.symbol(id);
+            if !entry.name.is_empty() {
+                parts.push(entry.name);
+            }
+            current = entry.parent;
+        }
+        parts.reverse();
+        parts.join(".")
     }
 
     fn constant(&mut self, udon_type: &str, repr: &str, init: HeapInit) -> DataId {
@@ -877,33 +921,156 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// A behaviour class and the classes it inherits from, most derived first,
+    /// stopping before `MenSharpBehaviour` itself (whose members are self
+    /// references, not storage).
+    fn behaviour_chain(&self, entry: SymbolId) -> Vec<SymbolId> {
+        let mut chain = Vec::new();
+        let mut current = Some(entry);
+        while let Some(class) = current {
+            if Some(class) == self.marker || chain.contains(&class) {
+                break;
+            }
+            chain.push(class);
+            current = self
+                .signatures
+                .base_types
+                .get(&class)
+                .into_iter()
+                .flatten()
+                .find_map(|base| match base {
+                    Type::Named {
+                        target: TypeTarget::Source(symbol),
+                        ..
+                    } => Some(*symbol),
+                    _ => None,
+                });
+        }
+        chain
+    }
+
     /// On a behaviour entry class, instance fields and auto-properties become
     /// exported heap slots — the program's public variables. They reuse the
-    /// `statics` machinery: the behaviour has exactly one instance.
+    /// `statics` machinery: the behaviour has exactly one instance, so its
+    /// inherited fields are just as much the program's state as its own.
+    ///
+    /// Declared base-first so the inspector lists inherited variables above
+    /// the ones the leaf class adds.
     fn collect_entry_instance_fields(&mut self, class: SymbolId) {
-        let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
-        for member in members {
-            let symbol = self.declarations.table.symbol(member);
-            if symbol.is_static {
-                continue;
-            }
-            let stores_value = match symbol.kind {
-                SymbolKind::Field => true,
-                SymbolKind::Property => self.is_auto_property(member),
-                _ => false,
-            };
-            if stores_value {
+        let mut chain = self.behaviour_chain(class);
+        chain.reverse();
+        let mut exported: HashMap<String, SymbolId> = HashMap::new();
+        for class in chain {
+            let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
+            for member in members {
+                let symbol = self.declarations.table.symbol(member);
+                if symbol.is_static {
+                    continue;
+                }
+                let stores_value = match symbol.kind {
+                    SymbolKind::Field => true,
+                    SymbolKind::Property => self.is_auto_property(member),
+                    _ => false,
+                };
+                if !stores_value {
+                    continue;
+                }
+                // exported slots are named after the member, so two members
+                // with one name would collide into one public variable
+                if let Some(&first) = exported.get(symbol.name) {
+                    let owner = self
+                        .declarations
+                        .table
+                        .symbol(first)
+                        .parent
+                        .map(|parent| self.declarations.table.symbol(parent).name)
+                        .unwrap_or("a base class");
+                    let name = symbol.name;
+                    let (file, span) = self.declaration_site(member);
+                    self.errors.push(CodegenError {
+                        message: format!(
+                            "`{name}` hides the `{name}` declared in `{owner}`: a behaviour's \
+                             public variables share one namespace on Udon, so the name must \
+                             be unique across the class hierarchy"
+                        ),
+                        file,
+                        span,
+                    });
+                    continue;
+                }
+                exported.insert(symbol.name.to_string(), member);
                 self.ensure_static(member, true);
             }
         }
     }
 
-    /// Does this member symbol belong to the behaviour entry class?
+    /// Where a symbol was declared, for diagnostics that have no expression to
+    /// point at.
+    fn declaration_site(&self, symbol: SymbolId) -> (FileId, Range<usize>) {
+        match self.declarations.table.symbol(symbol).declarations.first() {
+            Some(site) => {
+                let span = match &site.syntax {
+                    SyntaxRef::Field { declarator, .. } => declarator.span.clone(),
+                    SyntaxRef::Property(property) => property.span.clone(),
+                    SyntaxRef::Method(method) => method.span.clone(),
+                    _ => 0..0,
+                };
+                (site.file, span)
+            }
+            None => (FileId(0), 0..0),
+        }
+    }
+
+    /// Does this member belong to the one instance the behaviour program is —
+    /// its entry class or any class that entry class inherits from?
     pub(super) fn is_entry_member(&self, member: SymbolId) -> bool {
-        let Some(entry) = self.entry_class else {
+        let Some(parent) = self.declarations.table.symbol(member).parent else {
             return false;
         };
-        self.declarations.table.symbol(member).parent == Some(entry)
+        self.entry_chain.contains(&parent)
+    }
+
+    /// The most derived declaration of a behaviour member. A behaviour has
+    /// exactly one instance, so its dynamic type is known at compile time:
+    /// a virtual call on it resolves here instead of through a dispatcher.
+    pub(super) fn entry_override(&self, member: SymbolId) -> SymbolId {
+        let entry = self.declarations.table.symbol(member);
+        let (name, kind) = (entry.name, entry.kind);
+        let wanted = self.signatures.members.get(&member);
+        for &class in &self.entry_chain {
+            for &candidate in &self.declarations.table.symbol(class).members {
+                if candidate == member {
+                    return member;
+                }
+                let symbol = self.declarations.table.symbol(candidate);
+                if symbol.name != name || symbol.kind != kind || symbol.is_static {
+                    continue;
+                }
+                let found = self.signatures.members.get(&candidate);
+                let compatible = match (wanted, found) {
+                    (
+                        Some(MemberSignature::Function(wanted)),
+                        Some(MemberSignature::Function(found)),
+                    ) => {
+                        wanted.parameters.len() == found.parameters.len()
+                            && wanted
+                                .parameters
+                                .iter()
+                                .zip(&found.parameters)
+                                .all(|(a, b)| a.parameter_type == b.parameter_type)
+                    }
+                    (
+                        Some(MemberSignature::Property(wanted)),
+                        Some(MemberSignature::Property(found)),
+                    ) => wanted == found,
+                    _ => false,
+                };
+                if compatible {
+                    return candidate;
+                }
+            }
+        }
+        member
     }
 
     /// The heap slot for a member declared directly on `MenSharpBehaviour`

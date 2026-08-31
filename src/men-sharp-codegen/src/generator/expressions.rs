@@ -798,12 +798,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    /// A behaviour *is* the program, not an object: its members live in named
-    /// heap slots and its methods take no `this`. A member it inherits from
-    /// another `MenSharpBehaviour` subclass therefore has nowhere to live —
-    /// the slot is never allocated and the call has no receiver to pass.
-    /// Caught here so it is a diagnosis rather than a missing symbol.
-    fn is_inherited_behaviour_member(
+    /// Inside a behaviour there is no `this`: its own (and inherited) members
+    /// live in named heap slots, and everything else needs an explicit
+    /// receiver. This catches an instance member that has neither, so it is
+    /// reported instead of quietly lowering to a missing slot.
+    fn has_no_instance_to_read_from(
         &self,
         ctx: &Ctx<'ast>,
         symbol: SymbolId,
@@ -817,26 +816,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             && !self.is_entry_member(symbol)
     }
 
-    fn unsupported_behaviour_inheritance(
-        &mut self,
-        ctx: &Ctx<'ast>,
-        symbol: SymbolId,
-        span: Range<usize>,
-    ) {
+    fn no_instance_error(&mut self, ctx: &Ctx<'ast>, symbol: SymbolId, span: Range<usize>) {
         let name = self.declarations.table.symbol(symbol).name;
-        let owner = self
-            .declarations
-            .table
-            .symbol(symbol)
-            .parent
-            .map(|parent| self.declarations.table.symbol(parent).name)
-            .unwrap_or("its base class");
         self.error(
             ctx,
-            format!(
-                "`{name}` is inherited from `{owner}`: one MenSharpBehaviour \
-                 inheriting another is not supported by the Udon backend yet"
-            ),
+            format!("`{name}` is an instance member with no object to reach it through"),
             span,
         );
     }
@@ -885,8 +869,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     let slot = self.ensure_static(symbol, true);
                     return Place::Slot(slot, member_type);
                 }
-                if self.is_inherited_behaviour_member(ctx, symbol, member.is_static, &receiver) {
-                    self.unsupported_behaviour_inheritance(ctx, symbol, span);
+                if self.has_no_instance_to_read_from(ctx, symbol, member.is_static, &receiver) {
+                    self.no_instance_error(ctx, symbol, span);
                     return Place::Error;
                 }
                 match member.kind {
@@ -928,6 +912,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                                 ty: member_type,
                             };
                         }
+                        // same reasoning as for methods: on the single
+                        // behaviour instance the override is known here
+                        let symbol = if !member.is_static
+                            && self.is_virtual(symbol)
+                            && self.is_entry_member(symbol)
+                        {
+                            self.entry_override(symbol)
+                        } else {
+                            symbol
+                        };
                         let bindings = self.bindings_for(ctx, symbol, &member.declaring_type, &[]);
                         Place::Accessor {
                             receiver: receiver
@@ -1574,15 +1568,26 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             MemberOrigin::Source(symbol) => {
                 let symbol = *symbol;
                 if !call.is_extension
-                    && self.is_inherited_behaviour_member(ctx, symbol, call.is_static, &receiver)
+                    && self.has_no_instance_to_read_from(ctx, symbol, call.is_static, &receiver)
                 {
-                    self.unsupported_behaviour_inheritance(ctx, symbol, span);
+                    self.no_instance_error(ctx, symbol, span);
                     return Piece::Error;
                 }
                 let this = if call.is_static || call.is_extension {
                     None
                 } else {
                     receiver.as_ref().map(|(slot, _)| *slot).or(ctx.this_slot)
+                };
+                // a behaviour needs no dispatcher: there is one instance, so
+                // the most derived override is known here
+                let symbol = if !call.is_static
+                    && !non_virtual
+                    && self.is_virtual(symbol)
+                    && self.is_entry_member(symbol)
+                {
+                    self.entry_override(symbol)
+                } else {
+                    symbol
                 };
                 let key = if !call.is_static
                     && !non_virtual

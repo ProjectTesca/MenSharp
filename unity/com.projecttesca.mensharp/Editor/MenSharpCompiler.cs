@@ -190,7 +190,10 @@ public static class MenSharpCompiler
         yield return typeof(VRC.Udon.UdonBehaviour).Assembly.Location; // VRC.Udon
     }
 
-    private static string FindCompilerBinary()
+    /// Where the bundled compiler for this platform lives. Pure path
+    /// arithmetic — no checks, no logging — so callers that only want to look
+    /// at it (is it newer than what we built?) do not trip diagnostics.
+    public static string CompilerPath()
     {
         string root = Path.GetFullPath($"Packages/{PackageName}/Compiler~");
         string name;
@@ -204,7 +207,12 @@ public static class MenSharpCompiler
 #else
         name = "men-sharp-linux-x64";
 #endif
-        string path = Path.Combine(root, name);
+        return Path.Combine(root, name);
+    }
+
+    private static string FindCompilerBinary()
+    {
+        string path = CompilerPath();
         if (!File.Exists(path))
         {
             Debug.LogError(

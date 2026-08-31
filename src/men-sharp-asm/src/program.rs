@@ -144,6 +144,11 @@ pub struct Program {
     /// Human-readable label names, indexed by [`LabelId`]. Purely diagnostic.
     pub labels: Vec<String>,
     pub entry_points: Vec<EntryPoint>,
+    /// The source file this program was compiled from, when the caller knows
+    /// it. Carried into the sidecar for tooling: the Unity inspector uses it to
+    /// find the other behaviours declared beside this one, which it cannot ask
+    /// Unity about (a `.cs` asset only ever maps to the class named after it).
+    pub source: Option<String>,
 }
 
 impl Program {
@@ -360,7 +365,11 @@ impl Program {
             first = false;
             out.push_str(&json_string(&entry.name));
         }
-        out.push_str("]\n}\n");
+        out.push(']');
+        if let Some(source) = &self.source {
+            let _ = write!(out, ",\n  \"source\": {}", json_string(source));
+        }
+        out.push_str("\n}\n");
         Ok(out)
     }
 

@@ -443,6 +443,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let parameters = function.parameters.clone();
         let name = function.name.clone();
 
+        // the receiver has to match the callee's shape before anything is
+        // copied: a behaviour's members *are* the program's globals and take
+        // no `this`, every other instance member needs one
+        let wants_this = self.function_has_this(key);
+        if wants_this != this.is_some() {
+            let member = self.declarations.table.symbol(key.symbol).name;
+            let message = if wants_this {
+                format!("`{member}` needs an instance to be called on")
+            } else {
+                format!(
+                    "`{member}` belongs to the behaviour itself — there is one instance, \
+                     so it cannot be called on another object"
+                )
+            };
+            self.error(ctx, message, span);
+            return None;
+        }
+
         let expected = usize::from(this.is_some()) + arguments.len();
         if parameters.len() != expected {
             self.error(
