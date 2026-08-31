@@ -242,6 +242,32 @@ mod tests {
     }
 
     #[test]
+    fn self_references_travel_in_the_text_not_the_sidecar() {
+        // only the SDK's assembler can build the unresolved heap reference the
+        // UdonBehaviour later swaps for its own GameObject, so `this` is the
+        // one initial value that must be in the `.uasm` — and re-applying it
+        // from the sidecar would clobber what the UdonBehaviour resolved
+        let mut asm = Asm::new();
+        asm.slot(
+            "__this_gameObject",
+            "UnityEngineGameObject",
+            HeapInit::SelfReference,
+        );
+        asm.int("count", 3);
+        let start = asm.label("_start");
+        asm.entry("_start", start);
+        asm.op(Op::Label(start));
+        asm.op(Op::Jump(Target::Address(HALT_ADDRESS)));
+
+        let text = asm.program.to_uasm().unwrap();
+        assert!(text.contains("__this_gameObject: %UnityEngineGameObject, this"));
+
+        let meta = asm.program.to_meta_json().unwrap();
+        assert!(!meta.contains("__this_gameObject"), "{meta}");
+        assert!(meta.contains("\"name\": \"count\""));
+    }
+
+    #[test]
     fn jump_addresses_follow_the_4_8_byte_layout() {
         let mut asm = Asm::new();
         let a = asm.int("a", 1);

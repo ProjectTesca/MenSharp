@@ -23,7 +23,8 @@ at compile time.
        public void Interact()                 // Udon events: Start → _start,
        {                                      // Interact → _interact, other
            openCount += 1;                    // names become custom events
-       }
+           transform.Rotate(0f, 90f, 0f);     // `this`: the GameObject this
+       }                                      // program is attached to
    }
    ```
 
@@ -45,9 +46,16 @@ runs twice.
 - Your sources are plain C#, so Unity compiles them too — that is what gives
   you IDE completion and it is expected; the Udon program is produced by the
   bundled MenSharp compiler, not by Unity.
+- `gameObject` and `transform` refer to what the behaviour is attached to,
+  as in any Unity component. They are read-only, and only your own — Udon
+  resolves them against the UdonBehaviour that owns the program, so there is
+  no way to ask another object for its `transform` through them (give the
+  behaviour a `public GameObject` field and assign it in the inspector).
 - Not supported yet (each is a clear compile error, never silent breakage):
-  recursion, exceptions, `ref`/`out` arguments, `base.` access, enums,
-  user-defined structs, generic externs such as `GetComponent<T>`.
+  recursion, exceptions, `ref`/`out` arguments, enums, user-defined structs,
+  generic externs such as `GetComponent<T>`, and one MenSharpBehaviour
+  inheriting another (a behaviour is the program, so it has no `this` for
+  inherited members to live on — ordinary classes inherit freely).
 
 ## Links
 

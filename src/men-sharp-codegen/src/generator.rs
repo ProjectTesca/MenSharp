@@ -95,6 +95,7 @@ pub fn generate(
         call_edges: HashMap::new(),
         temp_counter: 0,
         entry_class: None,
+        marker: behaviour_marker(declarations),
     };
     generator.run(entry_path);
     CodegenOutput {
@@ -124,6 +125,12 @@ enum Role {
     /// The synthesized parameterless constructor of a class with none declared
     /// (runs field initializers). `symbol` is the class.
     DefaultConstructor,
+    /// The synthesized virtual-dispatch stub for `symbol`: compares the
+    /// receiver's type id and jumps to the right override. A role of its own so
+    /// it never collides with the method's own body — which it would otherwise
+    /// do whenever the declaring class is itself instantiated, or reached
+    /// through `base.`, making the stub dispatch to itself forever.
+    Dispatcher,
 }
 
 /// A compiled (or scheduled) function instance.
@@ -177,6 +184,8 @@ struct Generator<'a, 'ast> {
     /// instance fields live in named heap slots and its instance methods have
     /// no `this` — the behaviour is the program.
     entry_class: Option<SymbolId>,
+    /// `MenSharp.MenSharpBehaviour` itself, when the compilation declares it.
+    marker: Option<SymbolId>,
 }
 
 /// Per-function compilation state.
@@ -212,12 +221,38 @@ enum Piece {
     Pending {
         receiver: Option<(DataId, Type)>,
     },
+    /// `base` — like `Pending`, but the member named next binds statically:
+    /// `base.M()` has to reach the base implementation, not re-enter the
+    /// override that is calling it. Only carried across a method group, so
+    /// `base.M().N()` dispatches `N` normally.
+    Base {
+        receiver: Option<(DataId, Type)>,
+    },
     Error,
+}
+
+impl Piece {
+    /// The receiver a following member access, call or index should use.
+    fn receiver(self) -> Option<(DataId, Type)> {
+        match self {
+            Piece::Value(slot, ty) => Some((slot, ty)),
+            Piece::Pending { receiver } | Piece::Base { receiver } => receiver,
+            Piece::Void | Piece::Error => None,
+        }
+    }
 }
 
 /// An assignable location.
 enum Place {
     Slot(DataId, Type),
+    /// `gameObject`/`transform`: a slot Udon fills in with what the behaviour
+    /// is attached to. Reads like a slot; assignment is rejected, matching the
+    /// read-only properties `UnityEngine.Component` declares.
+    SelfReference {
+        slot: DataId,
+        ty: Type,
+        name: String,
+    },
     /// `object[element_index]` — field (or auto-property store) of an object.
     Field {
         object: DataId,
@@ -869,6 +904,41 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return false;
         };
         self.declarations.table.symbol(member).parent == Some(entry)
+    }
+
+    /// The heap slot for a member declared directly on `MenSharpBehaviour`
+    /// (`gameObject`, `transform`), or `None` for anything else.
+    ///
+    /// Udon has no `this` and no extern that returns a program's own object,
+    /// so these are not calls: each gets a private slot whose initial value is
+    /// the assembler's `this` literal, and the UdonBehaviour fills it with the
+    /// matching thing on its own GameObject before the first event. From there
+    /// on it is an ordinary reference — `gameObject.SetActive(false)` is the
+    /// same extern it would be on any other GameObject.
+    pub(super) fn self_reference_slot(&mut self, member: SymbolId) -> Option<DataId> {
+        let marker = self.marker?;
+        let symbol = self.declarations.table.symbol(member);
+        if symbol.parent != Some(marker) {
+            return None;
+        }
+        if let Some(&slot) = self.statics.get(&member) {
+            return Some(slot);
+        }
+        let ty = match self.signatures.members.get(&member) {
+            Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => ty.clone(),
+            _ => Type::Error,
+        };
+        let name = format!("__this_{}", symbol.name);
+        let udon_type = self.heap_type(&ty);
+        let slot = self.program.add_data(DataSymbol {
+            name,
+            udon_type,
+            init: HeapInit::SelfReference,
+            export: false,
+            sync: None,
+        });
+        self.statics.insert(member, slot);
+        Some(slot)
     }
 
     fn ensure_static(&mut self, field: SymbolId, export: bool) -> DataId {

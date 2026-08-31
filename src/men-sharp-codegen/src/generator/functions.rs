@@ -11,7 +11,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     pub(super) fn function_shape(&self, key: &FunctionKey) -> (Vec<Type>, Type) {
         let member = self.signatures.members.get(&key.symbol);
         let (parameters, return_type) = match (key.role, member) {
-            (Role::Method | Role::Constructor, Some(MemberSignature::Function(signature))) => (
+            (
+                Role::Method | Role::Constructor | Role::Dispatcher,
+                Some(MemberSignature::Function(signature)),
+            ) => (
                 signature
                     .parameters
                     .iter()
@@ -71,6 +74,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::Setter => name.push_str("_set"),
             Role::Constructor => name.push_str("_ctor"),
             Role::DefaultConstructor => name.push_str("_defaultctor"),
+            Role::Dispatcher => name.push_str("_dispatch"),
         }
         for (_, ty) in &key.bindings {
             name.push('_');
@@ -548,7 +552,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let bindings = self.bindings_for(ctx, method, declaring_type, &call.type_arguments);
         let key = FunctionKey {
             symbol: method,
-            role: Role::Method,
+            role: Role::Dispatcher,
             bindings: bindings.clone(),
         };
         if !self.dispatchers.contains_key(&key) {

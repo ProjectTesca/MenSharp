@@ -208,13 +208,44 @@ impl Compiler {
     /// BCL types Udon does not whitelist (`List<T>`, ...). For the Udon
     /// target, append these to the user's sources before [`Compiler::parse`];
     /// they compile, monomorphize and tree-shake like any other code.
+    ///
+    /// This is the Unity-free set: the behaviour base class declares no
+    /// members. Callers that reference Unity want [`Compiler::corlib_sources_for`].
     pub fn corlib_sources() -> Vec<SourceCode> {
-        vec![
-            SourceCode::new("corlib/List.cs", include_str!("../../../corlib/List.cs")),
+        Self::corlib_sources_with_unity(false)
+    }
+
+    /// The mini-corlib, picked to match what the references actually offer.
+    /// When UnityEngine is among them the behaviour base class gains
+    /// `gameObject`/`transform`; without it those members would not resolve,
+    /// so the Unity-free base class is used instead.
+    pub fn corlib_sources_for(external: &dyn ExternalTypes) -> Vec<SourceCode> {
+        let unity = external
+            .find_type(&["UnityEngine"], "GameObject", 0)
+            .is_some()
+            && external
+                .find_type(&["UnityEngine"], "Transform", 0)
+                .is_some();
+        Self::corlib_sources_with_unity(unity)
+    }
+
+    fn corlib_sources_with_unity(unity: bool) -> Vec<SourceCode> {
+        // exactly one of the two behaviour base classes: they declare the
+        // same type, so compiling both would be a duplicate definition
+        let behaviour = if unity {
+            SourceCode::new(
+                "corlib/MenSharpBehaviour.Unity.cs",
+                include_str!("../../../corlib/MenSharpBehaviour.Unity.cs"),
+            )
+        } else {
             SourceCode::new(
                 "corlib/MenSharpBehaviour.cs",
                 include_str!("../../../corlib/MenSharpBehaviour.cs"),
-            ),
+            )
+        };
+        vec![
+            SourceCode::new("corlib/List.cs", include_str!("../../../corlib/List.cs")),
+            behaviour,
         ]
     }
 

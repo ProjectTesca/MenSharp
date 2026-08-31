@@ -60,6 +60,17 @@ pub enum HeapInit {
     /// The mangled Udon name of a type, for `System.Type` constants.
     TypeOf(String),
     CodeAddress(LabelId),
+    /// The assembler's `this` literal. Udon has no `this` pointer and no
+    /// extern that hands a program its own object, so self references are
+    /// data, not code: the assembler turns `this` into an unresolved heap
+    /// reference and the UdonBehaviour replaces it, before the first event,
+    /// with the thing of this slot's declared type on its own GameObject —
+    /// the GameObject for `%UnityEngineGameObject`, its Transform for
+    /// `%UnityEngineTransform`, `GetComponent` otherwise.
+    ///
+    /// Unlike every other initial value this one *must* travel in the `.uasm`
+    /// text: only the SDK's assembler can build that reference object.
+    SelfReference,
 }
 
 #[derive(Debug, Clone)]
@@ -235,7 +246,11 @@ impl Program {
             } else if symbol.export {
                 let _ = writeln!(out, "    .export {}", symbol.name);
             }
-            let _ = writeln!(out, "    {}: %{}, null", symbol.name, symbol.udon_type);
+            let value = match symbol.init {
+                HeapInit::SelfReference => "this",
+                _ => "null",
+            };
+            let _ = writeln!(out, "    {}: %{}, {value}", symbol.name, symbol.udon_type);
         }
         out.push_str(".data_end\n.code_start\n");
 
@@ -299,7 +314,10 @@ impl Program {
         let mut out = String::from("{\n  \"heap\": [\n");
         let mut first = true;
         for symbol in &self.data {
-            if symbol.init == HeapInit::Null {
+            // `null` needs no entry, and `this` is already in the `.uasm`
+            // text — re-applying it here would overwrite what the
+            // UdonBehaviour resolved
+            if matches!(symbol.init, HeapInit::Null | HeapInit::SelfReference) {
                 continue;
             }
             if !first {
@@ -307,7 +325,7 @@ impl Program {
             }
             first = false;
             let (kind, value) = match &symbol.init {
-                HeapInit::Null => unreachable!(),
+                HeapInit::Null | HeapInit::SelfReference => unreachable!(),
                 HeapInit::Boolean(v) => ("Boolean", v.to_string()),
                 HeapInit::Int32(v) => ("Int32", v.to_string()),
                 HeapInit::Int64(v) => ("Int64", v.to_string()),

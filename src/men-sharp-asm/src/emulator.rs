@@ -34,6 +34,11 @@ pub enum Value {
     Array(Rc<RefCell<Vec<Value>>>),
     /// A `System.Type` value, carried as the mangled Udon type name.
     Type(Rc<str>),
+    /// What a `HeapInit::SelfReference` slot holds: on Udon the UdonBehaviour
+    /// resolves it to the GameObject/Transform/component it is attached to.
+    /// The emulator has no scene, so it keeps the requested Udon type name and
+    /// lets any extern that touches it fail loudly rather than pretend.
+    SelfComponent(Rc<str>),
 }
 
 impl Value {
@@ -111,6 +116,7 @@ impl Value {
             Value::Str(v) => v.to_string(),
             Value::Array(_) => "System.Object[]".into(),
             Value::Type(name) => name.to_string(),
+            Value::SelfComponent(udon_type) => format!("<self:{udon_type}>"),
         }
     }
 }
@@ -170,6 +176,9 @@ impl Emulator {
                 HeapInit::Str(v) => Value::Str(Rc::from(v.as_str())),
                 HeapInit::TypeOf(v) => Value::Type(Rc::from(v.as_str())),
                 HeapInit::CodeAddress(label) => Value::UInt32(assembled.label_addresses[label.0]),
+                HeapInit::SelfReference => {
+                    Value::SelfComponent(Rc::from(symbol.udon_type.as_str()))
+                }
             });
         }
         Emulator {

@@ -91,11 +91,6 @@ fn main() -> ExitCode {
             }
         }
     }
-    if udon_entry.is_some() || udon_all {
-        // the Udon target compiles the mini-corlib along with user code
-        sources.extend(Compiler::corlib_sources());
-    }
-
     let mut reference_bytes = Vec::with_capacity(reference_paths.len());
     for path in &reference_paths {
         match std::fs::read(path) {
@@ -122,6 +117,12 @@ fn main() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
+
+    if udon_entry.is_some() || udon_all {
+        // the Udon target compiles the mini-corlib along with user code; which
+        // flavour depends on the references, so this waits for them
+        sources.extend(Compiler::corlib_sources_for(&references));
+    }
 
     let files = compiler.parse(sources);
     let declarations = compiler.collect_declarations(&files);

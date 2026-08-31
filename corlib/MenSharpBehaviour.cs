@@ -8,10 +8,13 @@
 //
 // The Unity package ships a class with the same fully-qualified name that
 // inherits MonoBehaviour, so the same source file also compiles under Unity
-// (that is what powers IDE completion and, later, drag-and-drop onto
-// GameObjects). This compiler-side twin deliberately declares no members yet:
-// what is not declared cannot be miscompiled — Unity API access on `this`
-// (transform, gameObject, ...) arrives together with its code generation.
+// (that is what powers IDE completion and drag-and-drop onto GameObjects).
+//
+// This is the Unity-free flavour, compiled when UnityEngine is not among the
+// references — the compiler's own tests, mostly. It declares no members: with
+// no UnityEngine.GameObject to name, `gameObject` cannot be given a type, and
+// what is not declared cannot be miscompiled. When UnityEngine *is*
+// referenced, MenSharpBehaviour.Unity.cs is compiled instead of this file.
 
 namespace MenSharp
 {

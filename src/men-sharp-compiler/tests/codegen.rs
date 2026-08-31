@@ -498,16 +498,18 @@ fn the_shipped_demo_runs_in_the_emulator() {
     );
 }
 
-/// Compile with the corlib included (MenSharpBehaviour lives there) and run
-/// one behaviour program.
-fn run_behaviour(source: &str, class_path: &str, event: &str) -> Option<Emulator> {
+/// Compile exactly these sources — the caller decides whether the mini-corlib
+/// is among them — and return the named behaviour's program, codegen errors
+/// and all.
+fn compile_behaviour(
+    sources: Vec<SourceCode>,
+    class_path: &str,
+) -> Option<men_sharp_compiler::UdonBehaviourProgram> {
     let dir = dotnet_shared_dir()?;
     let compiler = Compiler::new(CompilerSettings::default()).unwrap();
     let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
     let references = compiler.load_references(&bytes).unwrap();
 
-    let mut sources = vec![SourceCode::new("test.cs", source)];
-    sources.extend(Compiler::corlib_sources());
     let files = compiler.parse(sources);
     let declarations = compiler.collect_declarations(&files);
     let signatures = compiler.resolve_signatures(&declarations, &references);
@@ -516,15 +518,20 @@ fn run_behaviour(source: &str, class_path: &str, event: &str) -> Option<Emulator
 
     let programs =
         compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references);
-    let program = programs
+    let found: Vec<&String> = programs.iter().map(|program| &program.class_path).collect();
+    let index = programs
         .iter()
-        .find(|program| program.class_path == class_path)
-        .unwrap_or_else(|| {
-            panic!(
-                "behaviour {class_path} was not discovered; found {:?}",
-                programs.iter().map(|p| &p.class_path).collect::<Vec<_>>()
-            )
-        });
+        .position(|program| program.class_path == class_path)
+        .unwrap_or_else(|| panic!("behaviour {class_path} was not discovered; found {found:?}"));
+    Some(programs.into_iter().nth(index).unwrap())
+}
+
+/// Compile with the corlib included (MenSharpBehaviour lives there) and run
+/// one behaviour program.
+fn run_behaviour(source: &str, class_path: &str, event: &str) -> Option<Emulator> {
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, class_path)?;
     assert!(
         program.output.errors.is_empty(),
         "codegen errors: {:#?}",
@@ -726,4 +733,290 @@ fn inspector_values_survive_field_initializers() {
     emulator.run(&assembled, "_interact").unwrap();
     assert_eq!(int_of(&emulator, "result"), 300);
     assert_eq!(string_of(&emulator, "label"), "from inspector");
+}
+
+/// A stand-in for the corlib behaviour base class. The real one declares
+/// `gameObject`/`transform` as `UnityEngine` types, which need Unity's
+/// assemblies; the rule the generator applies — *members declared on
+/// `MenSharpBehaviour` itself become self references* — does not care which
+/// type they have, so a corlib-free compilation can test it anywhere.
+const SELF_REFERENCE_BASE: &str = r#"
+    namespace MenSharp
+    {
+        public class MenSharpBehaviour
+        {
+            public object gameObject { get; }
+        }
+    }
+"#;
+
+#[test]
+fn self_references_become_this_initialized_slots() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        public object held;
+
+                        public void Interact()
+                        {
+                            held = gameObject;
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+
+    let slot = program
+        .output
+        .program
+        .data
+        .iter()
+        .find(|symbol| symbol.name == "__this_gameObject")
+        .expect("no self-reference slot was emitted");
+    // never exported: the inspector must not offer to override what the
+    // behaviour is attached to
+    assert!(!slot.export);
+
+    let text = program.output.program.to_uasm().unwrap();
+    assert!(
+        text.contains("__this_gameObject: %SystemObject, this"),
+        "{text}"
+    );
+
+    // and it survives into the running program as its own kind of value
+    let assembled = program.output.program.assemble().unwrap();
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    emulator.run(&assembled, "_interact").unwrap();
+    match emulator.value_of("held") {
+        Some(Value::SelfComponent(udon_type)) => assert_eq!(&**udon_type, "SystemObject"),
+        other => panic!("held = {other:?}"),
+    }
+}
+
+#[test]
+fn assigning_to_a_self_reference_is_an_error() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        public object other;
+
+                        public void Interact()
+                        {
+                            gameObject = other;
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        messages.iter().any(|message| message.contains("read-only")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn base_calls_bind_to_the_base_implementation() {
+    // the trap: an override calling `base.M()` must not go through the
+    // dispatcher, or it re-enters itself forever
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Animal
+            {
+                public int tag;
+                public virtual int Legs() { return 2; }
+            }
+
+            public class Dog : Animal
+            {
+                public override int Legs() { return base.Legs() * 2; }
+                public int Tag() { return base.tag + 1; }
+            }
+
+            public class Program
+            {
+                public static int result;
+                public static int tagged;
+                public static void Main()
+                {
+                    Animal a = new Dog();
+                    result = a.Legs();
+                    var dog = new Dog();
+                    dog.tag = 40;
+                    tagged = dog.Tag();
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    // virtual call finds Dog.Legs, whose `base.Legs()` reaches Animal's 2
+    assert_eq!(int_of(&emulator, "result"), 4);
+    assert_eq!(int_of(&emulator, "tagged"), 41);
+}
+
+#[test]
+fn a_virtual_method_dispatches_to_its_own_class_too() {
+    // the dispatcher used to occupy the declaring method's own key, so an
+    // instantiated base class made the stub dispatch to itself
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Animal
+            {
+                public virtual int Legs() { return 2; }
+            }
+            public class Dog : Animal
+            {
+                public override int Legs() { return 4; }
+            }
+
+            public class Program
+            {
+                public static int result;
+                public static void Main()
+                {
+                    Animal plain = new Animal();
+                    Animal dog = new Dog();
+                    result = plain.Legs() * 10 + dog.Legs();
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 24);
+}
+
+#[test]
+fn base_reaches_a_self_reference_without_a_second_slot() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        public object held;
+                        public object alsoHeld;
+
+                        public void Interact()
+                        {
+                            held = gameObject;
+                            alsoHeld = base.gameObject;
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let slots = program
+        .output
+        .program
+        .data
+        .iter()
+        .filter(|symbol| symbol.name == "__this_gameObject")
+        .count();
+    assert_eq!(slots, 1, "`this` and `base` must share one slot");
+}
+
+#[test]
+fn inheriting_one_behaviour_from_another_is_an_error() {
+    // a behaviour has no `this`, so an inherited instance member has nowhere
+    // to live; this used to vanish silently, taking the read with it
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Middle : MenSharp.MenSharpBehaviour
+                    {
+                        public int shared;
+                    }
+
+                    public class Leaf : Middle
+                    {
+                        public int total;
+                        public void Interact() { total = shared + 1; }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Leaf",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        messages.iter().any(|message| message.contains("inherited")),
+        "{messages:?}"
+    );
 }

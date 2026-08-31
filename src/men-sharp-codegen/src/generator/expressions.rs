@@ -745,11 +745,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             piece = self.apply_right(ctx, piece, right);
         }
         let last = &primary.chain[count - 1];
-        let receiver = match piece {
-            Piece::Value(slot, ty) => Some((slot, ty)),
-            Piece::Pending { receiver } => receiver,
-            _ => None,
-        };
+        let receiver = piece.receiver();
         match last {
             PrimaryRight::Member { span, .. } => {
                 match self.bodies.targets.get(&EntityID::from(last)) {
@@ -802,6 +798,49 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// A behaviour *is* the program, not an object: its members live in named
+    /// heap slots and its methods take no `this`. A member it inherits from
+    /// another `MenSharpBehaviour` subclass therefore has nowhere to live —
+    /// the slot is never allocated and the call has no receiver to pass.
+    /// Caught here so it is a diagnosis rather than a missing symbol.
+    fn is_inherited_behaviour_member(
+        &self,
+        ctx: &Ctx<'ast>,
+        symbol: SymbolId,
+        is_static: bool,
+        receiver: &Option<(DataId, Type)>,
+    ) -> bool {
+        self.entry_class.is_some()
+            && !is_static
+            && receiver.is_none()
+            && ctx.this_slot.is_none()
+            && !self.is_entry_member(symbol)
+    }
+
+    fn unsupported_behaviour_inheritance(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        symbol: SymbolId,
+        span: Range<usize>,
+    ) {
+        let name = self.declarations.table.symbol(symbol).name;
+        let owner = self
+            .declarations
+            .table
+            .symbol(symbol)
+            .parent
+            .map(|parent| self.declarations.table.symbol(parent).name)
+            .unwrap_or("its base class");
+        self.error(
+            ctx,
+            format!(
+                "`{name}` is inherited from `{owner}`: one MenSharpBehaviour \
+                 inheriting another is not supported by the Udon backend yet"
+            ),
+            span,
+        );
+    }
+
     fn member_place(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -814,6 +853,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match &member.origin {
             MemberOrigin::Source(symbol) => {
                 let symbol = *symbol;
+                // `gameObject`/`transform`: a slot Udon fills with what this
+                // program is attached to. Only *this* program's — Udon
+                // resolves the reference against the behaviour that owns the
+                // heap, so there is no way to ask another one
+                if let Some(slot) = self.self_reference_slot(symbol) {
+                    if receiver.is_some() {
+                        self.error(
+                            ctx,
+                            format!(
+                                "`{}` is only available on the behaviour itself, \
+                                 not through another object",
+                                self.declarations.table.symbol(symbol).name
+                            ),
+                            span,
+                        );
+                        return Place::Error;
+                    }
+                    return Place::SelfReference {
+                        slot,
+                        ty: member_type,
+                        name: self.declarations.table.symbol(symbol).name.to_string(),
+                    };
+                }
                 // fields (and auto-property stores) of the behaviour entry
                 // class are the program's named, exported heap slots
                 if self.is_entry_member(symbol)
@@ -822,6 +884,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 {
                     let slot = self.ensure_static(symbol, true);
                     return Place::Slot(slot, member_type);
+                }
+                if self.is_inherited_behaviour_member(ctx, symbol, member.is_static, &receiver) {
+                    self.unsupported_behaviour_inheritance(ctx, symbol, span);
+                    return Place::Error;
                 }
                 match member.kind {
                     SymbolKind::Field if member.is_static => {
@@ -973,7 +1039,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> Option<(DataId, Type)> {
         match place {
-            Place::Slot(slot, ty) => Some((slot, ty)),
+            Place::Slot(slot, ty) | Place::SelfReference { slot, ty, .. } => Some((slot, ty)),
             Place::Field { object, index, ty } => {
                 let value = self.get_element(ctx, object, index, &ty, span);
                 Some((value, ty))
@@ -1030,6 +1096,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) {
         match place {
             Place::Slot(slot, _) => self.copy(value, slot),
+            Place::SelfReference { name, .. } => self.error(
+                ctx,
+                format!("`{name}` is read-only: it is what this behaviour is attached to"),
+                span,
+            ),
             Place::Field { object, index, .. } => self.set_element(ctx, object, index, value, span),
             Place::Element {
                 array,
@@ -1245,6 +1316,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     None => Piece::Error,
                 }
             }
+            PrimaryLeft::Base(span) => match (ctx.this_slot, ctx.this_type.clone()) {
+                (Some(slot), Some(ty)) => Piece::Base {
+                    receiver: Some((slot, ty)),
+                },
+                // inside a behaviour method there is no `this` value, exactly
+                // as for `this` itself — `base.gameObject` still resolves,
+                // because the member it names carries its own storage
+                _ if self.is_entry_member(ctx.key.symbol) => Piece::Base { receiver: None },
+                _ => {
+                    self.error(ctx, "`base` is unavailable here", span.clone());
+                    Piece::Error
+                }
+            },
             PrimaryLeft::New(new_expression) => self.lower_new(ctx, new_expression),
             PrimaryLeft::Predefined(_) | PrimaryLeft::Global(_) => {
                 Piece::Pending { receiver: None }
@@ -1307,16 +1391,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Piece {
         match right {
             PrimaryRight::Member { span, .. } => {
-                let receiver = match piece {
-                    Piece::Value(slot, ty) => Some((slot, ty)),
-                    Piece::Pending { receiver } => receiver,
-                    _ => None,
+                // `base.M` keeps its static binding across the method group,
+                // so the invocation that follows can suppress dispatch
+                let from_base = matches!(piece, Piece::Base { .. });
+                let receiver = piece.receiver();
+                // a method group carries the base binding to the invocation;
+                // note the checker records no target for most method groups,
+                // so the fallback below must carry it too
+                let group = |receiver| {
+                    if from_base {
+                        Piece::Base { receiver }
+                    } else {
+                        Piece::Pending { receiver }
+                    }
                 };
                 match self.bodies.targets.get(&EntityID::from(right)) {
                     Some(ResolvedTarget::Member(member)) => {
                         let member = member.clone();
                         if matches!(member.kind, SymbolKind::Method) {
-                            return Piece::Pending { receiver };
+                            return group(receiver);
                         }
                         let place = self.member_place(ctx, &member, receiver, span.clone());
                         match self.read_place(ctx, place, span.clone()) {
@@ -1325,19 +1418,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         }
                     }
                     // method group or namespace/type segment
-                    _ => Piece::Pending { receiver },
+                    _ => group(receiver),
                 }
             }
             PrimaryRight::Invocation { arguments, span } => {
-                let receiver = match piece {
-                    Piece::Value(slot, ty) => Some((slot, ty)),
-                    Piece::Pending { receiver } => receiver,
-                    _ => None,
-                };
+                let non_virtual = matches!(piece, Piece::Base { .. });
+                let receiver = piece.receiver();
                 match self.bodies.targets.get(&EntityID::from(right)) {
                     Some(ResolvedTarget::Call(call)) => {
                         let call = call.clone();
-                        self.emit_call(ctx, &call, receiver, arguments.arguments, span.clone())
+                        self.emit_call(
+                            ctx,
+                            &call,
+                            receiver,
+                            arguments.arguments,
+                            span.clone(),
+                            non_virtual,
+                        )
                     }
                     _ => {
                         self.error(ctx, "this call could not be resolved", span.clone());
@@ -1346,10 +1443,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             }
             PrimaryRight::ElementAccess { span, .. } => {
-                let receiver = match piece {
-                    Piece::Value(slot, ty) => Some((slot, ty)),
-                    _ => None,
-                };
+                let receiver = piece.receiver();
                 // string indexing is special-cased by the checker
                 if let Some((slot, ty)) = &receiver
                     && self
@@ -1435,6 +1529,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         receiver: Option<(DataId, Type)>,
         arguments: &'ast [Argument<'ast, 'ast>],
         span: Range<usize>,
+        // `base.M()`: bind to the resolved implementation instead of
+        // dispatching, so an override calling its base does not re-enter itself
+        non_virtual: bool,
     ) -> Piece {
         // evaluate arguments left to right
         let mut values: Vec<DataId> = Vec::new();
@@ -1476,12 +1573,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match &call.origin {
             MemberOrigin::Source(symbol) => {
                 let symbol = *symbol;
+                if !call.is_extension
+                    && self.is_inherited_behaviour_member(ctx, symbol, call.is_static, &receiver)
+                {
+                    self.unsupported_behaviour_inheritance(ctx, symbol, span);
+                    return Piece::Error;
+                }
                 let this = if call.is_static || call.is_extension {
                     None
                 } else {
                     receiver.as_ref().map(|(slot, _)| *slot).or(ctx.this_slot)
                 };
                 let key = if !call.is_static
+                    && !non_virtual
                     && self.is_virtual(symbol)
                     && !self.is_entry_member(symbol)
                 {
