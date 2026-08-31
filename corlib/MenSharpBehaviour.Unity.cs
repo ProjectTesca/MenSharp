@@ -25,11 +25,13 @@ namespace MenSharp
 
         public UnityEngine.Transform transform { get; }
 
-        // The program itself, as Udon's event-receiver interface. Everything a
-        // behaviour can ask of itself — serialize now, raise this event — is an
-        // extern on this, so declaring it here is what makes the methods below
-        // ordinary code rather than compiler special cases.
-        private VRC.Udon.Common.Interfaces.IUdonEventReceiver udonBehaviour { get; }
+        // The program itself. Declared as UdonBehaviour rather than as the
+        // interface its methods live on, because a `this` heap reference may
+        // only be a GameObject, a Transform or an UdonBehaviour — Udon refuses
+        // an interface-typed one and the whole program then fails to start.
+        // The extern signatures still name the interface; the compiler
+        // substitutes, exactly as UdonSharp does.
+        private VRC.Udon.UdonBehaviour udonBehaviour { get; }
 
         public void RequestSerialization()
         {
@@ -71,6 +73,20 @@ namespace MenSharp
             UnityEngine.GameObject clone = Instantiate(original);
             clone.transform.SetParent(parent, false);
             return clone;
+        }
+
+        // Unity lets you write these without a receiver, because they are
+        // inherited from Component. Forwarding keeps the same source valid
+        // here: `T` is monomorphized, so each instantiation reaches the extern
+        // with its own typeof(T).
+        public T GetComponent<T>()
+        {
+            return gameObject.GetComponent<T>();
+        }
+
+        public T GetComponentInChildren<T>()
+        {
+            return gameObject.GetComponentInChildren<T>();
         }
 
         public void Destroy(UnityEngine.Object target)

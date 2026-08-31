@@ -690,6 +690,65 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         Some(self.constant("SystemType", &name, HeapInit::TypeOf(name.clone())))
     }
 
+    /// A type's extern spelling, then its base classes' — what an operator or
+    /// member declared further up is named by.
+    pub(super) fn external_chain(&self, ty: &Type) -> Vec<String> {
+        let mut names = Vec::new();
+        if let Some(name) = self.extern_type_name(ty) {
+            names.push(name);
+        }
+        let Type::Named {
+            target: TypeTarget::External(id),
+            ..
+        } = ty
+        else {
+            return names;
+        };
+        let mut current = self.external.base_type(*id);
+        while let Some(base) = current {
+            let Some(name) = self.extern_type_name(&base) else {
+                break;
+            };
+            if names.contains(&name) {
+                break;
+            }
+            names.push(name);
+            current = match &base {
+                Type::Named {
+                    target: TypeTarget::External(id),
+                    ..
+                } => self.external.base_type(*id),
+                _ => None,
+            };
+        }
+        names
+    }
+
+    /// Does a value of this type live behind a reference? Structs and enums do
+    /// not, and comparing two boxed copies of one by identity would be wrong.
+    pub(super) fn is_reference_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Named {
+                target: TypeTarget::External(id),
+                ..
+            } => matches!(
+                self.external.type_info(*id).kind,
+                men_sharp_semantics::ExternalTypeKind::Class
+                    | men_sharp_semantics::ExternalTypeKind::Interface
+                    | men_sharp_semantics::ExternalTypeKind::Delegate
+            ),
+            Type::Named {
+                target: TypeTarget::Source(symbol),
+                ..
+            } => !matches!(
+                self.declarations.table.symbol(*symbol).kind,
+                SymbolKind::Struct | SymbolKind::RecordStruct | SymbolKind::Enum
+            ),
+            Type::Array { .. } => true,
+            _ => false,
+        }
+    }
+
     /// `System.Type`, the type of a `typeof(...)` expression.
     pub(super) fn system_type(&self) -> Type {
         match self.external.find_type(&["System"], "Type", 0) {
@@ -799,7 +858,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 for argument in arguments {
                     name.push_str(&self.heap_type_component(argument));
                 }
-                if self.nodes.has_type(&name) {
+                // UdonBehaviour has no node of its own — nothing is declared
+                // *on* it — but the assembler resolves the name, and it is the
+                // only thing a `this` reference may be stored as
+                if name == BEHAVIOUR_HEAP_TYPE || self.nodes.has_type(&name) {
                     name
                 } else {
                     "SystemObject".into()
@@ -812,7 +874,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 SymbolKind::Enum => "SystemInt32".into(),
                 // another behaviour is another *program*; what a slot can hold
                 // is the interface Udon lets programs talk through
-                _ if self.behaviour_in_type(ty).is_some() => BEHAVIOUR_UDON_TYPE.into(),
+                _ if self.behaviour_in_type(ty).is_some() => BEHAVIOUR_HEAP_TYPE.into(),
                 _ => "SystemObjectArray".into(),
             },
             Type::Array { element, rank: 1 } => {
@@ -829,8 +891,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn heap_type_component(&self, ty: &Type) -> String {
+        // arrays are named after the interface, which has a whitelisted array
+        // type and the Get/Set/get_Length externs to go with it. An
+        // UdonBehaviour[] fits one by array covariance; only a *scalar* slot
+        // has to be the concrete UdonBehaviour, for `this` to resolve into it
         if !matches!(ty, Type::Array { .. }) && self.behaviour_in_type(ty).is_some() {
-            return BEHAVIOUR_UDON_TYPE.into();
+            return BEHAVIOUR_EXTERN_TYPE.into();
         }
         match ty {
             Type::Named {
@@ -853,9 +919,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// The type's spelling inside an extern signature; `None` when the type
     /// cannot appear there (user types, unresolved parameters).
     fn extern_type_name(&self, ty: &Type) -> Option<String> {
-        // a behaviour appears in extern signatures as what Udon sees it as
+        // a behaviour appears in extern signatures as the interface
         if !matches!(ty, Type::Array { .. }) && self.behaviour_in_type(ty).is_some() {
-            return Some(BEHAVIOUR_UDON_TYPE.into());
+            return Some(BEHAVIOUR_EXTERN_TYPE.into());
+        }
+        if let Type::Named {
+            target: TypeTarget::External(id),
+            ..
+        } = ty
+            && mangle_dotnet_name(&self.external.display_name(*id)) == BEHAVIOUR_HEAP_TYPE
+        {
+            return Some(BEHAVIOUR_EXTERN_TYPE.into());
         }
         match ty {
             Type::Named {
@@ -1040,7 +1114,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 // exported slots are named after the member, so two members
                 // with one name would collide into one public variable
-                if let Some(&first) = exported.get(symbol.name) {
+                if self.is_public_variable(member)
+                    && let Some(&first) = exported.get(symbol.name)
+                {
                     let owner = self
                         .declarations
                         .table
@@ -1062,7 +1138,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     continue;
                 }
                 exported.insert(symbol.name.to_string(), member);
-                self.ensure_static(member, true);
+                let export = self.is_public_variable(member);
+                self.ensure_static(member, export);
             }
         }
     }
@@ -1188,6 +1265,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 _ => None,
             })
             .collect()
+    }
+
+    /// Does this behaviour member become a public variable — something the
+    /// inspector shows and anything on the network may write? Only what the
+    /// source made `public`. A private field is an implementation detail:
+    /// exporting it would put it in the UdonBehaviour's variable table, where
+    /// it can be overwritten by everything from the inspector to another
+    /// program, which is precisely what `private` says it is not.
+    pub(super) fn is_public_variable(&self, member: SymbolId) -> bool {
+        self.declarations.table.symbol(member).accessibility == Accessibility::Public
     }
 
     /// Where a symbol was declared, for diagnostics that have no expression to
@@ -1526,9 +1613,16 @@ fn last_name_of<'a>(expression: &'a Expression<'a, 'a>) -> Option<&'a str> {
     }
 }
 
-/// What a reference to another behaviour is, on Udon: the interface its
-/// programs talk to each other through.
-const BEHAVIOUR_UDON_TYPE: &str = "VRCUdonCommonInterfacesIUdonEventReceiver";
+/// What a reference to another behaviour is *stored* as. Udon resolves a
+/// `this` heap reference to a GameObject, a Transform or an UdonBehaviour and
+/// nothing else — an interface-typed slot is refused outright, taking the
+/// whole program down with it — so this is the type a slot may declare.
+const BEHAVIOUR_HEAP_TYPE: &str = "VRCUdonUdonBehaviour";
+
+/// ...and what it is *called* in an extern signature, where the methods are
+/// declared on the interface rather than on UdonBehaviour. Storing one and
+/// naming the other is what UdonSharp does too, for the same reason.
+const BEHAVIOUR_EXTERN_TYPE: &str = "VRCUdonCommonInterfacesIUdonEventReceiver";
 
 /// Attributes that silently change a program's meaning and that this backend
 /// does not implement. Cosmetic ones (`Header`, `Tooltip`, `Space`, ...) are

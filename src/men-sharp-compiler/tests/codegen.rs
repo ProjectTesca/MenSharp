@@ -1215,11 +1215,11 @@ fn one_behaviour_reaches_another_by_name() {
     );
 
     let text = program.output.program.to_uasm().unwrap();
-    // the reference is Udon's event-receiver interface, not an object[]
-    assert!(
-        text.contains("door: %VRCUdonCommonInterfacesIUdonEventReceiver"),
-        "{text}"
-    );
+    // a `this` heap reference may only resolve to a GameObject, a Transform
+    // or an UdonBehaviour: an interface-typed slot is refused at load time and
+    // takes the whole program with it, so a scalar reference is the concrete
+    // type even though the externs name the interface
+    assert!(text.contains("door: %VRCUdonUdonBehaviour"), "{text}");
     assert!(
         text.contains("doors: %VRCUdonCommonInterfacesIUdonEventReceiverArray"),
         "{text}"
@@ -1514,6 +1514,7 @@ fn a_generic_extern_passes_its_type_as_a_value() {
                 public void Interact()
                 {
                     UnityEngine.Transform found = gameObject.GetComponent<UnityEngine.Transform>();
+                    if (found == null) { return; }
                 }
             }
         }
@@ -1541,6 +1542,16 @@ fn a_generic_extern_passes_its_type_as_a_value() {
     let text = program.output.program.to_uasm().unwrap();
     assert!(
         text.contains("EXTERN, \"UnityEngineGameObject.__GetComponent__T\""),
+        "{text}"
+    );
+    // `Transform == null` binds to the operator UnityEngine.Object declares,
+    // which is only found by looking up the base chain — and it is the one
+    // that knows about destroyed objects, so the exact extern matters
+    assert!(
+        text.contains(
+            "EXTERN, \"UnityEngineObject.__op_Equality__UnityEngineObject_\
+             UnityEngineObject__SystemBoolean\""
+        ),
         "{text}"
     );
     let meta = program.output.program.to_meta_json().unwrap();
@@ -1586,4 +1597,44 @@ fn a_type_constant_carries_its_dotnet_name() {
         meta.contains("\"kind\": \"Type\", \"value\": \"System.String\""),
         "{meta}"
     );
+}
+
+#[test]
+fn only_public_fields_become_public_variables() {
+    // a private field is an implementation detail; exporting it would put it
+    // in the UdonBehaviour's variable table, where the inspector — or anything
+    // on the network — can write it
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Spawner : MenSharp.MenSharpBehaviour
+                    {
+                        public int shown;
+                        private int hidden;
+                        public void Interact() { hidden = hidden + 1; shown = hidden; }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Spawner",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    assert!(text.contains("    .export shown"), "{text}");
+    assert!(!text.contains(".export hidden"), "{text}");
+    // it still has storage, it is just not part of the surface
+    assert!(text.contains("hidden: %SystemInt32"), "{text}");
 }

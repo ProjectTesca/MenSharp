@@ -63,7 +63,14 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
     public void ApplyMenSharpMeta()
     {
         IUdonProgram current = program;
-        if (current == null || string.IsNullOrEmpty(metaJson))
+        if (current == null)
+        {
+            // nothing to patch means the heap keeps its `null`s and the
+            // sidecar's values never arrive — worth saying so
+            Debug.LogWarning($"MenSharp: {name} has no assembled program to initialise", this);
+            return;
+        }
+        if (string.IsNullOrEmpty(metaJson))
         {
             return;
         }

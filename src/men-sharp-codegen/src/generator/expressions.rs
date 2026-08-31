@@ -534,17 +534,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .extern_type_name(result_type)
             .unwrap_or_else(|| "SystemBoolean".into());
 
-        let operand_name = self.extern_type_name(&operand_type);
-        let candidates: Vec<String> = match operand_name {
-            Some(operand_name) => vec![format!(
-                "{operand_name}.__{name}__{operand_name}_{operand_name}__{result_name}"
-            )],
-            // reference comparison (`x == null`, object identity)
-            None if matches!(operator, Equal | NotEqual) => vec![format!(
+        // an operator can be declared on a base type — `Rigidbody == null`
+        // binds to UnityEngine.Object's — so the whole chain is a candidate,
+        // nearest first, exactly as C# overload resolution would look
+        let mut candidates: Vec<String> = self
+            .external_chain(&operand_type)
+            .iter()
+            .map(|owner| format!("{owner}.__{name}__{owner}_{owner}__{result_name}"))
+            .collect();
+        // and reference types with no operator at all still compare by
+        // identity, which is what `x == null` needs. Value types must not fall
+        // through to this: two equal structs are different objects once boxed
+        if matches!(operator, Equal | NotEqual) && self.is_reference_type(&operand_type) {
+            candidates.push(format!(
                 "SystemObject.__{name}__SystemObject_SystemObject__SystemBoolean"
-            )],
-            None => Vec::new(),
-        };
+            ));
+        }
         let signature = candidates
             .into_iter()
             .find(|signature| self.nodes.has_signature(signature));
@@ -915,7 +920,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     && matches!(member.kind, SymbolKind::Field | SymbolKind::Property)
                     && (member.kind == SymbolKind::Field || self.is_auto_property(symbol))
                 {
-                    let slot = self.ensure_static(symbol, true);
+                    let export = self.is_public_variable(symbol);
+                    let slot = self.ensure_static(symbol, export);
                     return Place::Slot(slot, member_type);
                 }
                 // a member of *another* behaviour: two programs share no

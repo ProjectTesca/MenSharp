@@ -316,6 +316,7 @@ public static class MenSharpProxy
             }
             ApplyVisibility(paired);
             ApplySyncMode(paired, program);
+            ApplySerializedProgram(paired, program);
             pairs.Add((proxy, paired));
         }
 
@@ -341,6 +342,35 @@ public static class MenSharpProxy
         }
 
         return pairs;
+    }
+
+    /// An UdonBehaviour caches, in the scene, which serialized program it
+    /// loads — separately from the program *source* it points at. Recompiling
+    /// can give the source a new serialized asset, and then the two disagree:
+    /// the inspector shows the new program while the VM runs the old one, with
+    /// nothing anywhere saying so. UdonSharp repairs the same field for the
+    /// same reason.
+    private static readonly FieldInfo SerializedProgramField = typeof(UdonBehaviour)
+        .GetField("serializedProgramAsset", BindingFlags.NonPublic | BindingFlags.Instance);
+
+    private static void ApplySerializedProgram(UdonBehaviour udon, MenSharpProgramAsset program)
+    {
+        if (SerializedProgramField == null)
+        {
+            return;
+        }
+        UnityEngine.Object wanted = program.SerializedProgramAsset;
+        if (wanted == null)
+        {
+            return;
+        }
+        var current = SerializedProgramField.GetValue(udon) as UnityEngine.Object;
+        if (current == wanted)
+        {
+            return;
+        }
+        SerializedProgramField.SetValue(udon, wanted);
+        EditorUtility.SetDirty(udon);
     }
 
     /// `[UdonBehaviourSyncMode(...)]` is a setting on the component, not part
