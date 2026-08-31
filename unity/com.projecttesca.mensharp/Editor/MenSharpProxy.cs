@@ -137,12 +137,23 @@ public static class MenSharpProxy
 
     private static void TransferAllInOpenScenes()
     {
-        foreach (GameObject target in PairingTargetsInOpenScenes())
+        SyncThenTransfer(PairingTargetsInOpenScenes(), undoable: true);
+    }
+
+    /// Pair everything first, then copy values. The order matters now that a
+    /// behaviour can reference another one: the value written for
+    /// `public Door door` is the UdonBehaviour paired with that Door, so every
+    /// pairing has to exist before the first transfer runs.
+    public static void SyncThenTransfer(List<GameObject> targets, bool undoable)
+    {
+        var pairs = new List<(MenSharpBehaviour proxy, UdonBehaviour udon)>();
+        foreach (GameObject target in targets)
         {
-            foreach ((MenSharpBehaviour proxy, UdonBehaviour udon) in SyncPairs(target))
-            {
-                TransferValues(proxy, udon);
-            }
+            pairs.AddRange(SyncPairs(target, quiet: false, undoable: undoable));
+        }
+        foreach ((MenSharpBehaviour proxy, UdonBehaviour udon) in pairs)
+        {
+            TransferValues(proxy, udon);
         }
     }
 
@@ -363,6 +374,27 @@ public static class MenSharpProxy
 
     // --------------------------------------------------------------- transfer
 
+    /// The UdonBehaviour behind a referenced proxy. A null here means the
+    /// reference will do nothing at runtime, which is worth saying out loud.
+    private static UdonBehaviour PairedOrWarn(
+        MenSharpBehaviour other, MenSharpBehaviour from, string field)
+    {
+        if (other == null)
+        {
+            return null;
+        }
+        UdonBehaviour paired = FindPaired(other);
+        if (paired == null)
+        {
+            Debug.LogWarning(
+                $"MenSharp: {from.GetType().Name}.{field} points at {other.GetType().Name} on "
+                + $"{other.gameObject.name}, which has no compiled program paired yet — the "
+                + "reference will be empty. Compile, then re-enter play mode.",
+                from);
+        }
+        return paired;
+    }
+
     /// Copies the proxy's public instance fields into the UdonBehaviour's
     /// public variable table — the values the Udon heap starts from.
     public static void TransferValues(MenSharpBehaviour proxy, UdonBehaviour udon)
@@ -374,8 +406,29 @@ public static class MenSharpProxy
             .GetFields(BindingFlags.Public | BindingFlags.Instance))
         {
             object value = field.GetValue(proxy);
+            Type valueType = field.FieldType;
+            // what you drag in is a proxy component; what the program can talk
+            // to is the UdonBehaviour paired with it
+            if (typeof(MenSharpBehaviour).IsAssignableFrom(valueType))
+            {
+                value = PairedOrWarn(value as MenSharpBehaviour, proxy, field.Name);
+                valueType = typeof(UdonBehaviour);
+            }
+            else if (valueType.IsArray
+                && typeof(MenSharpBehaviour).IsAssignableFrom(valueType.GetElementType()))
+            {
+                var source = (Array)value;
+                var mapped = new UdonBehaviour[source == null ? 0 : source.Length];
+                for (int index = 0; index < mapped.Length; index++)
+                {
+                    mapped[index] = PairedOrWarn(
+                        source.GetValue(index) as MenSharpBehaviour, proxy, field.Name);
+                }
+                value = mapped;
+                valueType = typeof(UdonBehaviour[]);
+            }
             table.RemoveVariable(field.Name);
-            Type variableType = typeof(UdonVariable<>).MakeGenericType(field.FieldType);
+            Type variableType = typeof(UdonVariable<>).MakeGenericType(valueType);
             var variable = (IUdonVariable)Activator.CreateInstance(
                 variableType, field.Name, value);
             if (!table.TryAddVariable(variable))
@@ -416,14 +469,7 @@ public class MenSharpSceneProcessor : IProcessSceneWithReport
         // the same target set the editor sweep uses, orphans included: a
         // leftover on a GameObject with no proxy would otherwise sail straight
         // into play mode and run
-        foreach (GameObject target in MenSharpProxy.PairingTargets(scene))
-        {
-            foreach ((MenSharpBehaviour proxy, UdonBehaviour udon) in
-                MenSharpProxy.SyncPairs(target, quiet: false, undoable: false))
-            {
-                MenSharpProxy.TransferValues(proxy, udon);
-            }
-        }
+        MenSharpProxy.SyncThenTransfer(MenSharpProxy.PairingTargets(scene), undoable: false);
 
         foreach (GameObject root in scene.GetRootGameObjects())
         {

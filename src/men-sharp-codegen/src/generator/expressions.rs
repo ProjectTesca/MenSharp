@@ -148,13 +148,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .unwrap_or(Type::Error),
             };
             let ty = self.substitute(&ty, &ctx.key.bindings);
-            // only when the type was written out: a `var` takes its type from
-            // the initializer, which reports its own problem — saying it twice
-            // for one line helps nobody
-            if !matches!(&declared, None | Some(Type::Infer)) {
-                let file = ctx.file;
-                self.reject_behaviour_type(&ty, "this local's type", file, declarator.span.clone());
-            }
             let slot = self.temp_for(&ty);
             if let Some(value) = initializer
                 && let Some(lowered) = self.lower_expression(ctx, value)
@@ -832,6 +825,55 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         );
     }
 
+    /// A field or auto-property of another behaviour, as the by-name access
+    /// Udon offers. It has to be `public`: the other program only exports the
+    /// variables its inspector shows, and a name that is not exported simply
+    /// finds nothing at runtime — so the check belongs here, not on the VM.
+    fn program_variable_place(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        member: &ResolvedMember,
+        symbol: SymbolId,
+        receiver: DataId,
+        span: Range<usize>,
+    ) -> Place {
+        let entry = self.declarations.table.symbol(symbol);
+        let name = entry.name.to_string();
+        if entry.accessibility != Accessibility::Public {
+            self.error(
+                ctx,
+                format!(
+                    "`{name}` is not public, so it is not part of the other behaviour's \
+                     surface — Udon can only reach another program's public variables and \
+                     public methods"
+                ),
+                span,
+            );
+            return Place::Error;
+        }
+        let stores_value = match member.kind {
+            SymbolKind::Field => true,
+            SymbolKind::Property => self.is_auto_property(symbol),
+            _ => false,
+        };
+        if !stores_value {
+            self.error(
+                ctx,
+                format!(
+                    "`{name}` is a property with a body; only fields and auto-properties \
+                     of another behaviour can be read across programs"
+                ),
+                span,
+            );
+            return Place::Error;
+        }
+        Place::ProgramVariable {
+            receiver,
+            name,
+            ty: self.substitute(&member.member_type, &ctx.key.bindings),
+        }
+    }
+
     fn member_place(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -875,6 +917,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 {
                     let slot = self.ensure_static(symbol, true);
                     return Place::Slot(slot, member_type);
+                }
+                // a member of *another* behaviour: two programs share no
+                // memory, so the only way across is Udon's by-name access
+                if let Some((slot, receiver_type)) = &receiver
+                    && self.behaviour_in_type(receiver_type).is_some()
+                {
+                    let slot = *slot;
+                    return self.program_variable_place(ctx, member, symbol, slot, span);
                 }
                 if self.has_no_instance_to_read_from(ctx, symbol, member.is_static, &receiver) {
                     self.no_instance_error(ctx, symbol, span);
@@ -1069,6 +1119,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let result = self.call_function(ctx, &key, receiver, &indices, span)?;
                 Some((result, ty))
             }
+            Place::ProgramVariable { receiver, name, ty } => {
+                // it comes back boxed as `object`, but the value inside is
+                // already the right runtime type, so copying it into a typed
+                // slot is all the conversion Udon needs
+                let boxed = self.temp("SystemObject");
+                let key = self.string_constant(&name);
+                self.call_extern(
+                    ctx,
+                    "VRCUdonCommonInterfacesIUdonEventReceiver\
+                     .__GetProgramVariable__SystemString__SystemObject",
+                    &[receiver, key, boxed],
+                    span,
+                );
+                let out = self.temp_for(&ty);
+                self.copy(boxed, out);
+                Some((out, ty))
+            }
             Place::ExternalProperty {
                 receiver,
                 owner,
@@ -1123,6 +1190,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 };
                 indices.push(value);
                 self.call_function(ctx, &key, receiver, &indices, span);
+            }
+            Place::ProgramVariable { receiver, name, .. } => {
+                let key = self.string_constant(&name);
+                self.call_extern(
+                    ctx,
+                    "VRCUdonCommonInterfacesIUdonEventReceiver\
+                     .__SetProgramVariable__SystemString_SystemObject__SystemVoid",
+                    &[receiver, key, value],
+                    span,
+                );
             }
             Place::ExternalProperty {
                 receiver,
@@ -1523,6 +1600,68 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     // ---------------------------------------------------------------- calls
 
+    /// `other.Open()` — a method call on another behaviour, which on Udon is
+    /// `SendCustomEvent("Open")` and nothing more.
+    ///
+    /// That "nothing more" is the whole shape of the limitation: the event
+    /// carries no arguments and hands nothing back, because the two programs
+    /// share no memory to put them in. Passing data means writing a public
+    /// variable first, which `other.field = ...` already compiles to.
+    fn send_custom_event(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        symbol: SymbolId,
+        receiver: DataId,
+        arguments: &[DataId],
+        span: Range<usize>,
+    ) -> Piece {
+        let entry = self.declarations.table.symbol(symbol);
+        let name = entry.name.to_string();
+        if entry.accessibility != Accessibility::Public {
+            self.error(
+                ctx,
+                format!("`{name}` is not public, so no other program can raise it"),
+                span,
+            );
+            return Piece::Error;
+        }
+        if !arguments.is_empty() {
+            self.error(
+                ctx,
+                format!(
+                    "`{name}` takes arguments, and an Udon custom event carries none. \
+                     Set a public variable on the other behaviour first, then call a \
+                     method that takes nothing."
+                ),
+                span,
+            );
+            return Piece::Error;
+        }
+        let return_type = self.substitute(&call.signature.return_type, &ctx.key.bindings);
+        if return_type != Type::Void {
+            self.error(
+                ctx,
+                format!(
+                    "`{name}` returns a value, and an Udon custom event returns none. \
+                     Have it write a public variable and read that instead."
+                ),
+                span,
+            );
+            return Piece::Error;
+        }
+
+        let event = self.string_constant(&udon_event_name(&name));
+        self.call_extern(
+            ctx,
+            "VRCUdonCommonInterfacesIUdonEventReceiver\
+             .__SendCustomEvent__SystemString__SystemVoid",
+            &[receiver, event],
+            span,
+        );
+        Piece::Void
+    }
+
     fn emit_call(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -1574,6 +1713,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match &call.origin {
             MemberOrigin::Source(symbol) => {
                 let symbol = *symbol;
+                // calling into *another* behaviour: Udon has no cross-program
+                // call, only "raise this event by name" — so that is what a
+                // method call becomes
+                if let Some((slot, receiver_type)) = &receiver
+                    && self.behaviour_in_type(receiver_type).is_some()
+                {
+                    let slot = *slot;
+                    return self.send_custom_event(ctx, call, symbol, slot, &values, span);
+                }
                 if !call.is_extension
                     && self.has_no_instance_to_read_from(ctx, symbol, call.is_static, &receiver)
                 {

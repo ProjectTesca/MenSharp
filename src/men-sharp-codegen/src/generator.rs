@@ -287,6 +287,15 @@ enum Place {
         indices: Vec<DataId>,
         ty: Type,
     },
+    /// A public variable of *another* behaviour, reached by name. Udon gives
+    /// two programs no shared memory, only `GetProgramVariable` /
+    /// `SetProgramVariable` over a string — so this is what a field access
+    /// across the boundary becomes.
+    ProgramVariable {
+        receiver: DataId,
+        name: String,
+        ty: Type,
+    },
     /// External property: `__get_X`/`__set_X` externs.
     ExternalProperty {
         receiver: Option<DataId>,
@@ -664,6 +673,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         id
     }
 
+    /// A `%SystemString` constant — the currency of Udon's cross-program
+    /// calls, which address everything by name.
+    pub(super) fn string_constant(&mut self, value: &str) -> DataId {
+        self.constant("SystemString", value, HeapInit::Str(value.to_string()))
+    }
+
     fn int_constant(&mut self, value: i32) -> DataId {
         self.constant("SystemInt32", &value.to_string(), HeapInit::Int32(value))
     }
@@ -767,6 +782,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ..
             } => match self.declarations.table.symbol(*symbol).kind {
                 SymbolKind::Enum => "SystemInt32".into(),
+                // another behaviour is another *program*; what a slot can hold
+                // is the interface Udon lets programs talk through
+                _ if self.behaviour_in_type(ty).is_some() => BEHAVIOUR_UDON_TYPE.into(),
                 _ => "SystemObjectArray".into(),
             },
             Type::Array { element, rank: 1 } => {
@@ -783,6 +801,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn heap_type_component(&self, ty: &Type) -> String {
+        if !matches!(ty, Type::Array { .. }) && self.behaviour_in_type(ty).is_some() {
+            return BEHAVIOUR_UDON_TYPE.into();
+        }
         match ty {
             Type::Named {
                 target: TypeTarget::External(id),
@@ -804,6 +825,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// The type's spelling inside an extern signature; `None` when the type
     /// cannot appear there (user types, unresolved parameters).
     fn extern_type_name(&self, ty: &Type) -> Option<String> {
+        // a behaviour appears in extern signatures as what Udon sees it as
+        if !matches!(ty, Type::Array { .. }) && self.behaviour_in_type(ty).is_some() {
+            return Some(BEHAVIOUR_UDON_TYPE.into());
+        }
         match ty {
             Type::Named {
                 target: TypeTarget::External(id),
@@ -1210,30 +1235,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    /// Reports a type that names another behaviour, and says so in terms of
-    /// what is missing rather than what went wrong internally.
-    pub(super) fn reject_behaviour_type(
-        &mut self,
-        ty: &Type,
-        what: &str,
-        file: FileId,
-        span: Range<usize>,
-    ) {
-        let Some(symbol) = self.behaviour_in_type(ty) else {
-            return;
-        };
-        let name = self.display_path(symbol);
-        self.errors.push(CodegenError {
-            message: format!(
-                "{what} names `{name}`, which is a MenSharpBehaviour — one Udon program \
-                 cannot hold a reference to another yet (that needs its calls to become \
-                 custom events), so this would compile to something that cannot work"
-            ),
-            file,
-            span,
-        });
-    }
-
     /// The attributes a behaviour's members carry that this backend does not
     /// implement *and* that change what the program does. Ignoring them would
     /// produce a program that runs but does the wrong thing — an unsynced
@@ -1325,8 +1326,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => ty.clone(),
             _ => Type::Error,
         };
-        let (file, span) = self.declaration_site(field);
-        self.reject_behaviour_type(&ty, "this variable's type", file, span);
         let udon_type = self.heap_type(&ty);
         let symbol = self.declarations.table.symbol(field);
         let name = if export {
@@ -1454,6 +1453,10 @@ fn last_name_of<'a>(expression: &'a Expression<'a, 'a>) -> Option<&'a str> {
         _ => None,
     }
 }
+
+/// What a reference to another behaviour is, on Udon: the interface its
+/// programs talk to each other through.
+const BEHAVIOUR_UDON_TYPE: &str = "VRCUdonCommonInterfacesIUdonEventReceiver";
 
 /// Attributes that silently change a program's meaning and that this backend
 /// does not implement. Cosmetic ones (`Header`, `Tooltip`, `Space`, ...) are

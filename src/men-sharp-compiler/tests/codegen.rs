@@ -1136,12 +1136,6 @@ fn calling_a_behaviour_member_on_an_object_is_a_plain_error() {
             .any(|message| message.contains("cannot be constructed")),
         "{messages:?}"
     );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("belongs to the behaviour itself")),
-        "{messages:?}"
-    );
 }
 
 #[test]
@@ -1176,10 +1170,9 @@ fn a_program_records_the_file_it_came_from() {
 }
 
 #[test]
-fn referring_to_another_behaviour_is_an_error() {
-    // this used to compile: the field became an `object[]` public variable and
-    // the other behaviour's method was inlined into this program, so nothing
-    // said a word until it failed on the VM
+fn one_behaviour_reaches_another_by_name() {
+    // Udon gives two programs no shared memory: a field access becomes
+    // Get/SetProgramVariable and a call becomes SendCustomEvent
     let Some(program) = compile_behaviour(
         vec![
             SourceCode::new("base.cs", SELF_REFERENCE_BASE),
@@ -1190,14 +1183,83 @@ fn referring_to_another_behaviour_is_an_error() {
                 {
                     public class Door : MenSharp.MenSharpBehaviour
                     {
-                        public void Open() { }
+                        public bool isOpen;
+                        public void Open() { isOpen = true; }
                     }
 
                     public class Switch : MenSharp.MenSharpBehaviour
                     {
                         public Door door;
                         public Door[] doors;
-                        public void Interact() { door.Open(); }
+
+                        public void Interact()
+                        {
+                            door.isOpen = false;
+                            door.Open();
+                            bool seen = door.isOpen;
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Switch",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+
+    let text = program.output.program.to_uasm().unwrap();
+    // the reference is Udon's event-receiver interface, not an object[]
+    assert!(
+        text.contains("door: %VRCUdonCommonInterfacesIUdonEventReceiver"),
+        "{text}"
+    );
+    assert!(
+        text.contains("doors: %VRCUdonCommonInterfacesIUdonEventReceiverArray"),
+        "{text}"
+    );
+    assert!(text.contains("__SetProgramVariable__"), "{text}");
+    assert!(text.contains("__GetProgramVariable__"), "{text}");
+    assert!(text.contains("__SendCustomEvent__"), "{text}");
+
+    // and the names it addresses them by are the source's own
+    let meta = program.output.program.to_meta_json().unwrap();
+    for name in ["isOpen", "Open"] {
+        assert!(meta.contains(&format!("\"value\": \"{name}\"")), "{meta}");
+    }
+}
+
+#[test]
+fn what_a_custom_event_cannot_carry_is_an_error() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        private int secret;
+                        public void Slide(int amount) { }
+                        public int Count() { return 1; }
+                    }
+
+                    public class Switch : MenSharp.MenSharpBehaviour
+                    {
+                        public Door door;
+                        public void Interact()
+                        {
+                            door.Slide(2);
+                            int n = door.Count();
+                        }
                     }
                 }
                 "#,
@@ -1214,13 +1276,60 @@ fn referring_to_another_behaviour_is_an_error() {
         .iter()
         .map(|error| error.message.as_str())
         .collect();
-    // both the single reference and the array of them
-    assert_eq!(
+    assert!(
         messages
             .iter()
-            .filter(|message| message.contains("is a MenSharpBehaviour"))
-            .count(),
-        2,
+            .any(|message| message.contains("takes arguments")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("returns a value")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_private_member_of_another_behaviour_is_an_error() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        internal int secret;
+                        public void Open() { }
+                    }
+
+                    public class Switch : MenSharp.MenSharpBehaviour
+                    {
+                        public Door door;
+                        public void Interact() { door.secret = 1; }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Switch",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("is not public")),
         "{messages:?}"
     );
 }

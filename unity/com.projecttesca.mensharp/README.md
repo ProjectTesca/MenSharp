@@ -15,6 +15,7 @@ at compile time.
 
    ```csharp
    using MenSharp;
+   using UnityEngine;
 
    public class Door : MenSharpBehaviour
    {
@@ -43,29 +44,18 @@ runs twice. Its inspector shows which program is actually wired up, and the
 UdonBehaviours on a GameObject are kept in sync with the components on it —
 swap or delete a behaviour and the program that went with it goes too.
 
-One `.cs` file may declare several behaviours, but dragging the file onto a
-GameObject only ever adds the class named after the file. The inspector lists
-the others with an **Add** button next to each.
+## Events
 
-## Notes
+Method names Udon knows (`Start`, `Update`, `Interact`, `OnPlayerJoined`,
+`OnDeserialization`, ...) become Udon events. Every other public method becomes
+a custom event under its own name, which is what `SendCustomEvent` raises.
 
-- Your sources are plain C#, so Unity compiles them too — that is what gives
-  you IDE completion and it is expected; the Udon program is produced by the
-  bundled MenSharp compiler, not by Unity.
-- `gameObject` and `transform` refer to what the behaviour is attached to,
-  as in any Unity component. They are read-only, and only your own — Udon
-  resolves them against the UdonBehaviour that owns the program, so there is
-  no way to ask another object for its `transform` through them (give the
-  behaviour a `public GameObject` field and assign it in the inspector).
-- Behaviours inherit from one another. The leaf class is the whole instance:
-  it exports its bases' public variables and events too, and a virtual method
-  called from a base always lands on the leaf's override. Because the public
-  variables share one inspector namespace, a name may not be declared twice
-  in a hierarchy.
 ## Networking
 
 ```csharp
 using MenSharp;
+using UnityEngine;
+using VRC.SDKBase;
 
 [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
 public class Counter : MenSharpBehaviour
@@ -87,29 +77,75 @@ public class Counter : MenSharpBehaviour
 }
 ```
 
-`[UdonSynced]` becomes a `.sync` directive on the variable, the class
-attribute sets the paired UdonBehaviour's sync mode, and `OnPreSerialization` /
-`OnDeserialization` / `OnPostSerialization` are Udon events like `Start`.
+`[UdonSynced]` becomes a `.sync` directive on the variable and the class
+attribute sets the paired UdonBehaviour's sync mode; the inspector shows both,
+so you can see what is synced without reading the generated assembly.
 `RequestSerialization()` and `SendCustomEvent(name)` are externs on the
-behaviour itself. `VRC.SDKBase.Networking` is available for ownership.
+behaviour itself.
 
-Method names Udon knows (`Start`, `Interact`, `OnPlayerJoined`, ...) become
-Udon events; every other public method becomes a custom event under its own
-name, which is what `SendCustomEvent` raises.
+## Talking to another behaviour
 
-## Notes (continued)
+```csharp
+public class Switch : MenSharpBehaviour
+{
+    public Door door;           // drag the other GameObject in
+    public Door[] doors;
 
-- Not supported yet. Each is a compile error rather than a program that runs
-  and does the wrong thing:
-  - **one behaviour referring to another** — `public Door door;` and
-    `door.Open()`, which need Udon custom events;
-  - `GetComponent<T>`, `Instantiate`/`Destroy`, and reading the arguments of
-    the VRChat events that take them (`OnPlayerJoined(VRCPlayerApi player)` —
-    the parameterless form works);
-  - `[SerializeField]`, `[FieldChangeCallback]`, `[RecursiveMethod]` (purely
-    cosmetic attributes like `[Header]` are ignored without complaint);
-  - recursion, exceptions, `ref`/`out` arguments, user-defined structs, and
-    `switch` over enum values (enums otherwise work).
+    public void Interact()
+    {
+        door.openCount = 0;     // SetProgramVariable
+        door.Interact();        // SendCustomEvent
+        Debug.Log(door.openCount);  // GetProgramVariable
+    }
+}
+```
+
+Two behaviours are two Udon programs with no memory in common, so all of this
+goes through Udon's by-name access. That is why the member has to be `public`,
+and why a custom event carries no arguments and returns nothing: calling a
+method that takes or returns something is a compile error naming the
+alternative — write a public variable first, then call a method that takes
+nothing.
+
+## Inheritance
+
+Behaviours inherit from one another. The leaf class is the whole instance: it
+exports its bases' public variables and events too, and a virtual method called
+from a base always lands on the leaf's override. Because the public variables
+share one inspector namespace, a name may not be declared twice in a hierarchy.
+
+Adding both a behaviour and one deriving from it to the same GameObject is
+legal but rarely intended — they are two programs, each with its own copy of
+the variables, and both run. The inspector says so when it happens.
+
+## Notes
+
+- Your sources are plain C#, so Unity compiles them too — that is what gives
+  you IDE completion and it is expected; the Udon program is produced by the
+  bundled MenSharp compiler, not by Unity.
+- `gameObject` and `transform` refer to what the behaviour is attached to, as
+  in any Unity component. They are read-only, and only your own — Udon resolves
+  them against the UdonBehaviour that owns the program, so there is no way to
+  ask another object for its `transform` through them (give the behaviour a
+  `public GameObject` field and assign it in the inspector).
+- One `.cs` file may declare several behaviours, but dragging the file onto a
+  GameObject only ever adds the class named after the file. The inspector lists
+  the others with an **Add** button next to each.
+- **MenSharp > Report Scene Wiring** prints every GameObject with a MenSharp
+  component or program on it, and which is paired to which.
+
+## Not supported yet
+
+Each of these is a compile error rather than a program that runs and does the
+wrong thing:
+
+- `GetComponent<T>`, `Instantiate`/`Destroy`, and reading the arguments of the
+  VRChat events that take them (`OnPlayerJoined(VRCPlayerApi player)` — the
+  parameterless form works);
+- `[SerializeField]`, `[FieldChangeCallback]`, `[RecursiveMethod]` (purely
+  cosmetic attributes like `[Header]` are ignored without complaint);
+- recursion, exceptions, `ref`/`out` arguments, user-defined structs, and
+  `switch` over enum values (enums otherwise work).
 
 ## Links
 
