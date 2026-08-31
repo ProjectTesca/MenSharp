@@ -144,6 +144,11 @@ pub struct Program {
     /// Human-readable label names, indexed by [`LabelId`]. Purely diagnostic.
     pub labels: Vec<String>,
     pub entry_points: Vec<EntryPoint>,
+    /// How the whole behaviour synchronises: `continuous`, `manual` or `none`.
+    /// Unlike `.sync` on a variable this is not part of the program at all —
+    /// it is a setting on the UdonBehaviour component, so it travels in the
+    /// sidecar for the importer to apply.
+    pub sync_mode: Option<String>,
     /// The source file this program was compiled from, when the caller knows
     /// it. Carried into the sidecar for tooling: the Unity inspector uses it to
     /// find the other behaviours declared beside this one, which it cannot ask
@@ -246,10 +251,14 @@ impl Program {
 
         out.push_str(".data_start\n");
         for symbol in &self.data {
+            // both, when both apply: `.export` is what puts the variable in
+            // the inspector, `.sync` is what puts it on the network — a synced
+            // public variable needs each
+            if symbol.export {
+                let _ = writeln!(out, "    .export {}", symbol.name);
+            }
             if let Some(sync) = &symbol.sync {
                 let _ = writeln!(out, "    .sync {}, {}", symbol.name, sync);
-            } else if symbol.export {
-                let _ = writeln!(out, "    .export {}", symbol.name);
             }
             let value = match symbol.init {
                 HeapInit::SelfReference => "this",
@@ -366,6 +375,9 @@ impl Program {
             out.push_str(&json_string(&entry.name));
         }
         out.push(']');
+        if let Some(mode) = &self.sync_mode {
+            let _ = write!(out, ",\n  \"syncMode\": {}", json_string(mode));
+        }
         if let Some(source) = &self.source {
             let _ = write!(out, ",\n  \"source\": {}", json_string(source));
         }

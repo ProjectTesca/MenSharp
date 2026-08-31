@@ -1226,6 +1226,96 @@ fn referring_to_another_behaviour_is_an_error() {
 }
 
 #[test]
+fn synced_variables_get_a_sync_directive() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    [UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
+                    public class Counter : MenSharp.MenSharpBehaviour
+                    {
+                        [UdonSynced] public int total;
+                        [UdonSynced(UdonSyncMode.Linear)] public float dial;
+                        public int local;
+                        public void Interact() { total = total + 1; }
+                        public void OnDeserialization() { }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Counter",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+
+    let text = program.output.program.to_uasm().unwrap();
+    // exported *and* synced: the inspector needs the first, the network the
+    // second, and a public synced variable needs both
+    assert!(
+        text.contains("    .export total\n    .sync total, none"),
+        "{text}"
+    );
+    assert!(text.contains("    .sync dial, linear"), "{text}");
+    assert!(!text.contains(".sync local"), "{text}");
+
+    // OnDeserialization is an Udon event, not a custom one
+    assert!(text.contains(".export _onDeserialization"), "{text}");
+
+    // and the behaviour-wide mode rides in the sidecar, since it is a setting
+    // on the component rather than part of the program
+    let meta = program.output.program.to_meta_json().unwrap();
+    assert!(meta.contains("\"syncMode\": \"manual\""), "{meta}");
+}
+
+#[test]
+fn an_unknown_on_method_stays_a_custom_event() {
+    // rewriting every `OnSomething` into `_onSomething` would invent events
+    // Udon never raises
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Bell : MenSharp.MenSharpBehaviour
+                    {
+                        public void OnMyOwnThing() { }
+                        public void OnPlayerJoined() { }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Bell",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let events: Vec<&str> = program
+        .output
+        .program
+        .entry_points
+        .iter()
+        .map(|entry| entry.name.as_str())
+        .collect();
+    assert!(events.contains(&"OnMyOwnThing"), "{events:?}");
+    assert!(events.contains(&"_onPlayerJoined"), "{events:?}");
+}
+
+#[test]
 fn attributes_that_would_change_behaviour_are_errors() {
     // `[UdonSynced]` used to be dropped on the floor: the program compiled,
     // ran, and simply never synchronised
@@ -1239,7 +1329,7 @@ fn attributes_that_would_change_behaviour_are_errors() {
                 {
                     public class Counter : MenSharp.MenSharpBehaviour
                     {
-                        [UdonSynced] public int total;
+                        [FieldChangeCallback(nameof(total))] public int total;
                         [Header("looks only")] public int shown;
                         public void Interact() { total = total + 1; }
                     }
@@ -1261,7 +1351,7 @@ fn attributes_that_would_change_behaviour_are_errors() {
     assert!(
         messages
             .iter()
-            .any(|message| message.contains("[UdonSynced]")),
+            .any(|message| message.contains("[FieldChangeCallback]")),
         "{messages:?}"
     );
     // cosmetic attributes stay silent: ignoring them costs nothing

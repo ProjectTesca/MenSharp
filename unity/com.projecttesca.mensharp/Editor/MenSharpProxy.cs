@@ -26,6 +26,7 @@ using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using VRC.SDKBase;
 using VRC.Udon;
 using VRC.Udon.Common;
 using VRC.Udon.Common.Interfaces;
@@ -289,6 +290,7 @@ public static class MenSharpProxy
                 EditorUtility.SetDirty(paired);
             }
             ApplyVisibility(paired);
+            ApplySyncMode(paired, program);
             pairs.Add((proxy, paired));
         }
 
@@ -314,6 +316,31 @@ public static class MenSharpProxy
         }
 
         return pairs;
+    }
+
+    /// `[UdonBehaviourSyncMode(...)]` is a setting on the component, not part
+    /// of the program, so the compiler can only ask for it — this is where it
+    /// takes effect.
+    private static void ApplySyncMode(UdonBehaviour udon, MenSharpProgramAsset program)
+    {
+        string wanted = program.SyncMode;
+        if (wanted == null)
+        {
+            return;
+        }
+        Networking.SyncType mode;
+        switch (wanted)
+        {
+            case "manual": mode = Networking.SyncType.Manual; break;
+            case "none": mode = Networking.SyncType.None; break;
+            default: mode = Networking.SyncType.Continuous; break;
+        }
+        if (udon.SyncMethod == mode)
+        {
+            return;
+        }
+        udon.SyncMethod = mode;
+        EditorUtility.SetDirty(udon);
     }
 
     private static void ApplyVisibility(UdonBehaviour udon)

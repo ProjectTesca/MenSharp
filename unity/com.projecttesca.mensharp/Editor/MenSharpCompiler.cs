@@ -188,6 +188,10 @@ public static class MenSharpCompiler
         yield return typeof(UnityEngine.Debug).Assembly.Location; // CoreModule
         yield return typeof(UnityEngine.Rigidbody).Assembly.Location; // PhysicsModule
         yield return typeof(VRC.Udon.UdonBehaviour).Assembly.Location; // VRC.Udon
+        // IUdonEventReceiver — what a behaviour calls on itself
+        yield return typeof(VRC.Udon.Common.Interfaces.IUdonEventReceiver).Assembly.Location;
+        // Networking, VRCPlayerApi
+        yield return typeof(VRC.SDKBase.Networking).Assembly.Location;
     }
 
     /// Where the bundled compiler for this platform lives. Pure path

@@ -24,5 +24,21 @@ namespace MenSharp
         public UnityEngine.GameObject gameObject { get; }
 
         public UnityEngine.Transform transform { get; }
+
+        // The program itself, as Udon's event-receiver interface. Everything a
+        // behaviour can ask of itself — serialize now, raise this event — is an
+        // extern on this, so declaring it here is what makes the methods below
+        // ordinary code rather than compiler special cases.
+        private VRC.Udon.Common.Interfaces.IUdonEventReceiver udonBehaviour { get; }
+
+        public void RequestSerialization()
+        {
+            udonBehaviour.RequestSerialization();
+        }
+
+        public void SendCustomEvent(string eventName)
+        {
+            udonBehaviour.SendCustomEvent(eventName);
+        }
     }
 }

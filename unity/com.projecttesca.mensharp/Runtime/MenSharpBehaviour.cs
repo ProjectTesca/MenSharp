@@ -11,5 +11,20 @@ namespace MenSharp
 {
     public class MenSharpBehaviour : MonoBehaviour
     {
+        // Stubs, so that source calling them is valid Unity C#. What runs is
+        // the compiled Udon program, where each of these is an extern on the
+        // UdonBehaviour itself; this component is stripped before play.
+
+        /// Sends this behaviour's synced variables to everyone else. Only
+        /// meaningful under `[UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]`.
+        public void RequestSerialization()
+        {
+        }
+
+        /// Raises an event on this behaviour by name — the same names its
+        /// public methods export.
+        public void SendCustomEvent(string eventName)
+        {
+        }
     }
 }

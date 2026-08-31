@@ -10,6 +10,7 @@
 #if UNITY_EDITOR
 using System;
 using System.Collections.Generic;
+using System.Reflection;
 using MenSharp;
 using UnityEditor;
 using UnityEngine;
@@ -35,7 +36,62 @@ public class MenSharpBehaviourEditor : Editor
                 $"{targets.Length} MenSharp behaviours selected.", MessageType.None);
         }
         EditorGUILayout.Space();
-        DrawDefaultInspector();
+        DrawFields();
+    }
+
+    /// Like DrawDefaultInspector, except a synced variable says so. Whether a
+    /// variable reaches the other players is invisible everywhere else — the
+    /// UdonBehaviour that carries the sync metadata is hidden, by design — so
+    /// without this the only way to check `[UdonSynced]` took is to read the
+    /// generated assembly.
+    private void DrawFields()
+    {
+        serializedObject.Update();
+        SerializedProperty property = serializedObject.GetIterator();
+        bool enterChildren = true;
+        while (property.NextVisible(enterChildren))
+        {
+            enterChildren = false;
+            if (property.propertyPath == "m_Script")
+            {
+                using (new EditorGUI.DisabledScope(true))
+                {
+                    EditorGUILayout.PropertyField(property, true);
+                }
+                continue;
+            }
+            string mode = SyncModeOfField(property);
+            if (mode == null)
+            {
+                EditorGUILayout.PropertyField(property, true);
+                continue;
+            }
+            // spelled the way the attribute is written, rather than an icon:
+            // the label should read back as the source that produced it
+            var label = new GUIContent(
+                property.displayName + " (UdonSynced:" + mode + ")",
+                "Network-synchronised, interpolation mode " + mode + ".");
+            EditorGUILayout.PropertyField(property, label, true);
+        }
+        serializedObject.ApplyModifiedProperties();
+    }
+
+    /// The sync mode `[UdonSynced]` asks for on the field behind this
+    /// property, or null when it is not synced.
+    private string SyncModeOfField(SerializedProperty property)
+    {
+        foreach (UnityEngine.Object each in targets)
+        {
+            FieldInfo field = each
+                .GetType()
+                .GetField(property.name, BindingFlags.Public | BindingFlags.Instance);
+            var synced = field?.GetCustomAttribute<UdonSyncedAttribute>();
+            if (synced != null)
+            {
+                return synced.Mode.ToString();
+            }
+        }
+        return null;
     }
 
     private void DrawProgramHeader(MenSharpBehaviour proxy)
@@ -76,9 +132,29 @@ public class MenSharpBehaviourEditor : Editor
                 }
             }
 
+            DrawSyncMode(program);
             DrawRelatedOnThisObject(proxy, type);
             DrawSiblings(proxy, type);
             DrawRevealToggle();
+        }
+    }
+
+    /// The behaviour-wide sync mode, which lives on the (hidden) UdonBehaviour
+    /// rather than in the program — and is the difference between
+    /// `RequestSerialization()` mattering and doing nothing.
+    private static void DrawSyncMode(MenSharpProgramAsset program)
+    {
+        string mode = program == null ? null : program.SyncMode;
+        if (mode == null)
+        {
+            return;
+        }
+        EditorGUILayout.LabelField("Sync Mode", char.ToUpperInvariant(mode[0]) + mode.Substring(1));
+        if (mode == "none")
+        {
+            EditorGUILayout.HelpBox(
+                "Sync mode is None, so no variable on this behaviour is sent to anyone.",
+                MessageType.Info);
         }
     }
 

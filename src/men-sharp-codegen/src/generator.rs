@@ -336,6 +336,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             for class in self.entry_chain.clone() {
                 self.check_unsupported_attributes(class);
             }
+            // most derived first: a leaf may override the mode its base set
+            for class in self.entry_chain.clone() {
+                if let Some(mode) = self.behaviour_sync_mode(class) {
+                    self.program.sync_mode = Some(mode);
+                    break;
+                }
+            }
         }
 
         // public methods are events (instance ones only on a behaviour; static
@@ -1007,6 +1014,108 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// The `.sync` mode `[UdonSynced]` asks for, or `None` when the member is
+    /// not synced. The mode is read from how the argument is *spelled*
+    /// (`UdonSyncMode.Linear`): attributes are not resolved as expressions, and
+    /// an unrecognised spelling is reported rather than guessed at.
+    fn sync_mode_of(&mut self, member: SymbolId) -> Option<String> {
+        for sections in self.attribute_sections(member) {
+            for attribute in sections.iter().flat_map(|section| section.attributes) {
+                if attribute_name(attribute) != Some("UdonSynced") {
+                    continue;
+                }
+                let argument = attribute
+                    .arguments
+                    .as_ref()
+                    .and_then(|list| list.arguments.first());
+                let Some(argument) = argument else {
+                    return Some("none".into());
+                };
+                let spelling = match &argument.value {
+                    ArgumentValue::Expression(expression) => last_name_of(expression),
+                    _ => None,
+                };
+                return match spelling {
+                    Some("None") | None => Some("none".into()),
+                    Some("Linear") => Some("linear".into()),
+                    Some("Smooth") => Some("smooth".into()),
+                    Some(other) => {
+                        let (file, span) = self.declaration_site(member);
+                        self.errors.push(CodegenError {
+                            message: format!(
+                                "`{other}` is not a sync mode; use UdonSyncMode.None, \
+                                 UdonSyncMode.Linear or UdonSyncMode.Smooth"
+                            ),
+                            file,
+                            span,
+                        });
+                        Some("none".into())
+                    }
+                };
+            }
+        }
+        None
+    }
+
+    /// The behaviour-wide sync mode from `[UdonBehaviourSyncMode(...)]`, or
+    /// `None` to leave the UdonBehaviour's setting alone.
+    fn behaviour_sync_mode(&mut self, class: SymbolId) -> Option<String> {
+        for sections in self.attribute_sections(class) {
+            for attribute in sections.iter().flat_map(|section| section.attributes) {
+                if attribute_name(attribute) != Some("UdonBehaviourSyncMode") {
+                    continue;
+                }
+                let spelling = attribute
+                    .arguments
+                    .as_ref()
+                    .and_then(|list| list.arguments.first())
+                    .and_then(|argument| match &argument.value {
+                        ArgumentValue::Expression(expression) => last_name_of(expression),
+                        _ => None,
+                    });
+                return match spelling {
+                    Some("Continuous") => Some("continuous".into()),
+                    Some("Manual") => Some("manual".into()),
+                    Some("None") => Some("none".into()),
+                    other => {
+                        let (file, span) = self.declaration_site(class);
+                        self.errors.push(CodegenError {
+                            message: format!(
+                                "`{}` is not a behaviour sync mode; use \
+                                 BehaviourSyncMode.Continuous, .Manual or .None",
+                                other.unwrap_or("(nothing)")
+                            ),
+                            file,
+                            span,
+                        });
+                        None
+                    }
+                };
+            }
+        }
+        None
+    }
+
+    /// Every attribute section written on a member, across its declarations.
+    fn attribute_sections(
+        &self,
+        member: SymbolId,
+    ) -> Vec<&'ast [men_sharp_parser::ast::AttributeSection<'ast, 'ast>]> {
+        self.declarations
+            .table
+            .symbol(member)
+            .declarations
+            .iter()
+            .filter_map(|site| match &site.syntax {
+                SyntaxRef::Field { field, .. } => Some(field.attributes),
+                SyntaxRef::Property(property) => Some(property.attributes),
+                SyntaxRef::Method(method) => Some(method.attributes),
+                SyntaxRef::Class(class) => Some(class.attributes),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Where a symbol was declared, for diagnostics that have no expression to
     /// point at.
     pub(super) fn declaration_site(&self, symbol: SymbolId) -> (FileId, Range<usize>) {
@@ -1030,7 +1139,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(parent) = self.declarations.table.symbol(member).parent else {
             return false;
         };
+        // MenSharpBehaviour's own members count too: `RequestSerialization()`
+        // is a method on the program, not on an object, so like everything in
+        // the entry chain it is compiled without a `this`. (Its storage is
+        // still a self reference — see self_reference_slot, which runs first.)
         self.entry_chain.contains(&parent)
+            || (Some(parent) == self.marker && !self.entry_chain.is_empty())
     }
 
     /// The most derived declaration of a behaviour member. A behaviour has
@@ -1242,12 +1356,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let baked = initializer.and_then(|expression| literal_heap_init(expression, &udon_type));
         let runs_at_startup = initializer.is_some() && baked.is_none();
 
+        let sync = self.sync_mode_of(field);
         let slot = self.program.add_data(DataSymbol {
             name,
             udon_type,
             init: baked.unwrap_or(HeapInit::Null),
             export,
-            sync: None,
+            sync,
         });
         self.statics.insert(field, slot);
         if runs_at_startup && let Some(file) = file {
@@ -1314,16 +1429,38 @@ fn literal_heap_init(expression: &Expression, udon_type: &str) -> Option<HeapIni
     }
 }
 
+/// The last segment of an attribute's name, so `[MenSharp.UdonSynced]` and
+/// `[UdonSynced]` read the same.
+fn attribute_name<'a>(attribute: &'a men_sharp_parser::ast::Attribute<'a, 'a>) -> Option<&'a str> {
+    let TypeRefBase::Name(name) = &attribute.name.base else {
+        return None;
+    };
+    let spelling = name.segments.last()?.name.value;
+    Some(spelling.strip_suffix("Attribute").unwrap_or(spelling))
+}
+
+/// The last identifier in an expression written as a name (`UdonSyncMode.Linear`
+/// -> `Linear`). Attribute arguments are never type-checked, so this reads the
+/// syntax; anything else returns `None` and is reported by the caller.
+fn last_name_of<'a>(expression: &'a Expression<'a, 'a>) -> Option<&'a str> {
+    let Expression::Primary(primary) = expression else {
+        return None;
+    };
+    if let Some(PrimaryRight::Member { name, .. }) = primary.chain.last() {
+        return name.as_ref().ok().map(|name| name.value);
+    }
+    match &primary.left {
+        PrimaryLeft::Identifier { name, .. } => Some(name.value),
+        _ => None,
+    }
+}
+
 /// Attributes that silently change a program's meaning and that this backend
 /// does not implement. Cosmetic ones (`Header`, `Tooltip`, `Space`, ...) are
 /// deliberately absent: ignoring those costs nothing but a label.
 fn unimplemented_attribute(name: &str) -> Option<&'static str> {
     let name = name.strip_suffix("Attribute").unwrap_or(name);
     match name {
-        "UdonSynced" => Some(
-            "network synchronisation is not implemented, so the variable would stay \
-             local and the world would only look right to you",
-        ),
         "FieldChangeCallback" => Some("the callback would never run"),
         "RecursiveMethod" => Some(
             "calls use static frames, so recursion is rejected outright rather than \
@@ -1420,15 +1557,56 @@ pub fn behaviour_classes(declarations: &Declarations, signatures: &Signatures) -
 /// Unity/VRChat lifecycle methods map to Udon's built-in event names; other
 /// method names become custom events verbatim.
 fn udon_event_name(name: &str) -> String {
-    match name {
-        "Start" => "_start".into(),
-        "Update" => "_update".into(),
-        "LateUpdate" => "_lateUpdate".into(),
-        "FixedUpdate" => "_fixedUpdate".into(),
-        "OnEnable" => "_onEnable".into(),
-        "OnDisable" => "_onDisable".into(),
-        "Interact" => "_interact".into(),
-        other => other.to_string(),
+    // Udon spells its built-in events as the Unity/VRChat method name with a
+    // leading underscore and a lower-case first letter. Only names on this list
+    // get that treatment: everything else is a custom event under its own name,
+    // and silently rewriting an unknown `OnSomething` would produce an event
+    // nothing ever raises.
+    const EVENTS: &[&str] = &[
+        // Unity lifecycle
+        "Start",
+        "Update",
+        "LateUpdate",
+        "FixedUpdate",
+        "OnEnable",
+        "OnDisable",
+        "OnDestroy",
+        // interaction and pickups
+        "Interact",
+        "OnPickup",
+        "OnDrop",
+        "OnPickupUseDown",
+        "OnPickupUseUp",
+        // players
+        "OnPlayerJoined",
+        "OnPlayerLeft",
+        "OnPlayerRespawn",
+        "OnSpawn",
+        "OnStationEntered",
+        "OnStationExited",
+        "OnMasterTransferred",
+        // networking
+        "OnPreSerialization",
+        "OnDeserialization",
+        "OnPostSerialization",
+        "OnOwnershipRequest",
+        "OnOwnershipTransferred",
+        // video players
+        "OnVideoStart",
+        "OnVideoEnd",
+        "OnVideoError",
+        "OnVideoLoop",
+        "OnVideoPause",
+        "OnVideoPlay",
+        "OnVideoReady",
+    ];
+    if !EVENTS.contains(&name) {
+        return name.to_string();
+    }
+    let mut characters = name.chars();
+    match characters.next() {
+        Some(first) => format!("_{}{}", first.to_lowercase(), characters.as_str()),
+        None => name.to_string(),
     }
 }
 

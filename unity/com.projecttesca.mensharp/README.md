@@ -62,13 +62,50 @@ the others with an **Add** button next to each.
   called from a base always lands on the leaf's override. Because the public
   variables share one inspector namespace, a name may not be declared twice
   in a hierarchy.
+## Networking
+
+```csharp
+using MenSharp;
+
+[UdonBehaviourSyncMode(BehaviourSyncMode.Manual)]
+public class Counter : MenSharpBehaviour
+{
+    [UdonSynced] public int total;
+    [UdonSynced(UdonSyncMode.Linear)] public float dial;
+
+    public void Interact()
+    {
+        if (!Networking.IsOwner(gameObject))
+        {
+            Networking.SetOwner(Networking.LocalPlayer, gameObject);
+        }
+        total += 1;
+        RequestSerialization();
+    }
+
+    public void OnDeserialization() { Debug.Log(total); }
+}
+```
+
+`[UdonSynced]` becomes a `.sync` directive on the variable, the class
+attribute sets the paired UdonBehaviour's sync mode, and `OnPreSerialization` /
+`OnDeserialization` / `OnPostSerialization` are Udon events like `Start`.
+`RequestSerialization()` and `SendCustomEvent(name)` are externs on the
+behaviour itself. `VRC.SDKBase.Networking` is available for ownership.
+
+Method names Udon knows (`Start`, `Interact`, `OnPlayerJoined`, ...) become
+Udon events; every other public method becomes a custom event under its own
+name, which is what `SendCustomEvent` raises.
+
+## Notes (continued)
+
 - Not supported yet. Each is a compile error rather than a program that runs
   and does the wrong thing:
-  - **networking** — `[UdonSynced]`, `RequestSerialization`, ownership;
   - **one behaviour referring to another** — `public Door door;` and
     `door.Open()`, which need Udon custom events;
-  - `SendCustomEvent`, `GetComponent<T>`, `Instantiate`/`Destroy`, and the
-    VRChat events that take parameters (`OnPlayerJoined`, ...);
+  - `GetComponent<T>`, `Instantiate`/`Destroy`, and reading the arguments of
+    the VRChat events that take them (`OnPlayerJoined(VRCPlayerApi player)` —
+    the parameterless form works);
   - `[SerializeField]`, `[FieldChangeCallback]`, `[RecursiveMethod]` (purely
     cosmetic attributes like `[Header]` are ignored without complaint);
   - recursion, exceptions, `ref`/`out` arguments, user-defined structs, and

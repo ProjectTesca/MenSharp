@@ -46,6 +46,20 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         }
     }
 
+    /// The behaviour-wide sync mode the source asked for, or null.
+    public string SyncMode
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(metaJson))
+            {
+                return null;
+            }
+            var meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
+            return string.IsNullOrEmpty(meta?.syncMode) ? null : meta.syncMode;
+        }
+    }
+
     public void ApplyMenSharpMeta()
     {
         IUdonProgram current = program;
@@ -118,6 +132,11 @@ public class MenSharpMeta
     /// it (so: project-relative). Unity cannot answer this — a .cs asset only
     /// ever maps to the class named after the file — so the compiler tells us.
     public string source;
+    /// `continuous`, `manual` or `none` from `[UdonBehaviourSyncMode]`, or
+    /// empty to leave the UdonBehaviour's own setting alone. This is a setting
+    /// on the component rather than part of the program, so the pairing applies
+    /// it — see MenSharpProxy.
+    public string syncMode;
 }
 
 [Serializable]
