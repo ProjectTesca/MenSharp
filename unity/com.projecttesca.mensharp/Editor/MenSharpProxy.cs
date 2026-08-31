@@ -234,7 +234,21 @@ public static class MenSharpProxy
     /// touched — least of all removed.
     private static bool IsBackingBehaviour(UdonBehaviour udon)
     {
-        return udon != null && udon.programSource is MenSharpProgramAsset;
+        if (udon == null)
+        {
+            return false;
+        }
+        if (udon.programSource is MenSharpProgramAsset)
+        {
+            return true;
+        }
+        // its program asset was deleted, so the type no longer identifies it.
+        // Nothing else hides an UdonBehaviour, and one with no program does
+        // nothing but linger — recognising it here is what lets the sweep
+        // clear it away. (While `Reveal` is on ours are not hidden, so a
+        // broken one is visible instead, which is just as good.)
+        return udon.programSource == null
+            && (udon.hideFlags & HideFlags.HideInInspector) != 0;
     }
 
     /// Makes this GameObject's backing UdonBehaviours match the MenSharp

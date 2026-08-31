@@ -144,9 +144,12 @@ fn main() -> ExitCode {
             &references,
             &files,
         );
+        // no behaviours is a normal state, not a failure: sources without one
+        // yet, or the last one just deleted. Failing here would stop the Unity
+        // driver before it cleans up the programs that are now stale.
         if programs.is_empty() {
-            eprintln!("no MenSharpBehaviour subclasses found — nothing to compile for Udon");
-            return ExitCode::FAILURE;
+            println!("no MenSharpBehaviour subclasses found — nothing to emit");
+            return ExitCode::SUCCESS;
         }
         let mut failed = 0usize;
         for program in &programs {

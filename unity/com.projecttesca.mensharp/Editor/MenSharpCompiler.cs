@@ -71,6 +71,7 @@ public static class MenSharpCompiler
         // one program asset per produced behaviour
         var produced = Directory.GetFiles(outputDirectory, "*.uasm");
         Directory.CreateDirectory(ProgramsFolder);
+        var current = new HashSet<string>();
         foreach (string uasmPath in produced)
         {
             string classPath = Path.GetFileNameWithoutExtension(uasmPath); // "Demo.Door"
@@ -79,12 +80,40 @@ public static class MenSharpCompiler
                 outputDirectory, classPath + ".meta.json");
             MenSharpImporter.CreateOrUpdate(
                 uasmPath, metaPath, $"{ProgramsFolder}/{className}.asset");
+            current.Add(className);
         }
+        DeleteProgramsWithoutABehaviour(current);
         AssetDatabase.SaveAssets();
 
         Debug.Log(
             $"MenSharp: compiled {produced.Length} behaviour(s) from {sources.Length} "
             + $"file(s) in {stopwatch.ElapsedMilliseconds}ms.");
+    }
+
+    /// Program assets left over from behaviours the sources no longer declare.
+    /// Keeping them would leave GameObjects running code that is not in the
+    /// project any more — and the UdonBehaviour carrying it is hidden, so
+    /// nobody would see why.
+    private static void DeleteProgramsWithoutABehaviour(HashSet<string> current)
+    {
+        foreach (string file in Directory.GetFiles(ProgramsFolder, "*.asset"))
+        {
+            string name = Path.GetFileNameWithoutExtension(file);
+            if (current.Contains(name))
+            {
+                continue;
+            }
+            string assetPath = $"{ProgramsFolder}/{Path.GetFileName(file)}";
+            // only ours: anything else in this folder is the user's business
+            if (AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(assetPath) == null)
+            {
+                continue;
+            }
+            AssetDatabase.DeleteAsset(assetPath);
+            Debug.Log(
+                $"MenSharp: removed {name}.asset — no behaviour named {name} is declared "
+                + "any more.");
+        }
     }
 
     private static bool RunCompiler(string binary, string outputDirectory, string[] sources)
