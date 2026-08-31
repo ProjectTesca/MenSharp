@@ -673,6 +673,34 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         id
     }
 
+    /// A `%SystemType` constant naming an external type. Udon has no generics:
+    /// a type argument travels as a value, so `GetComponent<Rigidbody>()`
+    /// needs `typeof(Rigidbody)` sitting in the heap. The constant carries the
+    /// .NET name, which is what the Unity importer can resolve back to a real
+    /// `System.Type`.
+    pub(super) fn type_constant(&mut self, ty: &Type) -> Option<DataId> {
+        let Type::Named {
+            target: TypeTarget::External(id),
+            ..
+        } = ty
+        else {
+            return None;
+        };
+        let name = self.external.display_name(*id);
+        Some(self.constant("SystemType", &name, HeapInit::TypeOf(name.clone())))
+    }
+
+    /// `System.Type`, the type of a `typeof(...)` expression.
+    pub(super) fn system_type(&self) -> Type {
+        match self.external.find_type(&["System"], "Type", 0) {
+            Some(id) => Type::Named {
+                target: TypeTarget::External(id),
+                arguments: Vec::new(),
+            },
+            None => Type::Error,
+        }
+    }
+
     /// A `%SystemString` constant — the currency of Udon's cross-program
     /// calls, which address everything by name.
     pub(super) fn string_constant(&mut self, value: &str) -> DataId {
@@ -1082,6 +1110,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         None
     }
 
+    /// The extern signature a corlib function stands for, from
+    /// `[UdonExtern("Owner.__Name__Params__Ret")]`.
+    fn udon_extern_of(&self, member: SymbolId) -> Option<String> {
+        for sections in self.attribute_sections(member) {
+            for attribute in sections.iter().flat_map(|section| section.attributes) {
+                if attribute_name(attribute) != Some("UdonExtern") {
+                    continue;
+                }
+                let argument = attribute
+                    .arguments
+                    .as_ref()
+                    .and_then(|list| list.arguments.first())?;
+                let ArgumentValue::Expression(expression) = &argument.value else {
+                    return None;
+                };
+                return string_literal_of(expression);
+            }
+        }
+        None
+    }
+
     /// The behaviour-wide sync mode from `[UdonBehaviourSyncMode(...)]`, or
     /// `None` to leave the UdonBehaviour's setting alone.
     fn behaviour_sync_mode(&mut self, class: SymbolId) -> Option<String> {
@@ -1436,6 +1485,29 @@ fn attribute_name<'a>(attribute: &'a men_sharp_parser::ast::Attribute<'a, 'a>) -
     };
     let spelling = name.segments.last()?.name.value;
     Some(spelling.strip_suffix("Attribute").unwrap_or(spelling))
+}
+
+/// The text of a string literal written as an attribute argument.
+fn string_literal_of<'a>(expression: &'a Expression<'a, 'a>) -> Option<String> {
+    let Expression::Primary(primary) = expression else {
+        return None;
+    };
+    if !primary.chain.is_empty() {
+        return None;
+    }
+    let PrimaryLeft::Literal(literal) = &primary.left else {
+        return None;
+    };
+    let LiteralExpression::String(text) = literal else {
+        return None;
+    };
+    // attribute arguments carry the written text, quotes and all
+    let inner = text
+        .value
+        .strip_prefix('"')
+        .and_then(|rest| rest.strip_suffix('"'))
+        .unwrap_or(text.value);
+    Some(inner.to_string())
 }
 
 /// The last identifier in an expression written as a name (`UdonSyncMode.Linear`

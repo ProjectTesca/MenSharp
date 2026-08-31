@@ -107,6 +107,24 @@ method that takes or returns something is a compile error naming the
 alternative — write a public variable first, then call a method that takes
 nothing.
 
+## Components and cloning
+
+```csharp
+Rigidbody body = gameObject.GetComponent<Rigidbody>();
+GameObject clone = Instantiate(prefab);
+Instantiate(prefab, position, rotation);   // written in terms of the above
+Destroy(clone, 3f);
+```
+
+Udon has no generics, so `GetComponent<T>` is one extern that takes
+`typeof(T)` as an ordinary value; the same goes for `GetComponentInChildren<T>`
+and friends. `typeof(...)` works for any type Udon knows.
+
+VRChat replaces Unity's `Instantiate` with its own, which only clones a
+GameObject and takes nothing else — the position/rotation/parent overloads are
+written in terms of it. VRChat's own rules still apply: the original has to be
+in the scene (not a project prefab), and the clone is local to your client.
+
 ## Inheritance
 
 Behaviours inherit from one another. The leaf class is the whole instance: it
@@ -139,9 +157,8 @@ the variables, and both run. The inspector says so when it happens.
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- `GetComponent<T>`, `Instantiate`/`Destroy`, and reading the arguments of the
-  VRChat events that take them (`OnPlayerJoined(VRCPlayerApi player)` — the
-  parameterless form works);
+- reading the arguments of the VRChat events that take them
+  (`OnPlayerJoined(VRCPlayerApi player)` — the parameterless form works);
 - `[SerializeField]`, `[FieldChangeCallback]`, `[RecursiveMethod]` (purely
   cosmetic attributes like `[Header]` are ignored without complaint);
 - recursion, exceptions, `ref`/`out` arguments, user-defined structs, and

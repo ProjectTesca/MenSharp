@@ -97,7 +97,11 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
                 Debug.LogWarning($"MenSharp: cannot decode {entry.name} ({entry.kind})");
                 continue;
             }
-            current.Heap.SetHeapVariable(address, value, value.GetType());
+            // the slot's declared type, not the value's: a System.Type value
+            // reports itself as RuntimeType, which is not what the program
+            // declared and not what the VM expects to find
+            Type declared = current.Heap.GetHeapVariableType(address);
+            current.Heap.SetHeapVariable(address, value, declared ?? value.GetType());
         }
 
         // persist the patched heap so the runtime loads the same state
@@ -116,10 +120,35 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             case "Double": return double.Parse(entry.value, System.Globalization.CultureInfo.InvariantCulture);
             case "Char": return (char)uint.Parse(entry.value);
             case "String": return entry.value;
-            // "Type" (typeof constants) needs a name → System.Type map; not
-            // supported by the importer yet
+            case "Type": return ResolveType(entry.value);
             default: return null;
         }
+    }
+
+    /// A `System.Type` by .NET full name. Udon passes a generic method's type
+    /// argument as a value, so `GetComponent<Rigidbody>()` needs the real
+    /// `typeof(Rigidbody)` on the heap — and only the editor can make one.
+    ///
+    /// Searched across the loaded assemblies rather than through
+    /// `Type.GetType`, which only looks in mscorlib and the caller's own
+    /// assembly and would never find UnityEngine's or VRChat's types.
+    private static Type ResolveType(string fullName)
+    {
+        if (string.IsNullOrEmpty(fullName))
+        {
+            return null;
+        }
+        foreach (System.Reflection.Assembly assembly in
+            AppDomain.CurrentDomain.GetAssemblies())
+        {
+            Type found = assembly.GetType(fullName, false);
+            if (found != null)
+            {
+                return found;
+            }
+        }
+        Debug.LogWarning($"MenSharp: no type named {fullName} is loaded");
+        return null;
     }
 }
 

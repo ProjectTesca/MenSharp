@@ -40,5 +40,47 @@ namespace MenSharp
         {
             udonBehaviour.SendCustomEvent(eventName);
         }
+
+        // VRChat replaces Unity's Instantiate with its own, and what it exposes
+        // is a wrapper module rather than a type — there is no `VRCInstantiate`
+        // class to call, only that extern. [UdonExtern] names it directly.
+        //
+        // The rest of Unity's overloads are missing on purpose: Udon has only
+        // this one, so the others are written out here in terms of it, exactly
+        // as they would be by hand.
+        [UdonExtern("VRCInstantiate.__Instantiate__UnityEngineGameObject__UnityEngineGameObject")]
+        public UnityEngine.GameObject Instantiate(UnityEngine.GameObject original)
+        {
+            return null;
+        }
+
+        public UnityEngine.GameObject Instantiate(
+            UnityEngine.GameObject original,
+            UnityEngine.Vector3 position,
+            UnityEngine.Quaternion rotation)
+        {
+            UnityEngine.GameObject clone = Instantiate(original);
+            clone.transform.SetPositionAndRotation(position, rotation);
+            return clone;
+        }
+
+        public UnityEngine.GameObject Instantiate(
+            UnityEngine.GameObject original,
+            UnityEngine.Transform parent)
+        {
+            UnityEngine.GameObject clone = Instantiate(original);
+            clone.transform.SetParent(parent, false);
+            return clone;
+        }
+
+        public void Destroy(UnityEngine.Object target)
+        {
+            UnityEngine.Object.Destroy(target);
+        }
+
+        public void Destroy(UnityEngine.Object target, float delay)
+        {
+            UnityEngine.Object.Destroy(target, delay);
+        }
     }
 }

@@ -1408,6 +1408,32 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             },
             PrimaryLeft::New(new_expression) => self.lower_new(ctx, new_expression),
+            PrimaryLeft::Typeof {
+                target_type, span, ..
+            } => {
+                let ty = target_type
+                    .as_ref()
+                    .ok()
+                    .and_then(|type_ref| {
+                        self.bodies
+                            .resolved_types
+                            .get(&EntityID::from(type_ref))
+                            .cloned()
+                    })
+                    .map(|ty| self.substitute(&ty, &ctx.key.bindings));
+                match ty.as_ref().and_then(|ty| self.type_constant(ty)) {
+                    Some(slot) => Piece::Value(slot, self.system_type()),
+                    None => {
+                        self.error(
+                            ctx,
+                            "`typeof` only works for types Udon knows; a user-defined type \
+                             has no `System.Type` on the VM",
+                            span.clone(),
+                        );
+                        Piece::Error
+                    }
+                }
+            }
             PrimaryLeft::Predefined(_) | PrimaryLeft::Global(_) => {
                 Piece::Pending { receiver: None }
             }
@@ -1785,6 +1811,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     }
                 }
                 pushed.extend(values.iter().copied());
+                // a generic extern takes its type argument as a value, after
+                // the ordinary parameters and before the result
+                for argument in &call.type_arguments {
+                    let argument = self.substitute(argument, &ctx.key.bindings);
+                    match self.type_constant(&argument) {
+                        Some(slot) => pushed.push(slot),
+                        None => {
+                            self.error(
+                                ctx,
+                                "this type argument has no `System.Type` Udon can name",
+                                span,
+                            );
+                            return Piece::Error;
+                        }
+                    }
+                }
                 let result = if return_type == Type::Void {
                     None
                 } else {

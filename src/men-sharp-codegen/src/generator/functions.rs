@@ -179,6 +179,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         self.program.code.push(Op::Label(label));
 
+        // `[UdonExtern("...")]`: the body *is* the extern. Some of what Udon
+        // offers has no .NET type to call — `VRCInstantiate` is a wrapper
+        // module, not a class — so corlib names the signature directly instead
+        // of the compiler growing a special case per function.
+        if let Some(signature) = self.udon_extern_of(key.symbol) {
+            let mut pushed = parameters[usize::from(has_this)..].to_vec();
+            pushed.extend(result);
+            self.call_extern(&ctx, &signature, &pushed, 0..0);
+            self.program.code.push(Op::JumpIndirect(return_slot));
+            return;
+        }
+
         // bind parameter names
         let value_parameters = &parameters[usize::from(has_this)..];
         match (key.role, &syntax) {
@@ -893,14 +905,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let MemberOrigin::External { member, .. } = &call.origin else {
             return None;
         };
-        if !call.type_arguments.is_empty() {
-            self.error(
-                ctx,
-                "generic external methods are not supported by the Udon backend yet",
-                span.clone(),
-            );
-            return None;
-        }
         let declaring = self.substitute(&call.declaring_type, &ctx.key.bindings);
         let Some(owner) = self.extern_type_name(&declaring) else {
             self.error(
@@ -942,6 +946,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         } else {
             format!("__{}", parts.join("_"))
         };
+        // Udon has no generics: a generic method is one extern named `…__T`
+        // that takes its type argument as an ordinary `System.Type` value.
+        // The caller supplies that value; see emit_call.
+        if !call.type_arguments.is_empty() {
+            return Some(format!("{owner}.__{name}{middle}__T"));
+        }
         Some(format!("{owner}.__{name}{middle}__{return_part}"))
     }
 

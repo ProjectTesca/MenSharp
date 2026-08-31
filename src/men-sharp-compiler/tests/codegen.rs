@@ -1469,3 +1469,121 @@ fn attributes_that_would_change_behaviour_are_errors() {
         "{messages:?}"
     );
 }
+
+/// Unity's managed assemblies, when this machine has them. The generic
+/// externs all live on Unity types, so a test for them cannot run without.
+fn unity_managed_dir() -> Option<std::path::PathBuf> {
+    let hub = std::path::Path::new(&std::env::var("HOME").ok()?).join("Unity/Hub/Editor");
+    let mut versions: Vec<_> = std::fs::read_dir(hub).ok()?.flatten().collect();
+    versions.sort_by_key(|entry| entry.file_name());
+    for version in versions {
+        let managed = version.path().join("Editor/Data/Managed");
+        if managed
+            .join("UnityEngine/UnityEngine.CoreModule.dll")
+            .exists()
+        {
+            return Some(managed);
+        }
+    }
+    None
+}
+
+#[test]
+fn a_generic_extern_passes_its_type_as_a_value() {
+    // Udon has no generics: `GetComponent<T>` is one extern named `…__T` that
+    // takes typeof(T) as an ordinary parameter, after the receiver
+    let (Some(dotnet), Some(unity)) = (dotnet_shared_dir(), unity_managed_dir()) else {
+        eprintln!("skipped: needs both a .NET runtime and a Unity install");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dotnet.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        namespace Game
+        {
+            public class Bouncer : MenSharpBehaviour
+            {
+                public void Interact()
+                {
+                    UnityEngine.Transform found = gameObject.GetComponent<UnityEngine.Transform>();
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources_for(&references));
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
+    let program = programs
+        .iter()
+        .find(|program| program.class_path == "Game.Bouncer")
+        .expect("Game.Bouncer");
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+
+    let text = program.output.program.to_uasm().unwrap();
+    assert!(
+        text.contains("EXTERN, \"UnityEngineGameObject.__GetComponent__T\""),
+        "{text}"
+    );
+    let meta = program.output.program.to_meta_json().unwrap();
+    assert!(
+        meta.contains("\"kind\": \"Type\", \"value\": \"UnityEngine.Transform\""),
+        "{meta}"
+    );
+}
+
+#[test]
+fn a_type_constant_carries_its_dotnet_name() {
+    // only the Unity importer can make a real System.Type, so what the
+    // sidecar carries is the name it resolves
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Probe : MenSharp.MenSharpBehaviour
+                    {
+                        public object held;
+                        public void Interact() { held = typeof(string); }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Probe",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let meta = program.output.program.to_meta_json().unwrap();
+    assert!(
+        meta.contains("\"kind\": \"Type\", \"value\": \"System.String\""),
+        "{meta}"
+    );
+}

@@ -1632,7 +1632,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 Meaning::Value(Type::Tuple(elements))
             }
             PrimaryLeft::New(new_expression) => self.check_new(new_expression, expected),
-            PrimaryLeft::Typeof { .. } => Meaning::Value(self.corlib("Type")),
+            PrimaryLeft::Typeof { target_type, .. } => {
+                // resolving it is what records the type, which is what code
+                // generation needs: on Udon a `typeof` is a value built from
+                // the named type, not a compile-time-only fact
+                if let Ok(target_type) = target_type {
+                    self.resolve_type(target_type);
+                }
+                Meaning::Value(self.corlib("Type"))
+            }
             PrimaryLeft::Sizeof { .. } => Meaning::Value(self.corlib("Int32")),
             // nameof's operand may be a method group or type; C# only reads its
             // spelling, so it goes unchecked here
