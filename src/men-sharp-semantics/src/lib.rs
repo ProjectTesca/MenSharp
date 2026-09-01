@@ -44,8 +44,8 @@ pub use collect::{
 pub use conversions::NumericKind;
 pub use error::{SemanticError, SemanticErrorKind};
 pub use external::{
-    ExternalMember, ExternalMemberKind, ExternalTypeInfo, ExternalTypeKind, ExternalTypes,
-    NoExternalTypes,
+    ExternalConstant, ExternalMember, ExternalMemberKind, ExternalTypeInfo, ExternalTypeKind,
+    ExternalTypes, NoExternalTypes,
 };
 pub use lookup::{MemberCandidate, MemberOrigin, TypeSystem};
 pub use merge::{Declarations, merge_declarations};

@@ -59,6 +59,14 @@ pub enum HeapInit {
     Str(String),
     /// The mangled Udon name of a type, for `System.Type` constants.
     TypeOf(String),
+    /// A boxed enum constant (`UnityEngine.KeyCode.Space`). Carries the .NET
+    /// full name and the underlying integral value: only the Unity importer
+    /// can build the real boxed value (`Enum.ToObject`) — an `Int32` in an
+    /// enum-typed slot would throw the moment an extern unboxes it.
+    EnumValue {
+        dotnet_type: String,
+        value: i64,
+    },
     CodeAddress(LabelId),
     /// The assembler's `this` literal. Udon has no `this` pointer and no
     /// extern that hands a program its own object, so self references are
@@ -361,6 +369,11 @@ impl Program {
                 HeapInit::Char(v) => ("Char", (*v as u32).to_string()),
                 HeapInit::Str(v) => ("String", json_string(v)),
                 HeapInit::TypeOf(v) => ("Type", json_string(v)),
+                // `.NET full name # underlying value`; the importer builds
+                // the boxed value with Enum.ToObject
+                HeapInit::EnumValue { dotnet_type, value } => {
+                    ("Enum", json_string(&format!("{dotnet_type}#{value}")))
+                }
                 HeapInit::CodeAddress(label) => {
                     ("UInt32", assembled.label_addresses[label.0].to_string())
                 }
@@ -370,7 +383,10 @@ impl Program {
                 "    {{\"name\": {}, \"kind\": \"{}\", \"value\": {}}}",
                 json_string(&symbol.name),
                 kind,
-                if matches!(symbol.init, HeapInit::Str(_) | HeapInit::TypeOf(_)) {
+                if matches!(
+                    symbol.init,
+                    HeapInit::Str(_) | HeapInit::TypeOf(_) | HeapInit::EnumValue { .. }
+                ) {
                     value
                 } else {
                     format!("\"{value}\"")

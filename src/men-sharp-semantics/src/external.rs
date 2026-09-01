@@ -39,7 +39,8 @@ pub struct ExternalTypeInfo {
 
 /// One member of an external type. Signatures use the defining type's own generic
 /// parameters ([`Type::ExternalTypeParameter`]) — instantiation is the caller's job.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// (`PartialEq` only: a float constant keeps `Eq` off the table.)
+#[derive(Debug, Clone, PartialEq)]
 pub struct ExternalMember {
     /// The metadata name: `.ctor`, `op_Addition` and friends follow the same
     /// conventions as source symbols.
@@ -50,6 +51,23 @@ pub struct ExternalMember {
     /// Carries `ExtensionAttribute`.
     pub is_extension: bool,
     pub signature: MemberSignature,
+    /// The compile-time value of a `const` field or an enum member, when the
+    /// metadata records one.
+    pub constant: Option<ExternalConstant>,
+}
+
+/// A metadata constant, folded to the handful of shapes a heap default can
+/// take. Integral kinds are widened: the declared field type says how to
+/// narrow it back.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExternalConstant {
+    Int(i64),
+    UInt(u64),
+    Single(f32),
+    Double(f64),
+    Boolean(bool),
+    Char(char),
+    String(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -25,9 +25,9 @@ use men_sharp_dotnet::{
     DotNetAssembly, MetadataError, MethodSig, TypeDefinition, TypeSig, TypeToken,
 };
 use men_sharp_semantics::{
-    Accessibility, ExternalMember, ExternalMemberKind, ExternalTypeId, ExternalTypeInfo,
-    ExternalTypeKind, ExternalTypes, FunctionSignature, MemberSignature, ParameterPassing,
-    ParameterSignature, Type, TypeTarget, TypeVariance,
+    Accessibility, ExternalConstant, ExternalMember, ExternalMemberKind, ExternalTypeId,
+    ExternalTypeInfo, ExternalTypeKind, ExternalTypes, FunctionSignature, MemberSignature,
+    ParameterPassing, ParameterSignature, Type, TypeTarget, TypeVariance,
 };
 
 pub struct ReferenceSet<'data> {
@@ -333,6 +333,28 @@ impl<'data> ReferenceSet<'data> {
     }
 }
 
+/// A metadata constant in the semantic layer's vocabulary. Integral kinds
+/// widen losslessly; the field's declared type says how to narrow back.
+fn convert_constant(constant: &men_sharp_dotnet::Constant) -> Option<ExternalConstant> {
+    use men_sharp_dotnet::Constant;
+    Some(match constant {
+        Constant::Boolean(value) => ExternalConstant::Boolean(*value),
+        Constant::Char(value) => ExternalConstant::Char(char::from_u32(*value as u32)?),
+        Constant::SByte(value) => ExternalConstant::Int(*value as i64),
+        Constant::Byte(value) => ExternalConstant::UInt(*value as u64),
+        Constant::Int16(value) => ExternalConstant::Int(*value as i64),
+        Constant::UInt16(value) => ExternalConstant::UInt(*value as u64),
+        Constant::Int32(value) => ExternalConstant::Int(*value as i64),
+        Constant::UInt32(value) => ExternalConstant::UInt(*value as u64),
+        Constant::Int64(value) => ExternalConstant::Int(*value),
+        Constant::UInt64(value) => ExternalConstant::UInt(*value),
+        Constant::Single(value) => ExternalConstant::Single(*value),
+        Constant::Double(value) => ExternalConstant::Double(*value),
+        Constant::String(value) => ExternalConstant::String(value.clone()),
+        Constant::Null => return None,
+    })
+}
+
 fn accessibility_from(access_bits: u16) -> Accessibility {
     match access_bits & 0x7 {
         0x6 => Accessibility::Public,
@@ -427,6 +449,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                     accessibility: accessibility_from(field.flags),
                     is_extension: false,
                     signature: MemberSignature::Field(self.convert(id, &field.field_type)),
+                    constant: field.constant.as_ref().and_then(convert_constant),
                 });
             }
         }
@@ -457,6 +480,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                     &method.signature,
                     &out_flags,
                 )),
+                constant: None,
             });
         }
 
@@ -501,6 +525,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                     .unwrap_or(Accessibility::Private),
                 is_extension: false,
                 signature,
+                constant: None,
             });
         }
 
@@ -524,6 +549,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                         .map(|event_type| self.convert(id, event_type))
                         .unwrap_or(Type::Error),
                 ),
+                constant: None,
             });
         }
 

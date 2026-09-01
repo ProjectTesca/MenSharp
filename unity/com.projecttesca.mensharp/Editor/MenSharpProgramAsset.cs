@@ -128,8 +128,27 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             case "Char": return (char)uint.Parse(entry.value);
             case "String": return entry.value;
             case "Type": return ResolveType(entry.value);
+            case "Enum": return DecodeEnum(entry.value);
             default: return null;
         }
+    }
+
+    /// `Namespace.EnumType#value` → the real boxed enum value. An `Int32` in
+    /// an enum-typed slot would throw the moment an extern unboxes it, so the
+    /// value has to be built here, where the type exists.
+    private static object DecodeEnum(string encoded)
+    {
+        int separator = encoded.LastIndexOf('#');
+        if (separator < 0)
+        {
+            return null;
+        }
+        Type enumType = ResolveType(encoded.Substring(0, separator));
+        if (enumType == null || !long.TryParse(encoded.Substring(separator + 1), out long value))
+        {
+            return null;
+        }
+        return Enum.ToObject(enumType, value);
     }
 
     /// A `System.Type` by .NET full name. Udon passes a generic method's type

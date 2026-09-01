@@ -1,8 +1,8 @@
 //! Statement and expression lowering.
 
 use men_sharp_parser::ast::{
-    ExpressionStatement, IfStatement, LocalVariableDeclaration, NewExpression, PostfixOperator,
-    ReturnStatement, WhileStatement,
+    ExpressionStatement, IfStatement, LocalVariableDeclaration, NewExpression, Pattern,
+    PostfixOperator, ReturnStatement, SwitchLabel, SwitchStatement, WhileStatement,
 };
 
 use super::*;
@@ -33,7 +33,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let continue_label = self.fresh_label("do_continue");
                 let break_label = self.fresh_label("do_break");
                 self.program.code.push(Op::Label(body_label));
-                ctx.loop_stack.push((continue_label, break_label));
+                ctx.loop_stack.push(BreakFrame::Loop {
+                    continue_target: continue_label,
+                    break_target: break_label,
+                });
                 if let Ok(body) = &statement.body {
                     self.lower_statement(ctx, body);
                 }
@@ -75,7 +78,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         .code
                         .push(Op::JumpIfFalse(Target::Label(break_label)));
                 }
-                ctx.loop_stack.push((continue_label, break_label));
+                ctx.loop_stack.push(BreakFrame::Loop {
+                    continue_target: continue_label,
+                    break_target: break_label,
+                });
                 if let Ok(body) = &statement.body {
                     self.lower_statement(ctx, body);
                 }
@@ -89,6 +95,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ctx.locals.pop();
             }
             Statement::Foreach(statement) => self.lower_foreach(ctx, statement),
+            Statement::Switch(statement) => self.lower_switch(ctx, statement),
             Statement::Return(ReturnStatement { value, span, .. }) => {
                 if let Some(value) = value {
                     let lowered = self.lower_expression(ctx, value);
@@ -103,18 +110,31 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.program.code.push(Op::JumpIndirect(ctx.return_slot));
             }
             Statement::Break(statement) => match ctx.loop_stack.last() {
-                Some(&(_, break_label)) => {
-                    self.program.code.push(Op::Jump(Target::Label(break_label)))
+                Some(
+                    BreakFrame::Loop { break_target, .. } | BreakFrame::Switch { break_target },
+                ) => {
+                    let target = *break_target;
+                    self.program.code.push(Op::Jump(Target::Label(target)));
                 }
-                None => self.error(ctx, "`break` outside a loop", statement.span.clone()),
+                None => self.error(
+                    ctx,
+                    "`break` outside a loop or `switch`",
+                    statement.span.clone(),
+                ),
             },
-            Statement::Continue(statement) => match ctx.loop_stack.last() {
-                Some(&(continue_label, _)) => self
-                    .program
-                    .code
-                    .push(Op::Jump(Target::Label(continue_label))),
-                None => self.error(ctx, "`continue` outside a loop", statement.span.clone()),
-            },
+            // `continue` skips over `switch` frames to the enclosing loop
+            Statement::Continue(statement) => {
+                let target = ctx.loop_stack.iter().rev().find_map(|frame| match frame {
+                    BreakFrame::Loop {
+                        continue_target, ..
+                    } => Some(*continue_target),
+                    BreakFrame::Switch { .. } => None,
+                });
+                match target {
+                    Some(target) => self.program.code.push(Op::Jump(Target::Label(target))),
+                    None => self.error(ctx, "`continue` outside a loop", statement.span.clone()),
+                }
+            }
             other => {
                 self.error(
                     ctx,
@@ -195,7 +215,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .code
                 .push(Op::JumpIfFalse(Target::Label(break_label)));
         }
-        ctx.loop_stack.push((head, break_label));
+        ctx.loop_stack.push(BreakFrame::Loop {
+            continue_target: head,
+            break_target: break_label,
+        });
         if let Ok(body) = &statement.body {
             self.lower_statement(ctx, body);
         }
@@ -266,7 +289,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .expect("scope")
             .insert(name.value, (variable, element_type.clone()));
 
-        ctx.loop_stack.push((continue_label, break_label));
+        ctx.loop_stack.push(BreakFrame::Loop {
+            continue_target: continue_label,
+            break_target: break_label,
+        });
         if let Ok(body) = &statement.body {
             self.lower_statement(ctx, body);
         }
@@ -281,6 +307,165 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::Jump(Target::Label(head)));
         self.program.code.push(Op::Label(break_label));
         ctx.locals.pop();
+    }
+
+    /// `switch` over constants: compare the value against every case label in
+    /// order, jump to the matching section, `default` (or the end) otherwise.
+    fn lower_switch(&mut self, ctx: &mut Ctx<'ast>, statement: &'ast SwitchStatement<'ast, 'ast>) {
+        let Ok(value_expression) = &statement.value else {
+            return;
+        };
+        let value_type = self.type_of(ctx, value_expression);
+        let Some(value) = self.lower_expression(ctx, value_expression) else {
+            return;
+        };
+        let Ok(sections) = statement.sections else {
+            return;
+        };
+        let Some(equality) = self.switch_equality(&value_type) else {
+            self.error(
+                ctx,
+                "`switch` over this type is not supported by the Udon backend yet",
+                statement.span.clone(),
+            );
+            return;
+        };
+
+        let end = self.fresh_label("switch_end");
+        let section_labels: Vec<LabelId> = (0..sections.len())
+            .map(|index| self.fresh_label(&format!("switch_section_{index}")))
+            .collect();
+        let mut default_target: Option<LabelId> = None;
+
+        let condition = self.temp("SystemBoolean");
+        for (section, &target) in sections.iter().zip(&section_labels) {
+            for label in section.labels {
+                match label {
+                    SwitchLabel::Default { .. } => default_target = Some(target),
+                    SwitchLabel::Case {
+                        guard: Some(guard), ..
+                    } => {
+                        self.error(
+                            ctx,
+                            "`when` guards on case labels are not supported by the Udon \
+                             backend yet",
+                            guard.span(),
+                        );
+                    }
+                    SwitchLabel::Case {
+                        pattern: Ok(Pattern::Discard(_)),
+                        ..
+                    } => default_target = Some(target),
+                    SwitchLabel::Case {
+                        pattern: Ok(pattern),
+                        span,
+                        ..
+                    } => {
+                        let Some(constant) = self.case_constant(ctx, pattern, span.clone()) else {
+                            continue;
+                        };
+                        let skip = self.fresh_label("case_skip");
+                        self.call_extern(
+                            ctx,
+                            &equality,
+                            &[value, constant, condition],
+                            span.clone(),
+                        );
+                        self.program.code.push(Op::Push(condition));
+                        self.program.code.push(Op::JumpIfFalse(Target::Label(skip)));
+                        self.program.code.push(Op::Jump(Target::Label(target)));
+                        self.program.code.push(Op::Label(skip));
+                    }
+                    SwitchLabel::Case {
+                        pattern: Err(()), ..
+                    } => {}
+                }
+            }
+        }
+        self.program
+            .code
+            .push(Op::Jump(Target::Label(default_target.unwrap_or(end))));
+
+        for (section, &target) in sections.iter().zip(&section_labels) {
+            self.program.code.push(Op::Label(target));
+            ctx.locals.push(HashMap::new());
+            ctx.loop_stack
+                .push(BreakFrame::Switch { break_target: end });
+            for statement in section.statements {
+                self.lower_statement(ctx, statement);
+            }
+            ctx.loop_stack.pop();
+            ctx.locals.pop();
+            // C# forbids falling through, so this jump is what Roslyn already
+            // guaranteed the section ends with
+            self.program.code.push(Op::Jump(Target::Label(end)));
+        }
+        self.program.code.push(Op::Label(end));
+    }
+
+    /// The equality extern a `switch` dispatches through, per value type.
+    fn switch_equality(&mut self, value_type: &Type) -> Option<String> {
+        // a source enum is its underlying Int32
+        if self.source_enum(value_type).is_some() {
+            return Some(
+                "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean".into(),
+            );
+        }
+        // an external enum is a boxed value; Object.Equals is value equality
+        // for same-type enums
+        if self.external_enum(value_type).is_some() {
+            return Some("SystemObject.__Equals__SystemObject_SystemObject__SystemBoolean".into());
+        }
+        let name = self.extern_type_name(value_type)?;
+        let signature = format!("{name}.__op_Equality__{name}_{name}__SystemBoolean");
+        self.nodes.has_signature(&signature).then_some(signature)
+    }
+
+    /// The constant a `case` label compares against.
+    fn case_constant(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        pattern: &'ast Pattern<'ast, 'ast>,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        match pattern {
+            Pattern::Constant(expression) => self.lower_expression(ctx, expression),
+            // `case Color.Red:` parses as a bare name; the checker resolved
+            // what it names and left the member on the type node
+            Pattern::Declaration {
+                pattern_type,
+                designation: None,
+                ..
+            } => match self.bodies.targets.get(&EntityID::from(pattern_type)) {
+                Some(ResolvedTarget::Member(member)) => {
+                    let member = member.clone();
+                    match self.member_constant(&member) {
+                        Some((slot, _)) => Some(slot),
+                        None => {
+                            self.error(ctx, "this case label is not a constant", span);
+                            None
+                        }
+                    }
+                }
+                _ => {
+                    self.error(
+                        ctx,
+                        "this case label could not be resolved to a constant",
+                        span,
+                    );
+                    None
+                }
+            },
+            _ => {
+                self.error(
+                    ctx,
+                    "only constant `case` labels (and `default`) are supported by the Udon \
+                     backend yet",
+                    span,
+                );
+                None
+            }
+        }
     }
 
     fn fresh_label(&mut self, prefix: &str) -> LabelId {
@@ -386,6 +571,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         let out = self.temp(&to_name);
                         self.call_extern(ctx, &signature, &[source, out], span);
                         return out;
+                    }
+                    // `(int)keyCode`: no per-enum Convert extern exists, but
+                    // the boxed value converts fine as an object
+                    if self.external_enum(from).is_some() {
+                        let signature =
+                            format!("SystemConvert.__{method}__SystemObject__{to_name}");
+                        if self.nodes.has_signature(&signature) {
+                            let out = self.temp(&to_name);
+                            self.call_extern(ctx, &signature, &[source, out], span);
+                            return out;
+                        }
                     }
                 }
                 source
@@ -529,10 +725,66 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         } else {
             result_type.clone()
         };
+
+        // an external enum is a boxed value: `==`/`!=` go through
+        // Object.Equals (value equality for same-type enums, where
+        // op_Equality would compare boxes), orderings through the
+        // underlying Int32
+        if self.external_enum(&operand_type).is_some() {
+            match operator {
+                Equal | NotEqual => {
+                    let equal = self.temp("SystemBoolean");
+                    self.call_extern(
+                        ctx,
+                        "SystemObject.__Equals__SystemObject_SystemObject__SystemBoolean",
+                        &[left.0, right.0, equal],
+                        span.clone(),
+                    );
+                    if operator == Equal {
+                        return Some(equal);
+                    }
+                    let out = self.temp("SystemBoolean");
+                    self.call_extern(
+                        ctx,
+                        "SystemBoolean.__op_UnaryNegation__SystemBoolean__SystemBoolean",
+                        &[equal, out],
+                        span,
+                    );
+                    return Some(out);
+                }
+                LessThan | GreaterThan | LessThanEqual | GreaterThanEqual => {
+                    let mut unboxed = [left.0, right.0];
+                    for slot in &mut unboxed {
+                        let int = self.temp("SystemInt32");
+                        self.call_extern(
+                            ctx,
+                            "SystemConvert.__ToInt32__SystemObject__SystemInt32",
+                            &[*slot, int],
+                            span.clone(),
+                        );
+                        *slot = int;
+                    }
+                    let out = self.temp("SystemBoolean");
+                    self.call_extern(
+                        ctx,
+                        &format!("SystemInt32.__{name}__SystemInt32_SystemInt32__SystemBoolean"),
+                        &[unboxed[0], unboxed[1], out],
+                        span,
+                    );
+                    return Some(out);
+                }
+                _ => {}
+            }
+        }
+
         let out = self.temp_for(result_type);
-        let result_name = self
+        let mut result_name = self
             .extern_type_name(result_type)
             .unwrap_or_else(|| "SystemBoolean".into());
+        // a source enum result (`Flags.A | Flags.B`) lives in an Int32 slot
+        if self.source_enum(result_type).is_some() {
+            result_name = "SystemInt32".into();
+        }
 
         // an operator can be declared on a base type — `Rigidbody == null`
         // binds to UnityEngine.Object's — so the whole chain is a candidate,
@@ -548,6 +800,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if matches!(operator, Equal | NotEqual) && self.is_reference_type(&operand_type) {
             candidates.push(format!(
                 "SystemObject.__{name}__SystemObject_SystemObject__SystemBoolean"
+            ));
+        }
+        // a source enum compares (and, for flags, combines) as its
+        // underlying Int32 — its slots hold plain ints
+        if self.source_enum(&operand_type).is_some() {
+            candidates.push(format!(
+                "SystemInt32.__{name}__SystemInt32_SystemInt32__{result_name}"
             ));
         }
         let signature = candidates
@@ -1369,6 +1628,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                                 .filter(|_| !member.is_static);
                             return Piece::Pending { receiver };
                         }
+                        // enum members and external consts are baked values
+                        if let Some((slot, ty)) = self.member_constant(&member) {
+                            return Piece::Value(slot, ty);
+                        }
                         let receiver = ctx
                             .this_slot
                             .zip(ctx.this_type.clone())
@@ -1520,6 +1783,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         let member = member.clone();
                         if matches!(member.kind, SymbolKind::Method) {
                             return group(receiver);
+                        }
+                        // enum members and external consts are baked values
+                        if let Some((slot, ty)) = self.member_constant(&member) {
+                            return Piece::Value(slot, ty);
                         }
                         let place = self.member_place(ctx, &member, receiver, span.clone());
                         match self.read_place(ctx, place, span.clone()) {

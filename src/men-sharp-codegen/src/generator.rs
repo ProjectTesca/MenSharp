@@ -260,8 +260,8 @@ struct Ctx<'ast> {
     locals: Vec<HashMap<&'ast str, (DataId, Type)>>,
     this_slot: Option<DataId>,
     this_type: Option<Type>,
-    /// (continue target, break target) innermost last.
-    loop_stack: Vec<(LabelId, LabelId)>,
+    /// What `break`/`continue` bind to, innermost last.
+    loop_stack: Vec<BreakFrame>,
     result: Option<DataId>,
     return_slot: DataId,
 }
@@ -305,6 +305,18 @@ impl Piece {
             Piece::Void | Piece::Error => None,
         }
     }
+}
+
+/// One enclosing construct `break` can leave. `continue` skips over `Switch`
+/// frames to the nearest loop, as C# does.
+enum BreakFrame {
+    Loop {
+        continue_target: LabelId,
+        break_target: LabelId,
+    },
+    Switch {
+        break_target: LabelId,
+    },
 }
 
 /// An assignable location.
@@ -1223,6 +1235,156 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// needs `typeof(Rigidbody)` sitting in the heap. The constant carries the
     /// .NET name, which is what the Unity importer can resolve back to a real
     /// `System.Type`.
+    /// The declared symbol behind a type, when it is an enum from source.
+    pub(super) fn source_enum(&self, ty: &Type) -> Option<SymbolId> {
+        match ty {
+            Type::Named {
+                target: TypeTarget::Source(symbol),
+                ..
+            } if self.declarations.table.symbol(*symbol).kind == SymbolKind::Enum => Some(*symbol),
+            _ => None,
+        }
+    }
+
+    /// Is this an enum from a referenced assembly (`KeyCode`, `VideoError`)?
+    /// Unlike a source enum — a plain `Int32` slot — its values are *boxed*
+    /// enum objects, because externs unbox them by their real type.
+    pub(super) fn external_enum(&self, ty: &Type) -> Option<men_sharp_semantics::ExternalTypeId> {
+        match ty {
+            Type::Named {
+                target: TypeTarget::External(id),
+                ..
+            } if self.external.type_info(*id).kind
+                == men_sharp_semantics::ExternalTypeKind::Enum =>
+            {
+                Some(*id)
+            }
+            _ => None,
+        }
+    }
+
+    /// A source enum member's underlying value: an explicit integer literal,
+    /// or counting up from the previous member, as C# does.
+    fn enum_member_value(&mut self, member: SymbolId) -> Option<i64> {
+        let parent = self.declarations.table.symbol(member).parent?;
+        let members: Vec<SymbolId> = self.declarations.table.symbol(parent).members.to_vec();
+        let mut value: i64 = 0;
+        for candidate in members {
+            let symbol = self.declarations.table.symbol(candidate);
+            if symbol.kind != SymbolKind::EnumMember {
+                continue;
+            }
+            let initializer = symbol
+                .declarations
+                .first()
+                .and_then(|site| match &site.syntax {
+                    SyntaxRef::EnumMember(node) => node.value.as_ref(),
+                    _ => None,
+                });
+            if let Some(expression) = initializer {
+                match literal_heap_init(expression, "SystemInt32") {
+                    Some(HeapInit::Int32(explicit)) => value = explicit as i64,
+                    _ => {
+                        let (file, span) = self.declaration_site(candidate);
+                        self.errors.push(CodegenError {
+                            message: "an enum member's value must be an integer literal \
+                                      for the Udon backend"
+                                .into(),
+                            file,
+                            span,
+                        });
+                        return None;
+                    }
+                }
+            }
+            if candidate == member {
+                return Some(value);
+            }
+            value += 1;
+        }
+        None
+    }
+
+    /// A member access that is a compile-time constant — a source or external
+    /// enum member, or an external `const` field — as a heap slot. `None`
+    /// when the member is not a constant.
+    pub(super) fn member_constant(&mut self, member: &ResolvedMember) -> Option<(DataId, Type)> {
+        match &member.origin {
+            MemberOrigin::Source(symbol) => {
+                if member.kind != SymbolKind::EnumMember {
+                    return None;
+                }
+                let value = self.enum_member_value(*symbol)?;
+                Some((self.int_constant(value as i32), member.member_type.clone()))
+            }
+            MemberOrigin::External {
+                member: external, ..
+            } => {
+                use men_sharp_semantics::ExternalConstant;
+                let constant = external.constant.clone()?;
+                let ty = member.member_type.clone();
+                // an enum constant must be the real boxed value — an Int32 in
+                // an enum-typed slot throws when an extern unboxes it — and
+                // only the Unity importer can build one (HeapInit::EnumValue)
+                if let Some(id) = self.external_enum(&ty) {
+                    let value = match constant {
+                        ExternalConstant::Int(value) => value,
+                        ExternalConstant::UInt(value) => value as i64,
+                        _ => return None,
+                    };
+                    let dotnet_type = self.external.display_name(id);
+                    let udon_type = self.heap_type(&ty);
+                    let slot = self.constant(
+                        &udon_type,
+                        &format!("{dotnet_type}#{value}"),
+                        HeapInit::EnumValue { dotnet_type, value },
+                    );
+                    return Some((slot, ty));
+                }
+                let slot = match &constant {
+                    ExternalConstant::Int(value) => match self.heap_type(&ty).as_str() {
+                        "SystemInt64" => self.constant(
+                            "SystemInt64",
+                            &value.to_string(),
+                            HeapInit::Int64(*value),
+                        ),
+                        _ => self.int_constant(*value as i32),
+                    },
+                    ExternalConstant::UInt(value) => match self.heap_type(&ty).as_str() {
+                        "SystemUInt32" => self.constant(
+                            "SystemUInt32",
+                            &value.to_string(),
+                            HeapInit::UInt32(*value as u32),
+                        ),
+                        _ => self.int_constant(*value as i32),
+                    },
+                    ExternalConstant::Single(value) => self.constant(
+                        "SystemSingle",
+                        &format!("{value:?}"),
+                        HeapInit::Single(*value),
+                    ),
+                    ExternalConstant::Double(value) => self.constant(
+                        "SystemDouble",
+                        &format!("{value:?}"),
+                        HeapInit::Double(*value),
+                    ),
+                    ExternalConstant::Boolean(value) => self.constant(
+                        "SystemBoolean",
+                        &value.to_string(),
+                        HeapInit::Boolean(*value),
+                    ),
+                    ExternalConstant::Char(value) => self.constant(
+                        "SystemChar",
+                        &(*value as u32).to_string(),
+                        HeapInit::Char(*value),
+                    ),
+                    ExternalConstant::String(value) => self.string_constant(value),
+                };
+                Some((slot, ty))
+            }
+        }
+    }
+
     pub(super) fn type_constant(&mut self, ty: &Type) -> Option<DataId> {
         let Type::Named {
             target: TypeTarget::External(id),

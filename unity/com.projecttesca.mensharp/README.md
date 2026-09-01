@@ -221,13 +221,35 @@ program synchronously calls back into the *same* method that is still
 running. UdonSharp silently corrupts the method's variables in that case;
 MenSharp logs an error naming the method and aborts the event instead.
 
+## Enums and switch
+
+Your own enums, engine enums (`KeyCode`, `VideoError`, ...), engine constants
+(`int.MaxValue`, `Mathf.PI`) and `switch` all work:
+
+```csharp
+public enum DoorState { Closed, Open, Locked = 10 }
+
+switch (state)
+{
+    case DoorState.Open:
+        ...
+        break;
+    case KeyCode.Space:      // engine enums too, in their own switch
+    default:
+        break;
+}
+```
+
+`switch` takes constant case labels and `default`; pattern matching (`case > 0`,
+`case string s`, `when` guards) is a compile error for now.
+
 ## Not supported yet
 
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- exceptions, user-defined structs, and `switch` over enum values (enums
-  otherwise work);
+- exceptions and user-defined structs;
+- pattern matching in `switch` beyond constant labels;
 - `ref`/`out` parameters on methods you define yourself (passing `ref`/`out`
   *to engine methods* like `Physics.Raycast` works).
 

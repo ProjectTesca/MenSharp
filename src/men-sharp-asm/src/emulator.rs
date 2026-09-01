@@ -175,6 +175,9 @@ impl Emulator {
                 HeapInit::Char(v) => Value::Char(*v),
                 HeapInit::Str(v) => Value::Str(Rc::from(v.as_str())),
                 HeapInit::TypeOf(v) => Value::Type(Rc::from(v.as_str())),
+                // enums run as their underlying integral value here; only
+                // Unity can build the real boxed value
+                HeapInit::EnumValue { value, .. } => Value::Int32(*value as i32),
                 HeapInit::CodeAddress(label) => Value::UInt32(assembled.label_addresses[label.0]),
                 HeapInit::SelfReference => {
                     Value::SelfComponent(Rc::from(symbol.udon_type.as_str()))

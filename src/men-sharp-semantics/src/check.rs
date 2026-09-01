@@ -1094,6 +1094,64 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
+    /// A pattern written as a bare dotted name (`Color.Red`), resolved as a
+    /// member: records it on the type node and answers true. Quiet — a name
+    /// that does not resolve that way leaves no trace, and the caller falls
+    /// back to reading it as a type.
+    fn bind_pattern_constant(
+        &mut self,
+        pattern_type: &'ast men_sharp_parser::ast::TypeRef<'ast, 'ast>,
+    ) -> bool {
+        use men_sharp_parser::ast::TypeRefBase;
+        if !pattern_type.suffixes.is_empty() {
+            return false;
+        }
+        let TypeRefBase::Name(name) = &pattern_type.base else {
+            return false;
+        };
+        if name.global.is_some()
+            || name.segments.len() < 2
+            || name
+                .segments
+                .iter()
+                .any(|segment| segment.generics.is_some())
+        {
+            return false;
+        }
+
+        let node = EntityID::from(pattern_type);
+        let before = self.resolver.out.errors.len();
+        let mut segments = name.segments.iter();
+        let first = segments.next().expect("at least two segments");
+        let mut meaning = match self.lookup_name(first.name.value, 0, &first.span) {
+            Some(Resolution::Type { target, arguments }) => {
+                Meaning::TypeName(Type::Named { target, arguments })
+            }
+            Some(resolution @ Resolution::Namespace { .. }) => Meaning::Namespace(resolution),
+            Some(Resolution::TypeParameter(symbol)) => {
+                Meaning::TypeName(Type::TypeParameter(symbol))
+            }
+            _ => return false,
+        };
+        let last = name.segments.len() - 1;
+        for (index, segment) in segments.enumerate() {
+            let record = (index + 1 == last).then_some(node);
+            meaning = self.access_member(
+                meaning,
+                segment.name.value,
+                Vec::new(),
+                &segment.span,
+                record,
+            );
+        }
+        let bound = matches!(meaning, Meaning::Value(_)) && self.targets.contains_key(&node);
+        if !bound {
+            self.resolver.out.errors.truncate(before);
+            self.targets.remove(&node);
+        }
+        bound
+    }
+
     fn check_pattern(&mut self, pattern: &'ast Pattern<'ast, 'ast>, matched: &Type) {
         match pattern {
             Pattern::Discard(_) => {}
@@ -1102,6 +1160,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 designation,
                 ..
             } => {
+                // `case Color.Red:` parses as this pattern — a bare dotted
+                // name could equally be a type, and only binding tells (C#'s
+                // own rule). When it lands on a member, this is a constant
+                // pattern; the member is recorded on the type node for the
+                // code generator.
+                if designation.is_none() && self.bind_pattern_constant(pattern_type) {
+                    return;
+                }
                 let ty = self.resolve_type(pattern_type);
                 if let Some(name) = designation {
                     self.declare_local(name.value, ty);

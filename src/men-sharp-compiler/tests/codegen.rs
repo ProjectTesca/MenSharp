@@ -2296,3 +2296,247 @@ fn a_function_that_calls_out_gets_a_reentry_guard() {
         emulator.log
     );
 }
+
+#[test]
+fn enums_work_as_values() {
+    // a source enum is its underlying Int32: members are baked constants,
+    // comparisons are Int32 externs, casts to and from int are no-ops
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public enum DoorState { Closed, Open, Locked = 10 }
+
+            public class Program
+            {
+                public static int result;
+                public static DoorState state;
+
+                public static void Main()
+                {
+                    state = DoorState.Open;
+                    if (state == DoorState.Open) { result = 1; }
+                    int raw = (int)state;
+                    DoorState back = (DoorState)raw;
+                    if (back != DoorState.Closed) { result = result + 2; }
+                    result = result + (int)DoorState.Locked;
+                    if (DoorState.Closed < DoorState.Open) { result = result + 100; }
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 113);
+    assert_eq!(int_of(&emulator, "state"), 1);
+}
+
+#[test]
+fn switch_over_enum_and_int() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public enum DoorState { Closed, Open, Locked = 10 }
+
+            public class Program
+            {
+                public static int byEnum;
+                public static int byDefault;
+                public static int byInt;
+
+                public static void Main()
+                {
+                    DoorState state = DoorState.Open;
+                    switch (state)
+                    {
+                        case DoorState.Closed:
+                            byEnum = 100;
+                            break;
+                        case DoorState.Open:
+                            byEnum = 200;
+                            break;
+                        default:
+                            byEnum = 300;
+                            break;
+                    }
+                    switch (DoorState.Locked)
+                    {
+                        case DoorState.Closed:
+                        case DoorState.Open:
+                            byDefault = 1;
+                            break;
+                        default:
+                            byDefault = 2;
+                            break;
+                    }
+                    switch (7)
+                    {
+                        case 3:
+                            byInt = 30;
+                            break;
+                        case 7:
+                            byInt = 70;
+                            break;
+                    }
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "byEnum"), 200);
+    assert_eq!(int_of(&emulator, "byDefault"), 2);
+    assert_eq!(int_of(&emulator, "byInt"), 70);
+}
+
+#[test]
+fn break_leaves_the_switch_and_continue_still_reaches_the_loop() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int total;
+
+                public static void Main()
+                {
+                    for (int i = 0; i < 5; i++)
+                    {
+                        switch (i)
+                        {
+                            case 2:
+                                total = total + 10;
+                                break;
+                            case 3:
+                                continue;
+                            default:
+                                total = total + 1;
+                                break;
+                        }
+                        total = total + 100;
+                    }
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    // i=0,1,4: +1+100 each; i=2: +10+100; i=3: continue skips the +100
+    assert_eq!(int_of(&emulator, "total"), 413);
+}
+
+#[test]
+fn external_const_fields_are_baked_values() {
+    // `int.MaxValue` has no extern — it is a metadata constant, and now a
+    // baked heap value
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int result;
+                public static void Main() { result = int.MaxValue; }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), i32::MAX);
+}
+
+#[test]
+fn external_enums_are_boxed_constants() {
+    // `KeyCode.Space` has no extern either: its value comes from metadata,
+    // and the heap slot must hold the real boxed enum (an Int32 would throw
+    // when an extern unboxes it), so the sidecar carries type and value
+    let (Some(dotnet), Some(unity)) = (dotnet_shared_dir(), unity_managed_dir()) else {
+        eprintln!("skipped: needs both a .NET runtime and a Unity install");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dotnet.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Keys : MenSharpBehaviour
+            {
+                public KeyCode held;
+                public int seen;
+
+                public void Interact()
+                {
+                    held = KeyCode.Space;
+                    if (held == KeyCode.Space) { seen = 1; }
+                    switch (held)
+                    {
+                        case KeyCode.A:
+                            seen = 10;
+                            break;
+                        case KeyCode.Space:
+                            seen = seen + 20;
+                            break;
+                    }
+                    if (held != KeyCode.A) { seen = seen + 100; }
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources_for(&references));
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
+    let program = programs
+        .iter()
+        .find(|program| program.class_path == "Game.Keys")
+        .expect("Game.Keys");
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let meta = program.output.program.to_meta_json().unwrap();
+    // KeyCode.Space == 32
+    assert!(
+        meta.contains("\"kind\": \"Enum\", \"value\": \"UnityEngine.KeyCode#32\""),
+        "{meta}"
+    );
+
+    let assembled = program.output.program.assemble().unwrap();
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    emulator
+        .run(&assembled, "_interact")
+        .unwrap_or_else(|error| {
+            panic!(
+                "emulator error: {error:?}\n{}",
+                program.output.program.dump()
+            )
+        });
+    assert_eq!(int_of(&emulator, "seen"), 121);
+}
