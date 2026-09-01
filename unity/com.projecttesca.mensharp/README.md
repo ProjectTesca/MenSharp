@@ -197,15 +197,37 @@ the variables, and both run. The inspector says so when it happens.
 - **MenSharp > Report Scene Wiring** prints every GameObject with a MenSharp
   component or program on it, and which is paired to which.
 
+## Recursion
+
+Just write it — no `[RecursiveMethod]`, no configuration (the UdonSharp
+attribute is accepted and ignored):
+
+```csharp
+private int Fib(int n)
+{
+    if (n < 2) { return n; }
+    return Fib(n - 1) + Fib(n - 2);
+}
+```
+
+The compiler finds every call that could re-enter a function — direct,
+mutual, or through virtual dispatch — and saves that function's variables
+around exactly those calls. Code that never recurses compiles exactly as
+before, so there is no cost for not using it.
+
+One loop no compiler can see from inside a single program: your event calls
+another program (`SendCustomEvent`, or writing its variables) and that
+program synchronously calls back into the *same* method that is still
+running. UdonSharp silently corrupts the method's variables in that case;
+MenSharp logs an error naming the method and aborts the event instead.
+
 ## Not supported yet
 
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- `[SerializeField]`, `[FieldChangeCallback]`, `[RecursiveMethod]` (purely
-  cosmetic attributes like `[Header]` are ignored without complaint);
-- recursion, exceptions, user-defined structs, and `switch` over enum values
-  (enums otherwise work);
+- exceptions, user-defined structs, and `switch` over enum values (enums
+  otherwise work);
 - `ref`/`out` parameters on methods you define yourself (passing `ref`/`out`
   *to engine methods* like `Physics.Raycast` works).
 

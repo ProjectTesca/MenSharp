@@ -137,6 +137,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         });
         let label = self.program.add_label(name.clone());
 
+        let mut frame = parameters.clone();
+        frame.push(return_slot);
         self.functions.insert(
             key.clone(),
             Function {
@@ -145,6 +147,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 result,
                 return_slot,
                 name,
+                frame,
             },
         );
         self.queue.push_back(key.clone());
@@ -153,6 +156,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     // ------------------------------------------------------------ compiling
 
     pub(super) fn compile_function(&mut self, key: &FunctionKey) {
+        self.current_frame = Some(key.clone());
+        self.compile_function_body(key);
+        self.current_frame = None;
+    }
+
+    fn compile_function_body(&mut self, key: &FunctionKey) {
         let function = &self.functions[key];
         let label = function.label;
         let result = function.result;
@@ -486,6 +495,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         }
 
+        // placeholder around the whole call: if this edge turns out to be part
+        // of a cycle, the callee's frame is saved here and restored after —
+        // decided once the call graph is complete (resolve_frame_markers)
+        let marker = self.frame_markers.len() as u32;
+        self.frame_markers.push((ctx.key.clone(), key.clone()));
+        self.program.code.push(Op::SaveFrame(marker));
+
         let mut sources: Vec<DataId> = Vec::with_capacity(expected);
         sources.extend(this);
         sources.extend_from_slice(arguments);
@@ -505,6 +521,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.copy(constant, return_slot);
         self.program.code.push(Op::Jump(Target::Label(label)));
         self.program.code.push(Op::Label(continuation));
+        self.program.code.push(Op::RestoreFrame(marker));
 
         result.map(|result| {
             let symbol = &self.program.data[result.0];
@@ -750,8 +767,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let result = function.result;
 
             self.program.code.push(Op::Label(label));
+            // the dispatcher's own temps belong to its frame, like any body's
+            self.current_frame = Some(key.clone());
 
-            let ctx = Ctx {
+            let mut ctx = Ctx {
                 key: key.clone(),
                 file: FileId(0),
                 locals: vec![HashMap::new()],
@@ -791,13 +810,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let Some(implementation) = self.override_for(&ty, &name, &key) else {
                     continue;
                 };
-                self.ensure_function(&implementation);
-                let target = &self.functions[&implementation];
-                let target_label = target.label;
-                let target_parameters = target.parameters.clone();
-                let target_return = target.return_slot;
-                let target_result = target.result;
-
                 let id_constant = self.int_constant(id);
                 let skip = self
                     .program
@@ -812,50 +824,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.program.code.push(Op::Push(condition));
                 self.program.code.push(Op::JumpIfFalse(Target::Label(skip)));
 
-                // tail call: forward frame + return address, jump
-                for (from, to) in parameters.iter().zip(&target_parameters) {
-                    self.copy(*from, *to);
+                // an ordinary call rather than a tail jump: this records the
+                // dispatcher → override edge and carries the frame-save
+                // markers, so recursion through virtual dispatch is seen like
+                // any other cycle instead of silently corrupting frames
+                let arguments: Vec<DataId> = parameters[1..].to_vec();
+                let value = self.call_function(
+                    &mut ctx,
+                    &implementation,
+                    Some(this_slot),
+                    &arguments,
+                    0..0,
+                );
+                if let (Some(mine), Some(value)) = (result, value) {
+                    self.copy(value, mine);
                 }
-                self.copy(return_slot, target_return);
-                // the override writes its own result slot; forward it back on
-                // return is impossible after a tail jump, so results share:
-                // the caller reads the dispatcher's result — copy on the
-                // *callee* side is not emitted, so instead jump to a thunk
-                // that copies and returns. Simpler: no tail call when there
-                // is a result — emit call-and-copy here.
-                match (result, target_result) {
-                    (Some(mine), Some(theirs)) => {
-                        // real call: come back here, copy, return
-                        let back = self
-                            .program
-                            .add_label(format!("dispatch_back_{}", self.temp_counter));
-                        self.temp_counter += 1;
-                        let constant = self.program.add_data(DataSymbol {
-                            name: format!("__dispatch_ret_{}", self.temp_counter),
-                            udon_type: "SystemUInt32".into(),
-                            init: HeapInit::CodeAddress(back),
-                            export: false,
-                            sync: None,
-                        });
-                        self.copy(constant, target_return);
-                        self.program
-                            .code
-                            .push(Op::Jump(Target::Label(target_label)));
-                        self.program.code.push(Op::Label(back));
-                        self.copy(theirs, mine);
-                        self.program.code.push(Op::JumpIndirect(return_slot));
-                    }
-                    _ => {
-                        self.program
-                            .code
-                            .push(Op::Jump(Target::Label(target_label)));
-                    }
-                }
+                self.program.code.push(Op::JumpIndirect(return_slot));
                 self.program.code.push(Op::Label(skip));
             }
 
             // no type matched: return default
             self.program.code.push(Op::JumpIndirect(return_slot));
+            self.current_frame = None;
         }
     }
 

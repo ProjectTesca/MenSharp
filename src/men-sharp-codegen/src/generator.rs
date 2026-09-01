@@ -102,6 +102,9 @@ pub fn generate(
         entry_chain: Vec::new(),
         marker: behaviour_marker(declarations),
         entry_file: None,
+        current_frame: None,
+        frame_markers: Vec::new(),
+        external_callers: HashSet::new(),
     };
     generator.run(entry_path);
     CodegenOutput {
@@ -148,6 +151,13 @@ struct Function {
     result: Option<DataId>,
     return_slot: DataId,
     name: String,
+    /// Every mutable slot this function's one static frame consists of:
+    /// parameters, the return address, and each temporary its body allocates.
+    /// What a re-entrant call has to save to leave the outer activation
+    /// intact. The result slot is deliberately absent — its value only
+    /// matters between the callee writing it and the caller's immediate
+    /// copy-out, and no call happens in that window.
+    frame: Vec<DataId>,
 }
 
 /// Layout of one instantiated class: `object[]` size and field slot indices.
@@ -228,6 +238,19 @@ struct Generator<'a, 'ast> {
     marker: Option<SymbolId>,
     /// The file the entry class was declared in, once `run` has found it.
     entry_file: Option<FileId>,
+    /// The function whose body is being compiled right now; every temp
+    /// allocated while set joins that function's frame.
+    current_frame: Option<FunctionKey>,
+    /// (caller, callee) per source-level call site, indexed by the id inside
+    /// `Op::SaveFrame`/`Op::RestoreFrame`. Emitted for every call, expanded
+    /// into real save/restore code — or nothing — once the graph is complete.
+    frame_markers: Vec<(FunctionKey, FunctionKey)>,
+    /// Functions that call into another program (`SendCustomEvent`,
+    /// `SetProgramVariable`): while such a call is in flight, everything on
+    /// the current call chain can be re-entered from outside, which no static
+    /// analysis of *this* program can see — those ancestors get a runtime
+    /// re-entry guard instead.
+    external_callers: HashSet<FunctionKey>,
 }
 
 /// Per-function compilation state.
@@ -373,9 +396,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.collect_statics(entry, true);
         if self.entry_class.is_some() {
             self.collect_entry_instance_fields(entry);
-            for class in self.entry_chain.clone() {
-                self.check_unsupported_attributes(class);
-            }
             // most derived first: a leaf may override the mode its base set
             for class in self.entry_chain.clone() {
                 if let Some(mode) = self.behaviour_sync_mode(class) {
@@ -627,8 +647,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         // the shared static initializer body
         self.emit_static_initializer(init_label, init_return, initialized);
+        // a static initializer's expression may call functions scheduled here
+        while let Some(key) = self.queue.pop_front() {
+            self.compile_function(&key);
+        }
 
-        self.check_for_recursion();
+        self.resolve_frame_markers(init_label);
     }
 
     /// Opens one exported entry point: label, `.export`, and the check that
@@ -904,58 +928,224 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    fn check_for_recursion(&mut self) {
-        // DFS over the recorded call edges; any back edge is a cycle we
-        // cannot run on static frames.
-        #[derive(Clone, Copy, PartialEq)]
-        enum Mark {
-            Visiting,
-            Done,
-        }
-        let mut marks: HashMap<&FunctionKey, Mark> = HashMap::new();
-        let mut reported = HashSet::new();
-
-        fn visit<'k>(
-            node: &'k FunctionKey,
-            edges: &'k HashMap<FunctionKey, HashSet<FunctionKey>>,
-            marks: &mut HashMap<&'k FunctionKey, Mark>,
-            cycles: &mut Vec<&'k FunctionKey>,
-        ) {
-            match marks.get(node) {
-                Some(Mark::Done) => return,
-                Some(Mark::Visiting) => {
-                    cycles.push(node);
-                    return;
-                }
-                None => {}
-            }
-            marks.insert(node, Mark::Visiting);
-            if let Some(next) = edges.get(node) {
-                for callee in next {
-                    visit(callee, edges, marks, cycles);
+    /// Which functions each function can (transitively) call.
+    fn call_closure(&self) -> HashMap<FunctionKey, HashSet<FunctionKey>> {
+        let mut closure = HashMap::new();
+        for start in self.call_edges.keys() {
+            let mut seen: HashSet<FunctionKey> = HashSet::new();
+            let mut stack: Vec<&FunctionKey> = self.call_edges[start].iter().collect();
+            while let Some(next) = stack.pop() {
+                if seen.insert(next.clone())
+                    && let Some(more) = self.call_edges.get(next)
+                {
+                    stack.extend(more.iter());
                 }
             }
-            marks.insert(node, Mark::Done);
+            closure.insert(start.clone(), seen);
+        }
+        closure
+    }
+
+    /// Runs after every body is emitted, when the call graph is complete.
+    /// Turns the `SaveFrame`/`RestoreFrame` placeholders into what each call
+    /// site actually needs:
+    ///
+    /// - An edge the call could come back through (the callee reaches the
+    ///   caller) saves the callee's whole static frame to a heap stack before
+    ///   the call and restores it after — so recursion, direct or mutual or
+    ///   through virtual dispatch, just works, with no cost on any other call.
+    /// - Everything else: the placeholder disappears.
+    ///
+    /// It also weaves a re-entry guard into every function that can be live
+    /// while control is outside this program (an ancestor of a
+    /// `SendCustomEvent`/`SetProgramVariable` call): another program calling
+    /// back into an active function would corrupt its frame silently — no
+    /// analysis of *this* program can see that cycle, so it is caught at
+    /// runtime with an error instead.
+    fn resolve_frame_markers(&mut self, init_label: LabelId) {
+        let closure = self.call_closure();
+
+        let expand: Vec<bool> = self
+            .frame_markers
+            .iter()
+            .map(|(caller, callee)| {
+                callee == caller
+                    || closure
+                        .get(callee)
+                        .is_some_and(|reachable| reachable.contains(caller))
+            })
+            .collect();
+        let any_recursion = expand.iter().any(|&needed| needed);
+
+        let guarded: Vec<FunctionKey> = self
+            .functions
+            .keys()
+            .filter(|function| {
+                self.external_callers.contains(*function)
+                    || closure.get(*function).is_some_and(|reachable| {
+                        reachable
+                            .iter()
+                            .any(|callee| self.external_callers.contains(callee))
+                    })
+            })
+            .cloned()
+            .collect();
+
+        if !any_recursion && guarded.is_empty() {
+            self.program
+                .code
+                .retain(|op| !matches!(op, Op::SaveFrame(_) | Op::RestoreFrame(_)));
+            return;
         }
 
-        let mut cycles = Vec::new();
-        for node in self.call_edges.keys() {
-            visit(node, &self.call_edges, &mut marks, &mut cycles);
+        // one guard per function: the `am I already running?` flag and the
+        // message logged when the answer is yes
+        let mut guards: HashMap<FunctionKey, (DataId, DataId)> = HashMap::new();
+        let mut label_guards: HashMap<LabelId, FunctionKey> = HashMap::new();
+        let mut return_guards: HashMap<DataId, FunctionKey> = HashMap::new();
+        for key in guarded {
+            let function = &self.functions[&key];
+            let (label, return_slot, name) =
+                (function.label, function.return_slot, function.name.clone());
+            let flag = self.program.add_data(DataSymbol {
+                name: format!("__active_{name}"),
+                udon_type: "SystemBoolean".into(),
+                init: HeapInit::Boolean(false),
+                export: false,
+                sync: None,
+            });
+            let path = self.display_path(key.symbol);
+            let message = self.string_constant(&format!(
+                "MenSharp: `{path}` was re-entered while it was still running — a \
+                 SendCustomEvent/SetProgramVariable call it made came back into it through \
+                 another program. The event was aborted to avoid corrupting its variables; \
+                 restructure the calls so they do not loop back."
+            ));
+            // saved and restored with the rest of the frame, so a legitimate
+            // recursive activation starts `not running` and the outer one
+            // gets its state back
+            self.functions
+                .get_mut(&key)
+                .expect("guarded function exists")
+                .frame
+                .push(flag);
+            guards.insert(key.clone(), (flag, message));
+            label_guards.insert(label, key.clone());
+            return_guards.insert(return_slot, key);
         }
-        for node in cycles {
-            if reported.insert(node.clone()) {
-                let name = self.display_path(node.symbol);
-                let (file, span) = self.declaration_site(node.symbol);
-                self.errors.push(CodegenError {
-                    message: format!(
-                        "`{name}` calls itself, directly or through the methods it calls; \
-                         recursion is not supported by the Udon backend yet"
-                    ),
-                    file,
-                    span,
-                });
+
+        let frame_of: HashMap<FunctionKey, Vec<DataId>> = self
+            .frame_markers
+            .iter()
+            .zip(&expand)
+            .filter(|(_, needed)| **needed)
+            .map(|((_, callee), _)| (callee.clone(), self.functions[callee].frame.clone()))
+            .collect();
+
+        const SET: &str = "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid";
+        const GET: &str = "SystemObjectArray.__Get__SystemInt32__SystemObject";
+        const ADD: &str = "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32";
+        const SUB: &str = "SystemInt32.__op_Subtraction__SystemInt32_SystemInt32__SystemInt32";
+        const CTOR: &str = "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray";
+        const LOG_ERROR: &str = "UnityEngineDebug.__LogError__SystemObject__SystemVoid";
+
+        let stack = self.program.add_data(DataSymbol {
+            name: "__recursion_stack".into(),
+            udon_type: "SystemObjectArray".into(),
+            init: HeapInit::Null,
+            export: false,
+            sync: None,
+        });
+        let top = self.program.add_data(DataSymbol {
+            name: "__recursion_top".into(),
+            udon_type: "SystemInt32".into(),
+            init: HeapInit::Int32(0),
+            export: false,
+            sync: None,
+        });
+        let one = self.int_constant(1);
+        let size = self.int_constant(4096);
+        let true_constant = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
+        let false_constant = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
+
+        let code = std::mem::take(&mut self.program.code);
+        let mut out: Vec<Op> = Vec::with_capacity(code.len());
+        for op in code {
+            match op {
+                Op::SaveFrame(id) => {
+                    if !expand[id as usize] {
+                        continue;
+                    }
+                    let (_, callee) = &self.frame_markers[id as usize];
+                    for &slot in &frame_of[callee] {
+                        // stack[top] = slot; top += 1
+                        out.push(Op::Push(stack));
+                        out.push(Op::Push(top));
+                        out.push(Op::Push(slot));
+                        out.push(Op::Extern(SET.into()));
+                        out.push(Op::Push(top));
+                        out.push(Op::Push(one));
+                        out.push(Op::Push(top));
+                        out.push(Op::Extern(ADD.into()));
+                    }
+                    if let Some((flag, _)) = guards.get(callee) {
+                        out.push(Op::Push(false_constant));
+                        out.push(Op::Push(*flag));
+                        out.push(Op::Copy);
+                    }
+                }
+                Op::RestoreFrame(id) => {
+                    if !expand[id as usize] {
+                        continue;
+                    }
+                    let (_, callee) = &self.frame_markers[id as usize];
+                    for &slot in frame_of[callee].iter().rev() {
+                        // top -= 1; slot = stack[top]
+                        out.push(Op::Push(top));
+                        out.push(Op::Push(one));
+                        out.push(Op::Push(top));
+                        out.push(Op::Extern(SUB.into()));
+                        out.push(Op::Push(stack));
+                        out.push(Op::Push(top));
+                        out.push(Op::Push(slot));
+                        out.push(Op::Extern(GET.into()));
+                    }
+                }
+                Op::Label(label) => {
+                    out.push(Op::Label(label));
+                    if label == init_label && any_recursion {
+                        // the stack itself, made once with the statics
+                        out.push(Op::Push(size));
+                        out.push(Op::Push(stack));
+                        out.push(Op::Extern(CTOR.into()));
+                    }
+                    if let Some(key) = label_guards.get(&label) {
+                        let (flag, message) = guards[key];
+                        let ok = self
+                            .program
+                            .add_label(format!("not_reentered_{}", self.functions[key].name));
+                        out.push(Op::Push(flag));
+                        out.push(Op::JumpIfFalse(Target::Label(ok)));
+                        out.push(Op::Push(message));
+                        out.push(Op::Extern(LOG_ERROR.into()));
+                        out.push(Op::Jump(Target::Address(HALT_ADDRESS)));
+                        out.push(Op::Label(ok));
+                        out.push(Op::Push(true_constant));
+                        out.push(Op::Push(flag));
+                        out.push(Op::Copy);
+                    }
+                }
+                Op::JumpIndirect(slot) if return_guards.contains_key(&slot) => {
+                    let (flag, _) = guards[&return_guards[&slot]];
+                    out.push(Op::Push(false_constant));
+                    out.push(Op::Push(flag));
+                    out.push(Op::Copy);
+                    out.push(Op::JumpIndirect(slot));
+                }
+                other => out.push(other),
             }
         }
+        self.program.code = out;
     }
 
     // ----------------------------------------------------------- utilities
@@ -1128,13 +1318,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     fn temp(&mut self, udon_type: &str) -> DataId {
         self.temp_counter += 1;
         let name = format!("__t{}", self.temp_counter);
-        self.program.add_data(DataSymbol {
+        let slot = self.program.add_data(DataSymbol {
             name,
             udon_type: udon_type.to_string(),
             init: HeapInit::Null,
             export: false,
             sync: None,
-        })
+        });
+        // a temp allocated while a body compiles is part of that function's
+        // static frame — what a re-entrant call has to save
+        if let Some(key) = &self.current_frame
+            && let Some(function) = self.functions.get_mut(key)
+        {
+            function.frame.push(slot);
+        }
+        slot
     }
 
     fn temp_for(&mut self, ty: &Type) -> DataId {
@@ -1155,6 +1353,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         arguments: &[DataId],
         span: Range<usize>,
     ) {
+        // a call into another program can synchronously come back into this
+        // one — remember who makes them, so their ancestors get re-entry
+        // guards (see resolve_frame_markers)
+        if signature.contains("SendCustomEvent") || signature.contains("SetProgramVariable") {
+            self.external_callers.insert(ctx.key.clone());
+        }
         match self.nodes.extern_node(signature) {
             None => {
                 self.error(ctx, format!("`{signature}` is not exposed by Udon"), span);
@@ -1761,54 +1965,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    /// The attributes a behaviour's members carry that this backend does not
-    /// implement *and* that change what the program does. Ignoring them would
-    /// produce a program that runs but does the wrong thing — an unsynced
-    /// variable looks exactly like a synced one until two people are in the
-    /// world.
-    fn check_unsupported_attributes(&mut self, class: SymbolId) {
-        let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
-        for member in members {
-            let sites: Vec<&men_sharp_semantics::DeclarationSite> = self
-                .declarations
-                .table
-                .symbol(member)
-                .declarations
-                .iter()
-                .collect();
-            for site in sites {
-                let sections = match &site.syntax {
-                    SyntaxRef::Field { field, .. } => field.attributes,
-                    SyntaxRef::Property(property) => property.attributes,
-                    SyntaxRef::Method(method) => method.attributes,
-                    _ => continue,
-                };
-                for section in sections {
-                    for attribute in section.attributes {
-                        let TypeRefBase::Name(name) = &attribute.name.base else {
-                            continue;
-                        };
-                        let Some(last) = name.segments.last() else {
-                            continue;
-                        };
-                        let spelling = last.name.value;
-                        let Some(explanation) = unimplemented_attribute(spelling) else {
-                            continue;
-                        };
-                        self.errors.push(CodegenError {
-                            message: format!(
-                                "`[{spelling}]` is not supported by the Udon backend yet: \
-                                 {explanation}"
-                            ),
-                            file: site.file,
-                            span: attribute.span.clone(),
-                        });
-                    }
-                }
-            }
-        }
-    }
-
     /// The heap slot for a member declared directly on `MenSharpBehaviour`
     /// (`gameObject`, `transform`), or `None` for anything else.
     ///
@@ -2032,20 +2188,6 @@ const BEHAVIOUR_HEAP_TYPE: &str = "VRCUdonUdonBehaviour";
 /// declared on the interface rather than on UdonBehaviour. Storing one and
 /// naming the other is what UdonSharp does too, for the same reason.
 const BEHAVIOUR_EXTERN_TYPE: &str = "VRCUdonCommonInterfacesIUdonEventReceiver";
-
-/// Attributes that silently change a program's meaning and that this backend
-/// does not implement. Cosmetic ones (`Header`, `Tooltip`, `Space`, ...) are
-/// deliberately absent: ignoring those costs nothing but a label.
-fn unimplemented_attribute(name: &str) -> Option<&'static str> {
-    let name = name.strip_suffix("Attribute").unwrap_or(name);
-    match name {
-        "RecursiveMethod" => Some(
-            "calls use static frames, so recursion is rejected outright rather than \
-             given a stack",
-        ),
-        _ => None,
-    }
-}
 
 /// Is this class a `MenSharp.MenSharpBehaviour` subclass?
 fn is_behaviour_class(

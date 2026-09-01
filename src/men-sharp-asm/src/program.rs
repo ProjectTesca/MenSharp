@@ -113,12 +113,19 @@ pub enum Op {
     /// Calls a whitelisted host function. Pops one address per parameter
     /// (pushed in declaration order, out-parameter last).
     Extern(String),
+    /// Codegen-internal placeholder: emitted around a call while the call
+    /// graph is still being discovered, replaced by real frame-save code (or
+    /// nothing) once it is complete. Must not survive to assembly; the id
+    /// indexes the code generator's own marker table.
+    SaveFrame(u32),
+    /// The matching restore placeholder; see [`Op::SaveFrame`].
+    RestoreFrame(u32),
 }
 
 impl Op {
     pub fn byte_size(&self) -> u32 {
         match self {
-            Op::Label(_) | Op::Comment(_) => 0,
+            Op::Label(_) | Op::Comment(_) | Op::SaveFrame(_) | Op::RestoreFrame(_) => 0,
             Op::Nop | Op::Pop | Op::Copy => 4,
             Op::Push(_)
             | Op::Jump(_)
@@ -196,6 +203,9 @@ impl Program {
             let size = op.byte_size();
             let resolved = match op {
                 Op::Label(_) | Op::Comment(_) => None,
+                Op::SaveFrame(_) | Op::RestoreFrame(_) => {
+                    return Err(AssembleError::UnresolvedFrameMarker);
+                }
                 Op::Nop => Some(Resolved::Nop),
                 Op::Pop => Some(Resolved::Pop),
                 Op::Copy => Some(Resolved::Copy),
@@ -280,7 +290,7 @@ impl Program {
                         pending_labels.push(name);
                     }
                 }
-                Op::Comment(_) => {}
+                Op::Comment(_) | Op::SaveFrame(_) | Op::RestoreFrame(_) => {}
                 _ => {
                     for label in pending_labels.drain(..) {
                         let _ = writeln!(out, "    {label}:");
@@ -301,7 +311,9 @@ impl Program {
                             format!("JUMP_INDIRECT, {}", self.data[data.0].name)
                         }
                         Op::Extern(signature) => format!("EXTERN, \"{signature}\""),
-                        Op::Label(_) | Op::Comment(_) => unreachable!(),
+                        Op::Label(_) | Op::Comment(_) | Op::SaveFrame(_) | Op::RestoreFrame(_) => {
+                            unreachable!()
+                        }
                     };
                     let _ = writeln!(out, "        {text}");
                     address += op.byte_size();
@@ -453,4 +465,7 @@ pub struct Assembled {
 pub enum AssembleError {
     UnplacedLabel(String),
     DuplicateLabel(String),
+    /// A frame-save placeholder survived to assembly — the code generator
+    /// failed to run its marker-resolution pass.
+    UnresolvedFrameMarker,
 }

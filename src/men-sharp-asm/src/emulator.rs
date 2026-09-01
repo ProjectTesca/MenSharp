@@ -447,7 +447,8 @@ impl Emulator {
             }
             // ---- Object identity / equality ----
             "SystemObject.__Equals__SystemObject_SystemObject__SystemBoolean"
-            | "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean" => {
+            | "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean"
+            | "SystemObject.__op_Equality__SystemObject_SystemObject__SystemBoolean" => {
                 let args = self.pop_arguments(3)?;
                 let equal = match (&self.heap[args[0]], &self.heap[args[1]]) {
                     (Value::Null, Value::Null) => true,
@@ -522,6 +523,12 @@ impl Emulator {
                 Ok(())
             }
             // ---- Debug ----
+            "UnityEngineDebug.__LogError__SystemObject__SystemVoid" => {
+                let args = self.pop_arguments(1)?;
+                let text = self.heap[args[0]].display();
+                self.log.push(text);
+                Ok(())
+            }
             "UnityEngineDebug.__Log__SystemObject__SystemVoid" => {
                 let args = self.pop_arguments(1)?;
                 let text = self.heap[args[0]].display();

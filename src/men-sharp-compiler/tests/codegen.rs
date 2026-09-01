@@ -317,16 +317,10 @@ fn strings_and_interpolation() {
 }
 
 #[test]
-fn recursion_is_a_codegen_error_not_a_crash() {
-    let dir = dotnet_shared_dir();
-    let Some(dir) = dir else {
-        return;
-    };
-    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
-    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
-    let references = compiler.load_references(&bytes).unwrap();
-    let files = compiler.parse(vec![SourceCode::new(
-        "test.cs",
+fn recursion_just_works() {
+    // static frames plus a save/restore stack woven in around the calls that
+    // can come back — no attribute, no configuration, like C#
+    let Some(emulator) = run(
         r#"
         namespace Game
         {
@@ -342,25 +336,102 @@ fn recursion_is_a_codegen_error_not_a_crash() {
             }
         }
         "#,
-    )]);
-    let declarations = compiler.collect_declarations(&files);
-    let signatures = compiler.resolve_signatures(&declarations, &references);
-    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
-    let output = compiler.generate_udon(
-        &declarations,
-        &signatures,
-        &bodies,
-        &references,
-        &["Game", "Program"],
-    );
-    assert!(
-        output
-            .errors
-            .iter()
-            .any(|error| error.message.contains("recursion is not supported")),
-        "expected a recursion diagnostic, got {:#?}",
-        output.errors
-    );
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 55);
+}
+
+#[test]
+fn mutual_recursion_just_works() {
+    // the cycle spans two functions, so each save site protects its callee
+    // and the chain unwinds cleanly
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static bool even;
+                public static bool odd;
+                private static bool IsEven(int n) { if (n == 0) { return true; } return IsOdd(n - 1); }
+                private static bool IsOdd(int n) { if (n == 0) { return false; } return IsEven(n - 1); }
+                public static void Main()
+                {
+                    even = IsEven(10);
+                    odd = IsOdd(10);
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert!(matches!(
+        emulator.value_of("even"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("odd"),
+        Some(Value::Boolean(false))
+    ));
+}
+
+#[test]
+fn recursion_through_virtual_dispatch_just_works() {
+    // the cycle runs through the synthesized dispatcher: Node.Sum calls
+    // this.Next().Sum() on a base-typed reference, which dispatches back
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Node
+            {
+                public int value;
+                public Node next;
+                public virtual int Sum()
+                {
+                    if (next == null) { return value; }
+                    return value + next.Sum();
+                }
+            }
+
+            public class DoubleNode : Node
+            {
+                public override int Sum()
+                {
+                    if (next == null) { return value * 2; }
+                    return value * 2 + next.Sum();
+                }
+            }
+
+            public class Program
+            {
+                public static int result;
+                public static void Main()
+                {
+                    var a = new Node();
+                    var b = new DoubleNode();
+                    var c = new Node();
+                    a.value = 1;
+                    b.value = 2;
+                    c.value = 3;
+                    a.next = b;
+                    b.next = c;
+                    result = a.Sum();
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    // 1 + 2*2 + 3, the middle node through its override
+    assert_eq!(int_of(&emulator, "result"), 8);
 }
 
 #[test]
@@ -2152,5 +2223,76 @@ fn a_field_change_callback_without_the_property_is_an_error() {
             .any(|error| error.message.contains("no property of that name")),
         "{:#?}",
         program.output.errors
+    );
+}
+
+#[test]
+fn a_function_that_calls_out_gets_a_reentry_guard() {
+    // no analysis of THIS program can see a SendCustomEvent round trip that
+    // comes back through another program — so a function that can be live
+    // during such a call carries a runtime guard: re-entering it logs an
+    // error and aborts instead of silently corrupting its frame
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Other : MenSharp.MenSharpBehaviour
+                    {
+                        public void Poke() { }
+                    }
+
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        public Other other;
+                        public bool fire;
+                        public int count;
+
+                        public void Interact()
+                        {
+                            if (fire) { other.Poke(); }
+                            count = count + 1;
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    let flag = text
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("__active_"))
+        .and_then(|line| line.split(':').next())
+        .expect("a guard flag in the data section")
+        .to_string();
+
+    let assembled = program.output.program.assemble().unwrap();
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    // ordinary dispatches pass the guard and clear it again
+    emulator.run(&assembled, "_interact").unwrap();
+    emulator.run(&assembled, "_interact").unwrap();
+    assert_eq!(int_of(&emulator, "count"), 2);
+    // what the runtime state looks like mid-flight: the function is active
+    assert!(emulator.set_value(&flag, Value::Boolean(true)));
+    emulator.run(&assembled, "_interact").unwrap();
+    assert_eq!(int_of(&emulator, "count"), 2, "the body must not have run");
+    assert!(
+        emulator.log.iter().any(|line| line.contains("re-entered")),
+        "{:?}",
+        emulator.log
     );
 }
