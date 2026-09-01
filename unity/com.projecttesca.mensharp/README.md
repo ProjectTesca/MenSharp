@@ -155,6 +155,7 @@ nothing.
 
 ```csharp
 Rigidbody body = gameObject.GetComponent<Rigidbody>();
+if (TryGetComponent<BoxCollider>(out var box)) { ... }
 GameObject clone = Instantiate(prefab);
 Instantiate(prefab, position, rotation);   // written in terms of the above
 Destroy(clone, 3f);
@@ -254,8 +255,10 @@ wrong thing:
 
 - exceptions and user-defined structs;
 - pattern matching in `switch` beyond constant labels;
-- `ref`/`out` parameters on methods you define yourself (passing `ref`/`out`
-  *to engine methods* like `Physics.Raycast` works).
+- array initializer syntax (`new int[] { 1, 2 }`) and `default` expressions.
+
+`ref`/`out` work everywhere: on engine methods (`Physics.Raycast(ray, out hit)`,
+`int.TryParse`) and on methods you define yourself.
 
 ## Links
 

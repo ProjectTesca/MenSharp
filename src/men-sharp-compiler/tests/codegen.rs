@@ -1786,48 +1786,25 @@ fn an_out_argument_writes_back_into_an_array_element() {
 }
 
 #[test]
-fn an_out_argument_to_a_source_method_is_an_error() {
-    // two Udon programs (and even two functions in one program) have no shared
-    // frame to pass a reference through — only externs take one
-    let Some(dir) = dotnet_shared_dir() else {
-        return;
-    };
-    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
-    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
-    let references = compiler.load_references(&bytes).unwrap();
-
-    let files = compiler.parse(vec![SourceCode::new(
-        "test.cs",
+fn an_out_argument_to_a_source_method_just_works() {
+    // used to be a compile error; static frames make it a copy-back
+    let Some(emulator) = run(
         r#"
         namespace Game
         {
             public class Program
             {
+                public static int result;
                 private static void Fill(out int x) { x = 1; }
-                public static void Main() { int n; Fill(out n); }
+                public static void Main() { int n; Fill(out n); result = n; }
             }
         }
         "#,
-    )]);
-    let declarations = compiler.collect_declarations(&files);
-    let signatures = compiler.resolve_signatures(&declarations, &references);
-    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
-    assert_eq!(bodies.errors, vec![], "type errors");
-    let output = compiler.generate_udon(
-        &declarations,
-        &signatures,
-        &bodies,
-        &references,
-        &["Game", "Program"],
-    );
-    assert!(
-        output
-            .errors
-            .iter()
-            .any(|error| error.message.contains("only reach engine methods")),
-        "{:#?}",
-        output.errors
-    );
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 1);
 }
 
 #[test]
@@ -2539,4 +2516,171 @@ fn external_enums_are_boxed_constants() {
             )
         });
     assert_eq!(int_of(&emulator, "seen"), 121);
+}
+
+#[test]
+fn source_methods_take_out_and_ref_arguments() {
+    // static frames make this direct: the callee writes its own parameter
+    // slot, and the call copies it back into the argument's place
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int high;
+                public static int low;
+                public static bool ok;
+                public static int bumped;
+
+                private static bool Split(int value, out int tens, out int ones)
+                {
+                    tens = value / 10;
+                    ones = value % 10;
+                    return value >= 10;
+                }
+
+                private static void Bump(ref int x)
+                {
+                    x = x + 1;
+                }
+
+                public static void Main()
+                {
+                    ok = Split(42, out int h, out int l);
+                    high = h;
+                    low = l;
+
+                    int[] numbers = new int[2];
+                    numbers[1] = 7;
+                    Bump(ref numbers[1]);
+                    bumped = numbers[1];
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "high"), 4);
+    assert_eq!(int_of(&emulator, "low"), 2);
+    assert!(matches!(
+        emulator.value_of("ok"),
+        Some(Value::Boolean(true))
+    ));
+    assert_eq!(int_of(&emulator, "bumped"), 8);
+}
+
+#[test]
+fn out_arguments_survive_recursion() {
+    // the write-back rescues the callee's parameter into a scratch slot
+    // before the recursive frame restore rewinds it — this is the ordering
+    // that breaks if the write-back moves to either side of the restore
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int result;
+
+                private static void Count(int n, out int total)
+                {
+                    if (n == 0) { total = 0; return; }
+                    Count(n - 1, out int rest);
+                    total = rest + n;
+                }
+
+                public static void Main()
+                {
+                    Count(5, out int sum);
+                    result = sum;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 15);
+}
+
+#[test]
+fn out_arguments_cross_virtual_dispatch() {
+    // the override writes its own slot; the dispatcher hands the value back
+    // through its slot; the caller's write-back reads it from there
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Source
+            {
+                public virtual bool TryGet(out int value) { value = 1; return true; }
+            }
+
+            public class Doubled : Source
+            {
+                public override bool TryGet(out int value) { value = 2; return true; }
+            }
+
+            public class Program
+            {
+                public static int result;
+                public static void Main()
+                {
+                    Source source = new Doubled();
+                    if (source.TryGet(out int value)) { result = value; }
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 2);
+}
+
+#[test]
+fn generic_out_parameters_monomorphize() {
+    // the TryGetComponent shape: a generic method whose out parameter's type
+    // is the method's own type parameter
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int number;
+                public static string text;
+
+                private static bool First<T>(T[] items, out T first)
+                {
+                    first = items[0];
+                    return items.Length > 0;
+                }
+
+                public static void Main()
+                {
+                    int[] numbers = new int[2];
+                    numbers[0] = 7;
+                    numbers[1] = 8;
+                    if (First(numbers, out int n)) { number = n; }
+                    string[] words = new string[1];
+                    words[0] = "hi";
+                    if (First(words, out string w)) { text = w; }
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "number"), 7);
+    assert_eq!(string_of(&emulator, "text"), "hi");
 }

@@ -449,6 +449,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         key: &FunctionKey,
         this: Option<DataId>,
         arguments: &[DataId],
+        // (argument index, where its value goes back): the callee's `ref`/
+        // `out` parameters, whose slots are copied home after the call
+        by_ref: &[(usize, Place)],
         span: Range<usize>,
     ) -> Option<DataId> {
         self.ensure_function(key);
@@ -521,7 +524,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.copy(constant, return_slot);
         self.program.code.push(Op::Jump(Target::Label(label)));
         self.program.code.push(Op::Label(continuation));
+
+        // `ref`/`out` results: the callee wrote its own parameter slots.
+        // Rescue them into scratch slots *before* a recursive restore rewinds
+        // the frame, write them into their places *after* it — a scratch is
+        // deliberately outside every frame, and nothing runs in between.
+        let mut returned: Vec<(DataId, Place)> = Vec::new();
+        for (argument_index, place) in by_ref {
+            let parameter = parameters[usize::from(this.is_some()) + argument_index];
+            let udon_type = self.program.data[parameter.0].udon_type.clone();
+            let scratch = self.scratch_slot(&udon_type);
+            self.copy(parameter, scratch);
+            returned.push((scratch, place.clone()));
+        }
+
         self.program.code.push(Op::RestoreFrame(marker));
+
+        for (scratch, place) in returned {
+            self.write_place(ctx, place, scratch, span.clone());
+        }
 
         result.map(|result| {
             let symbol = &self.program.data[result.0];
@@ -530,6 +551,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.copy(result, temp);
             temp
         })
+    }
+
+    /// A temp that belongs to *no* function's frame: for values that must
+    /// survive a recursive frame restore (they are dead again by the next
+    /// call, so nothing ever needs to save them).
+    fn scratch_slot(&mut self, udon_type: &str) -> DataId {
+        let saved = self.current_frame.take();
+        let slot = self.temp(udon_type);
+        self.current_frame = saved;
+        slot
     }
 
     /// The bindings for a source member's instance: the declaring type's
@@ -829,11 +860,34 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // markers, so recursion through virtual dispatch is seen like
                 // any other cycle instead of silently corrupting frames
                 let arguments: Vec<DataId> = parameters[1..].to_vec();
+                // the override's `ref`/`out` results come back into the
+                // dispatcher's own parameter slots, where the real caller's
+                // write-back then reads them
+                let (parameter_types, _) = self.function_shape(&key);
+                let by_ref: Vec<(usize, Place)> = match self.signatures.members.get(&key.symbol) {
+                    Some(MemberSignature::Function(signature)) => signature
+                        .parameters
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, parameter)| {
+                            matches!(
+                                parameter.passing,
+                                ParameterPassing::Ref | ParameterPassing::Out
+                            )
+                        })
+                        .map(|(index, _)| {
+                            let ty = parameter_types.get(index).cloned().unwrap_or(Type::Error);
+                            (index, Place::Slot(parameters[1 + index], ty))
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
                 let value = self.call_function(
                     &mut ctx,
                     &implementation,
                     Some(this_slot),
                     &arguments,
+                    &by_ref,
                     0..0,
                 );
                 if let (Some(mine), Some(value)) = (result, value) {

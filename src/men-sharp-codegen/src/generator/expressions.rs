@@ -1381,7 +1381,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     role: Role::Getter,
                     bindings,
                 };
-                let result = self.call_function(ctx, &key, receiver, &indices, span)?;
+                let result = self.call_function(ctx, &key, receiver, &indices, &[], span)?;
                 Some((result, ty))
             }
             Place::ProgramVariable { receiver, name, ty } => {
@@ -1420,7 +1420,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    fn write_place(
+    pub(super) fn write_place(
         &mut self,
         ctx: &mut Ctx<'ast>,
         place: Place,
@@ -1454,7 +1454,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     bindings,
                 };
                 indices.push(value);
-                self.call_function(ctx, &key, receiver, &indices, span);
+                self.call_function(ctx, &key, receiver, &indices, &[], span);
             }
             Place::ProgramVariable { receiver, name, .. } => {
                 let key = self.string_constant(&name);
@@ -1984,23 +1984,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // `ref`/`out` slots standing in for a field, element or property: the
         // extern writes the slot, and afterwards the slot is written home
         let mut write_backs: Vec<(Place, DataId)> = Vec::new();
+        // for calls into source: the callee's `ref`/`out` parameter slots and
+        // where each is copied back to (argument index, place)
+        let mut source_by_ref: Vec<(usize, Place)> = Vec::new();
         let parameter_offset = usize::from(call.is_extension);
         for (index, argument) in arguments.iter().enumerate() {
             match argument.modifier.as_ref().map(|modifier| modifier.value) {
                 Some(modifier @ (ArgumentModifier::Ref | ArgumentModifier::Out)) => {
-                    // an extern takes every parameter by heap address, so a
-                    // variable's own slot *is* the reference — but a user
-                    // method is another set of slots entirely, and a custom
-                    // event cannot even take a value, let alone return one
-                    if !matches!(call.origin, MemberOrigin::External { .. }) {
-                        self.error(
-                            ctx,
-                            "`ref`/`out` arguments only reach engine methods; \
-                             a method defined in source cannot take them on Udon",
-                            argument.span.clone(),
-                        );
-                        return Piece::Error;
-                    }
                     let Some(parameter) = call.signature.parameters.get(index + parameter_offset)
                     else {
                         self.error(
@@ -2012,14 +2002,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     };
                     let parameter_type =
                         self.substitute(&parameter.parameter_type, &ctx.key.bindings);
-                    match self.by_ref_argument(ctx, argument, modifier, &parameter_type) {
-                        Some((slot, write_back)) => {
-                            values.push(slot);
-                            if let Some(place) = write_back {
-                                write_backs.push((place, slot));
+                    if matches!(call.origin, MemberOrigin::External { .. }) {
+                        // an extern takes every parameter by heap address, so
+                        // a variable's own slot *is* the reference
+                        match self.by_ref_argument(ctx, argument, modifier, &parameter_type) {
+                            Some((slot, write_back)) => {
+                                values.push(slot);
+                                if let Some(place) = write_back {
+                                    write_backs.push((place, slot));
+                                }
                             }
+                            None => return Piece::Error,
                         }
-                        None => return Piece::Error,
+                    } else {
+                        // a source method writes its own parameter slot; the
+                        // call copies it back into the argument's place after
+                        match self.source_by_ref_argument(ctx, argument, modifier, &parameter_type)
+                        {
+                            Some((value, place)) => {
+                                values.push(value);
+                                source_by_ref.push((index, place));
+                            }
+                            None => return Piece::Error,
+                        }
                     }
                 }
                 Some(ArgumentModifier::In) | None => match &argument.value {
@@ -2101,7 +2106,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         ),
                     }
                 };
-                match self.call_function(ctx, &key, this, &values, span) {
+                // the inserted extension receiver shifts every argument right
+                let by_ref: Vec<(usize, Place)> = source_by_ref
+                    .into_iter()
+                    .map(|(index, place)| (index + parameter_offset, place))
+                    .collect();
+                match self.call_function(ctx, &key, this, &values, &by_ref, span) {
                     Some(result) => Piece::Value(result, return_type),
                     None if return_type == Type::Void => Piece::Void,
                     None => Piece::Error,
@@ -2212,6 +2222,56 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .expect("a scope is open")
                     .insert(name.value, (slot, parameter_type.clone()));
                 Some((slot, None))
+            }
+            ArgumentValue::Missing => None,
+        }
+    }
+
+    /// A `ref`/`out` argument of a call into *source*: the value passed in
+    /// (the current one for `ref`; a placeholder for `out`) and the place the
+    /// callee's parameter slot is copied back into afterwards.
+    fn source_by_ref_argument(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        argument: &'ast Argument<'ast, 'ast>,
+        modifier: ArgumentModifier,
+        parameter_type: &Type,
+    ) -> Option<(DataId, Place)> {
+        match &argument.value {
+            ArgumentValue::Expression(expression) => {
+                let place = self.lower_place(ctx, expression);
+                match place {
+                    Place::SelfReference { .. } => {
+                        self.error(
+                            ctx,
+                            "this is read-only, so it cannot be a `ref`/`out` argument",
+                            argument.span.clone(),
+                        );
+                        None
+                    }
+                    Place::Error => None,
+                    place => {
+                        let value = match (&place, modifier) {
+                            (Place::Slot(slot, _), _) => *slot,
+                            (_, ArgumentModifier::Ref) => {
+                                self.read_place(ctx, place.clone(), argument.span.clone())?
+                                    .0
+                            }
+                            _ => self.temp_for(parameter_type),
+                        };
+                        Some((value, place))
+                    }
+                }
+            }
+            // `out var x`: the call site declares the variable; the call
+            // writes it through the place like any other
+            ArgumentValue::Declaration { name, .. } => {
+                let slot = self.temp_for(parameter_type);
+                ctx.locals
+                    .last_mut()
+                    .expect("a scope is open")
+                    .insert(name.value, (slot, parameter_type.clone()));
+                Some((slot, Place::Slot(slot, parameter_type.clone())))
             }
             ArgumentValue::Missing => None,
         }
@@ -2342,7 +2402,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             role: Role::Constructor,
                             bindings: self.bindings_for(ctx, ctor, &call.declaring_type, &[]),
                         };
-                        self.call_function(ctx, &key, Some(object), &values, span.clone());
+                        self.call_function(ctx, &key, Some(object), &values, &[], span.clone());
                     }
                 }
                 _ => {
@@ -2363,7 +2423,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             role: Role::DefaultConstructor,
                             bindings,
                         };
-                        self.call_function(ctx, &key, Some(object), &[], span.clone());
+                        self.call_function(ctx, &key, Some(object), &[], &[], span.clone());
                     }
                 }
             }

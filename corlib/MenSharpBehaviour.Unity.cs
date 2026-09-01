@@ -89,6 +89,14 @@ namespace MenSharp
             return gameObject.GetComponentInChildren<T>();
         }
 
+        // Udon has no TryGetComponent extern at all, so this is written out
+        // in terms of GetComponent — which is exactly what it means.
+        public bool TryGetComponent<T>(out T component)
+        {
+            component = GetComponent<T>();
+            return component != null;
+        }
+
         public void Destroy(UnityEngine.Object target)
         {
             UnityEngine.Object.Destroy(target);
