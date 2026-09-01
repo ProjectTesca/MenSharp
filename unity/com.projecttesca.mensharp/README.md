@@ -51,6 +51,10 @@ Method names Udon knows (`Start`, `Update`, `Interact`, `OnPlayerJoined`,
 SDK's own event list. Every other parameterless public method becomes a custom
 event under its own name, which is what `SendCustomEvent` raises.
 
+A behaviour with an `Interact` event shows **Interaction Text** and
+**Proximity** in its inspector, exactly as a visible UdonBehaviour would (the
+GameObject still needs a Collider to be clickable).
+
 Events that carry arguments work by declaring the documented parameters:
 
 ```csharp

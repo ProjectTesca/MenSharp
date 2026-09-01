@@ -206,6 +206,16 @@ public static class MenSharpProxy
     /// been compiled yet.
     public static MenSharpProgramAsset FindProgram(Type behaviourType)
     {
+        // assets are named by the full class path — two behaviours may share
+        // a short name across namespaces ('+' is how reflection spells nesting)
+        string fullPath = (behaviourType.FullName ?? behaviourType.Name).Replace('+', '.');
+        MenSharpProgramAsset program = AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(
+            $"{ProgramsFolder}/{fullPath}.asset");
+        if (program != null)
+        {
+            return program;
+        }
+        // an asset imported before full-path naming; the next compile renames it
         return AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(
             $"{ProgramsFolder}/{behaviourType.Name}.asset");
     }
@@ -304,6 +314,27 @@ public static class MenSharpProxy
                     paired = spare[index];
                     spare.RemoveAt(index);
                     break;
+                }
+            }
+            if (paired == null)
+            {
+                // a spare whose program asset was deleted (a rename, or a
+                // compiler update): reuse it, so its interaction settings and
+                // serialized values survive the migration
+                for (int index = 0; index < spare.Count; index++)
+                {
+                    if (spare[index].programSource == null)
+                    {
+                        paired = spare[index];
+                        spare.RemoveAt(index);
+                        if (undoable)
+                        {
+                            Undo.RecordObject(paired, "Pair MenSharp behaviour");
+                        }
+                        paired.programSource = program;
+                        EditorUtility.SetDirty(paired);
+                        break;
+                    }
                 }
             }
             if (paired == null)

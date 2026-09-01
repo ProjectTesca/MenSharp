@@ -74,13 +74,15 @@ public static class MenSharpCompiler
         var current = new HashSet<string>();
         foreach (string uasmPath in produced)
         {
+            // assets are named by the *full* class path ("Demo.Door.asset"):
+            // two behaviours may share a short name across namespaces, and a
+            // short-named asset would make them overwrite each other
             string classPath = Path.GetFileNameWithoutExtension(uasmPath); // "Demo.Door"
-            string className = classPath.Substring(classPath.LastIndexOf('.') + 1);
             string metaPath = Path.Combine(
                 outputDirectory, classPath + ".meta.json");
             MenSharpImporter.CreateOrUpdate(
-                uasmPath, metaPath, $"{ProgramsFolder}/{className}.asset");
-            current.Add(className);
+                uasmPath, metaPath, $"{ProgramsFolder}/{classPath}.asset");
+            current.Add(classPath);
         }
         DeleteProgramsWithoutABehaviour(current);
         AssetDatabase.SaveAssets();

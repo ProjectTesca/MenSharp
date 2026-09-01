@@ -150,6 +150,7 @@ public class MenSharpBehaviourEditor : Editor
             }
 
             DrawSyncMode(program);
+            DrawInteraction(proxy, program);
             DrawRelatedOnThisObject(proxy, type);
             DrawSiblings(proxy, type);
             DrawRevealToggle();
@@ -172,6 +173,34 @@ public class MenSharpBehaviourEditor : Editor
             EditorGUILayout.HelpBox(
                 "Sync mode is None, so no variable on this behaviour is sent to anyone.",
                 MessageType.Info);
+        }
+    }
+
+    /// Interaction Text and Proximity, when the program exports `_interact`.
+    /// They live on the (hidden) UdonBehaviour — this is the same section
+    /// VRChat's own inspector draws on a visible one, surfaced here so hiding
+    /// the pairing does not cost the setting.
+    private static void DrawInteraction(MenSharpBehaviour proxy, MenSharpProgramAsset program)
+    {
+        if (program == null || Array.IndexOf(program.EntryPoints, "_interact") < 0)
+        {
+            return;
+        }
+        UdonBehaviour paired = MenSharpProxy.FindPaired(proxy);
+        if (paired == null)
+        {
+            // the pairing warning above already says what to do
+            return;
+        }
+        EditorGUI.BeginChangeCheck();
+        string text = EditorGUILayout.TextField("Interaction Text", paired.interactText);
+        float proximity = EditorGUILayout.Slider("Proximity", paired.proximity, 0f, 100f);
+        if (EditorGUI.EndChangeCheck())
+        {
+            Undo.RecordObject(paired, "Edit Interaction");
+            paired.interactText = text;
+            paired.proximity = proximity;
+            EditorUtility.SetDirty(paired);
         }
     }
 

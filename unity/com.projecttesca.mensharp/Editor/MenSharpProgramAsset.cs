@@ -46,6 +46,20 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         }
     }
 
+    /// The events this program exports (`_start`, `_interact`, ...).
+    public string[] EntryPoints
+    {
+        get
+        {
+            if (string.IsNullOrEmpty(metaJson))
+            {
+                return Array.Empty<string>();
+            }
+            var meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
+            return meta?.entryPoints ?? Array.Empty<string>();
+        }
+    }
+
     /// The behaviour-wide sync mode the source asked for, or null.
     public string SyncMode
     {
