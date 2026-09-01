@@ -255,7 +255,8 @@ wrong thing:
 
 - exceptions and user-defined structs;
 - pattern matching in `switch` beyond constant labels;
-- array initializer syntax (`new int[] { 1, 2 }`) and `default` expressions.
+- the bare declaration shorthand `int[] x = { 1, 2 };` — write
+  `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.
 
 `ref`/`out` work everywhere: on engine methods (`Physics.Raycast(ray, out hit)`,
 `int.TryParse`) and on methods you define yourself.

@@ -2188,7 +2188,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             })
             .and_then(|initializer| match initializer {
                 InitializerValue::Expression(expression) => Some(expression),
-                _ => None,
+                InitializerValue::Nested(nested) => {
+                    // `= { 1, 2 };` — dropping it silently would leave the
+                    // field null with no complaint
+                    let (declaration_file, _) = self.declaration_site(field);
+                    self.errors.push(CodegenError {
+                        message: "the array-initializer shorthand is not supported by the \
+                                  Udon backend yet: write `= new T[] { ... }`"
+                            .into(),
+                        file: declaration_file,
+                        span: nested.span(),
+                    });
+                    None
+                }
             });
 
         // literal initializers bake into the heap default instead of running

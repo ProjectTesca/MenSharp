@@ -1718,7 +1718,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     let target = self.resolve_type(target_type);
                     Meaning::Value(target)
                 }
-                (None, Some(expected)) => Meaning::Value(expected.clone()),
+                (None, Some(expected)) => {
+                    // a bare `default` has no syntax of its own to hang the
+                    // type on; the code generator reads it from here
+                    self.expression_types
+                        .insert(EntityID::from(left), expected.clone());
+                    Meaning::Value(expected.clone())
+                }
                 (None, None) => {
                     self.error(SemanticErrorKind::TypeAnnotationNeeded, span.clone());
                     Meaning::Error
@@ -2954,10 +2960,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     Type::Error
                 }
             };
-            return Meaning::Value(Type::Array {
+            let ty = Type::Array {
                 element: Box::new(element),
                 rank: 1,
-            });
+            };
+            // `new[]` writes no type; the code generator reads it from here
+            self.expression_types
+                .insert(EntityID::from(new_expression), ty.clone());
+            return Meaning::Value(ty);
         }
 
         // array creation

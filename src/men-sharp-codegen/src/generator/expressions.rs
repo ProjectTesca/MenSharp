@@ -158,7 +158,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         for declarator in declaration.declarators {
             let initializer = match &declarator.initializer {
                 Some(InitializerValue::Expression(value)) => Some(value),
-                _ => None,
+                Some(InitializerValue::Nested(nested)) => {
+                    // `int[] x = { 1, 2 };` — dropping it silently would
+                    // leave x null with no complaint
+                    self.error(
+                        ctx,
+                        "the array-initializer shorthand is not supported by the Udon \
+                         backend yet: write `= new T[] { ... }`",
+                        nested.span(),
+                    );
+                    None
+                }
+                None => None,
             };
             // `var` declarations resolve to the initializer's type
             let ty = match &declared {
@@ -1717,6 +1728,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             .get(&EntityID::from(type_ref))
                             .cloned()
                     })
+                    // a bare `default` takes the type the checker gave the
+                    // context, recorded on this very node
+                    .or_else(|| {
+                        self.bodies
+                            .expression_types
+                            .get(&EntityID::from(left))
+                            .cloned()
+                    })
                     .map(|ty| self.substitute(&ty, &ctx.key.bindings));
                 match ty {
                     Some(ty) => {
@@ -1726,7 +1745,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     None => {
                         self.error(
                             ctx,
-                            "target-typed `default` is not supported by the Udon backend yet",
+                            "the type of this `default` could not be determined",
                             span.clone(),
                         );
                         Piece::Error
@@ -1745,8 +1764,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     pub(super) fn default_value(&mut self, ty: &Type) -> DataId {
+        // a source enum is its underlying Int32
+        if self.source_enum(ty).is_some() {
+            return self.int_constant(0);
+        }
+        // an external enum's default is the real boxed zero
+        if let Some(id) = self.external_enum(ty) {
+            let dotnet_type = self.external.display_name(id);
+            let udon_type = self.heap_type(ty);
+            return self.constant(
+                &udon_type,
+                &format!("{dotnet_type}#0"),
+                HeapInit::EnumValue {
+                    dotnet_type,
+                    value: 0,
+                },
+            );
+        }
         match self.extern_type_name(ty).as_deref() {
             Some("SystemInt32") => self.int_constant(0),
+            Some("SystemInt64") => self.constant("SystemInt64", "0", HeapInit::Int64(0)),
+            Some("SystemUInt32") => self.constant("SystemUInt32", "0", HeapInit::UInt32(0)),
+            Some("SystemChar") => self.constant("SystemChar", "0", HeapInit::Char('\0')),
             Some("SystemBoolean") => {
                 self.constant("SystemBoolean", "false", HeapInit::Boolean(false))
             }
@@ -2333,6 +2372,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .get(&EntityID::from(type_ref))
                     .cloned()
             })
+            // `new[] { ... }` writes no type; the checker recorded the
+            // best-common-type array on the node itself
+            .or_else(|| {
+                self.bodies
+                    .expression_types
+                    .get(&EntityID::from(new_expression))
+                    .cloned()
+            })
             .map(|ty| self.substitute(&ty, &ctx.key.bindings));
         let Some(created) = created else {
             self.error(
@@ -2342,6 +2389,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return Piece::Error;
         };
+
+        // `new int[] { 1, 2 }` / `new[] { 1, 2 }`: no written size — it is
+        // the element count
+        if let Type::Array { rank: 1, .. } = &created {
+            use men_sharp_parser::ast::{CollectionElement, Initializer};
+            let count = match &new_expression.initializer {
+                Some(Initializer::Collection { elements, .. }) => elements
+                    .iter()
+                    .filter(|element| matches!(element, CollectionElement::Expression(_)))
+                    .count(),
+                _ => 0,
+            };
+            let size = self.int_constant(count as i32);
+            let slot = self.allocate_array(ctx, &created, size, span.clone());
+            self.fill_array_initializer(ctx, slot, &created, new_expression, span);
+            return Piece::Value(slot, created);
+        }
 
         let target = self
             .bodies

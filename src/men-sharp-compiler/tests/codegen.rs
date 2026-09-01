@@ -2684,3 +2684,117 @@ fn generic_out_parameters_monomorphize() {
     assert_eq!(int_of(&emulator, "number"), 7);
     assert_eq!(string_of(&emulator, "text"), "hi");
 }
+
+#[test]
+fn array_initializers_and_default_expressions() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public enum Mood { Sad, Happy }
+
+            public class Program
+            {
+                public static int sum;
+                public static int sized;
+                public static string joined;
+                public static int zero;
+                public static bool no;
+                public static string none;
+                public static int moodZero;
+
+                private static T Pick<T>(T[] items, int index)
+                {
+                    return items[index];
+                }
+
+                public static void Main()
+                {
+                    // explicit element type, size from the element count
+                    int[] numbers = new int[] { 7, 8, 9 };
+                    sum = numbers[0] + numbers[1] + numbers[2];
+
+                    // written size plus initializer
+                    int[] pair = new int[2] { 40, 2 };
+                    sized = pair[0] + pair[1];
+
+                    // element type inferred from the elements
+                    var words = new[] { "a", "b" };
+                    joined = words[0] + words[1];
+
+                    // bare `default` takes its type from the context
+                    int i = default;
+                    zero = i;
+                    bool flag = default;
+                    no = flag;
+                    none = default(string);
+                    Mood mood = default;
+                    moodZero = (int)mood;
+
+                    // and through a generic, where T decides what it means
+                    sum = sum + Pick(numbers, 1);
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "sum"), 24 + 8);
+    assert_eq!(int_of(&emulator, "sized"), 42);
+    assert_eq!(string_of(&emulator, "joined"), "ab");
+    assert_eq!(int_of(&emulator, "zero"), 0);
+    assert!(matches!(
+        emulator.value_of("no"),
+        Some(Value::Boolean(false))
+    ));
+    assert!(matches!(emulator.value_of("none"), Some(Value::Null)));
+    assert_eq!(int_of(&emulator, "moodZero"), 0);
+}
+
+#[test]
+fn the_array_initializer_shorthand_is_an_error_not_a_silent_null() {
+    // `int[] x = { 1, 2 };` used to be dropped without a word, leaving x null
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static void Main()
+                {
+                    int[] numbers = { 1, 2 };
+                    numbers[0] = 3;
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output
+            .errors
+            .iter()
+            .any(|error| error.message.contains("array-initializer shorthand")),
+        "{:#?}",
+        output.errors
+    );
+}
