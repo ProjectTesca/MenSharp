@@ -429,6 +429,16 @@ impl Emulator {
                 self.heap[args[1]] = Value::Str(Rc::from(value));
                 Ok(())
             }
+            // `Ref` marks an out/ref parameter: the extern writes through the
+            // pushed address, exactly like an ordinary OUT result slot
+            "SystemInt32.__TryParse__SystemString_SystemInt32Ref__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let text = self.string_or_empty(args[0]);
+                let parsed = text.trim().parse::<i32>();
+                self.heap[args[1]] = Value::Int32(*parsed.as_ref().unwrap_or(&0));
+                self.heap[args[2]] = Value::Boolean(parsed.is_ok());
+                Ok(())
+            }
             "SystemObject.__ToString__SystemString" => {
                 let args = self.pop_arguments(2)?;
                 let value = self.heap[args[0]].display();

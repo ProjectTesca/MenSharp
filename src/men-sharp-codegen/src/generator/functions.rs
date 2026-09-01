@@ -1,7 +1,7 @@
 //! Function instances: scheduling, frames, bodies, calls and virtual dispatch.
 
 use men_sharp_parser::ast::{AccessorKind, Modifier};
-use men_sharp_semantics::FunctionSignature;
+use men_sharp_semantics::{FunctionSignature, ParameterPassing};
 
 use super::*;
 
@@ -919,7 +919,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let mut parts: Vec<String> = Vec::new();
         for parameter in &signature.parameters {
             match self.extern_type_name(&parameter.parameter_type) {
-                Some(part) => parts.push(part),
+                Some(mut part) => {
+                    // `ref`/`out` parameters are spelled with a `Ref` suffix in
+                    // the whitelist: `UnityEngineRaycastHitRef`
+                    if matches!(
+                        parameter.passing,
+                        ParameterPassing::Ref | ParameterPassing::Out
+                    ) {
+                        part.push_str("Ref");
+                    }
+                    parts.push(part);
+                }
                 None => {
                     self.error(
                         ctx,

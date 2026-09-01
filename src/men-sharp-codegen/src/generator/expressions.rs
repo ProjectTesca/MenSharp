@@ -1707,30 +1707,63 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Piece {
         // evaluate arguments left to right
         let mut values: Vec<DataId> = Vec::new();
-        for argument in arguments {
-            if argument.modifier.is_some() {
-                self.error(
-                    ctx,
-                    "`ref`/`out` arguments are not supported by the Udon backend yet",
-                    argument.span.clone(),
-                );
-                return Piece::Error;
-            }
-            match &argument.value {
-                ArgumentValue::Expression(expression) => {
-                    match self.lower_expression(ctx, expression) {
-                        Some(value) => values.push(value),
+        // `ref`/`out` slots standing in for a field, element or property: the
+        // extern writes the slot, and afterwards the slot is written home
+        let mut write_backs: Vec<(Place, DataId)> = Vec::new();
+        let parameter_offset = usize::from(call.is_extension);
+        for (index, argument) in arguments.iter().enumerate() {
+            match argument.modifier.as_ref().map(|modifier| modifier.value) {
+                Some(modifier @ (ArgumentModifier::Ref | ArgumentModifier::Out)) => {
+                    // an extern takes every parameter by heap address, so a
+                    // variable's own slot *is* the reference — but a user
+                    // method is another set of slots entirely, and a custom
+                    // event cannot even take a value, let alone return one
+                    if !matches!(call.origin, MemberOrigin::External { .. }) {
+                        self.error(
+                            ctx,
+                            "`ref`/`out` arguments only reach engine methods; \
+                             a method defined in source cannot take them on Udon",
+                            argument.span.clone(),
+                        );
+                        return Piece::Error;
+                    }
+                    let Some(parameter) = call.signature.parameters.get(index + parameter_offset)
+                    else {
+                        self.error(
+                            ctx,
+                            "internal: argument without a matching parameter",
+                            argument.span.clone(),
+                        );
+                        return Piece::Error;
+                    };
+                    let parameter_type =
+                        self.substitute(&parameter.parameter_type, &ctx.key.bindings);
+                    match self.by_ref_argument(ctx, argument, modifier, &parameter_type) {
+                        Some((slot, write_back)) => {
+                            values.push(slot);
+                            if let Some(place) = write_back {
+                                write_backs.push((place, slot));
+                            }
+                        }
                         None => return Piece::Error,
                     }
                 }
-                _ => {
-                    self.error(
-                        ctx,
-                        "this argument form is not supported by the Udon backend yet",
-                        argument.span.clone(),
-                    );
-                    return Piece::Error;
-                }
+                Some(ArgumentModifier::In) | None => match &argument.value {
+                    ArgumentValue::Expression(expression) => {
+                        match self.lower_expression(ctx, expression) {
+                            Some(value) => values.push(value),
+                            None => return Piece::Error,
+                        }
+                    }
+                    _ => {
+                        self.error(
+                            ctx,
+                            "this argument form is not supported by the Udon backend yet",
+                            argument.span.clone(),
+                        );
+                        return Piece::Error;
+                    }
+                },
             }
         }
         if call.is_extension {
@@ -1839,12 +1872,74 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     Some(self.temp_for(&return_type))
                 };
                 pushed.extend(result);
-                self.call_extern(ctx, &signature, &pushed, span);
+                self.call_extern(ctx, &signature, &pushed, span.clone());
+                for (place, slot) in write_backs {
+                    self.write_place(ctx, place, slot, span.clone());
+                }
                 match result {
                     Some(result) => Piece::Value(result, return_type),
                     None => Piece::Void,
                 }
             }
+        }
+    }
+
+    /// The heap slot to push for a `ref`/`out` argument of an extern call, and
+    /// the place to copy the slot back into afterwards when it is a stand-in.
+    ///
+    /// An extern takes every parameter by heap address, so a plain variable's
+    /// own slot is the reference — the extern writes straight into it. A
+    /// location without a slot of its own (a field, an array element, a
+    /// property) gets a temporary instead: holding the current value for
+    /// `ref`, left for the extern to fill for `out`, written home either way.
+    fn by_ref_argument(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        argument: &'ast Argument<'ast, 'ast>,
+        modifier: ArgumentModifier,
+        parameter_type: &Type,
+    ) -> Option<(DataId, Option<Place>)> {
+        match &argument.value {
+            ArgumentValue::Expression(expression) => {
+                let place = self.lower_place(ctx, expression);
+                match place {
+                    Place::Slot(slot, _) => Some((slot, None)),
+                    Place::SelfReference { .. } => {
+                        self.error(
+                            ctx,
+                            "this is read-only, so it cannot be a `ref`/`out` argument",
+                            argument.span.clone(),
+                        );
+                        None
+                    }
+                    // lower_place already reported what was wrong
+                    Place::Error => None,
+                    other => {
+                        let slot = match modifier {
+                            // the callee may read before writing, so the
+                            // current value has to be there first
+                            ArgumentModifier::Ref => {
+                                let (value, _) =
+                                    self.read_place(ctx, other.clone(), argument.span.clone())?;
+                                value
+                            }
+                            _ => self.temp_for(parameter_type),
+                        };
+                        Some((slot, Some(other)))
+                    }
+                }
+            }
+            // `out var x` / `out RaycastHit x`: the call site declares the
+            // variable, and its slot is the reference
+            ArgumentValue::Declaration { name, .. } => {
+                let slot = self.temp_for(parameter_type);
+                ctx.locals
+                    .last_mut()
+                    .expect("a scope is open")
+                    .insert(name.value, (slot, parameter_type.clone()));
+                Some((slot, None))
+            }
+            ArgumentValue::Missing => None,
         }
     }
 

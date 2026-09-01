@@ -114,6 +114,11 @@ Rigidbody body = gameObject.GetComponent<Rigidbody>();
 GameObject clone = Instantiate(prefab);
 Instantiate(prefab, position, rotation);   // written in terms of the above
 Destroy(clone, 3f);
+
+if (Physics.Raycast(ray, out RaycastHit hit))   // `out`/`ref` arguments work
+{                                               // on engine methods — Udon
+    Debug.Log(hit.point);                       // externs take every parameter
+}                                               // by heap address anyway
 ```
 
 Udon has no generics, so `GetComponent<T>` is one extern that takes
@@ -161,8 +166,10 @@ wrong thing:
   (`OnPlayerJoined(VRCPlayerApi player)` — the parameterless form works);
 - `[SerializeField]`, `[FieldChangeCallback]`, `[RecursiveMethod]` (purely
   cosmetic attributes like `[Header]` are ignored without complaint);
-- recursion, exceptions, `ref`/`out` arguments, user-defined structs, and
-  `switch` over enum values (enums otherwise work).
+- recursion, exceptions, user-defined structs, and `switch` over enum values
+  (enums otherwise work);
+- `ref`/`out` parameters on methods you define yourself (passing `ref`/`out`
+  *to engine methods* like `Physics.Raycast` works).
 
 ## Links
 

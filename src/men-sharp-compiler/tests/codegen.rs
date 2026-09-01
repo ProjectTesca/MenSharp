@@ -1638,3 +1638,231 @@ fn only_public_fields_become_public_variables() {
     // it still has storage, it is just not part of the surface
     assert!(text.contains("hidden: %SystemInt32"), "{text}");
 }
+
+#[test]
+fn out_arguments_reach_an_extern_and_come_back() {
+    // An extern takes every parameter by heap address, so a variable's own
+    // slot *is* the reference: `int.TryParse(s, out n)` has the extern write
+    // straight into `n`. All three call-site spellings land in the same place.
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int direct;
+                public static int declared;
+                public static int inferred;
+                public static bool ok;
+                public static bool bad;
+                public static void Main()
+                {
+                    int n;
+                    ok = int.TryParse("40", out n);
+                    direct = n;
+                    if (int.TryParse("1", out int m)) { declared = m; }
+                    bad = int.TryParse("not a number", out var broken);
+                    inferred = broken + 1;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "direct"), 40);
+    assert_eq!(int_of(&emulator, "declared"), 1);
+    // TryParse leaves 0 behind on failure
+    assert_eq!(int_of(&emulator, "inferred"), 1);
+    assert!(matches!(
+        emulator.value_of("ok"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("bad"),
+        Some(Value::Boolean(false))
+    ));
+}
+
+#[test]
+fn an_out_argument_writes_back_into_an_array_element() {
+    // an array element has no heap slot of its own, so the extern writes a
+    // stand-in temporary which is then copied home
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int result;
+                public static void Main()
+                {
+                    int[] numbers = new int[2];
+                    int.TryParse("42", out numbers[1]);
+                    result = numbers[1];
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 42);
+}
+
+#[test]
+fn an_out_argument_to_a_source_method_is_an_error() {
+    // two Udon programs (and even two functions in one program) have no shared
+    // frame to pass a reference through — only externs take one
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                private static void Fill(out int x) { x = 1; }
+                public static void Main() { int n; Fill(out n); }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output
+            .errors
+            .iter()
+            .any(|error| error.message.contains("only reach engine methods")),
+        "{:#?}",
+        output.errors
+    );
+}
+
+#[test]
+fn an_out_argument_of_the_wrong_type_does_not_resolve() {
+    // `ref`/`out` write through the reference: no conversion may sit in
+    // between, so `out float` never matches `out int` (§12.6.4.2)
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static void Main()
+                {
+                    float wrong;
+                    int.TryParse("1", out wrong);
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(!bodies.errors.is_empty(), "out float matched out int");
+}
+
+#[test]
+fn a_byref_extern_parameter_is_spelled_with_a_ref_suffix() {
+    // `Physics.Raycast(ray, out hit)`: the whitelist spells the out parameter
+    // with a `Ref` suffix — UnityEngineRaycastHitRef — and the pushed slot is
+    // the destination variable itself
+    let (Some(dotnet), Some(unity)) = (dotnet_shared_dir(), unity_managed_dir()) else {
+        eprintln!("skipped: needs both a .NET runtime and a Unity install");
+        return;
+    };
+    let physics = unity.join("UnityEngine/UnityEngine.PhysicsModule.dll");
+    if !physics.exists() {
+        eprintln!("skipped: no UnityEngine.PhysicsModule.dll");
+        return;
+    }
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dotnet.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+        std::fs::read(physics).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Scanner : MenSharpBehaviour
+            {
+                public Ray ray;
+                public bool hitSomething;
+                public float distance;
+
+                public void Interact()
+                {
+                    if (Physics.Raycast(ray, out RaycastHit hit))
+                    {
+                        hitSomething = true;
+                        distance = hit.distance;
+                    }
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources_for(&references));
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
+    let program = programs
+        .iter()
+        .find(|program| program.class_path == "Game.Scanner")
+        .expect("Game.Scanner");
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    assert!(
+        text.contains(
+            "EXTERN, \"UnityEnginePhysics.__Raycast__UnityEngineRay_\
+             UnityEngineRaycastHitRef__SystemBoolean\""
+        ),
+        "{text}"
+    );
+}

@@ -36,9 +36,10 @@ use men_sharp_asm::{
     DataId, DataSymbol, EntryPoint, HALT_ADDRESS, HeapInit, LabelId, Op, Program, Target,
 };
 use men_sharp_parser::ast::{
-    Argument, ArgumentValue, AssignmentOperator, BinaryOperator, Block, EntityID, Expression,
-    ForInitializer, FunctionBody, InitializerValue, InterpolationPart, LiteralExpression,
-    PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, TypeRefBase, UnaryOperator,
+    Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator, Block, EntityID,
+    Expression, ForInitializer, FunctionBody, InitializerValue, InterpolationPart,
+    LiteralExpression, PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, TypeRefBase,
+    UnaryOperator,
 };
 use men_sharp_semantics::{
     Accessibility, BodyCheck, Declarations, ExternalTypes, FileId, MemberOrigin, MemberSignature,
@@ -255,6 +256,7 @@ impl Piece {
 }
 
 /// An assignable location.
+#[derive(Clone)]
 enum Place {
     Slot(DataId, Type),
     /// `gameObject`/`transform`: a slot Udon fills in with what the behaviour

@@ -2428,6 +2428,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             exact += 1;
                             continue;
                         }
+                        // `ref`/`out` write through the reference, so the types
+                        // must be identical — a conversion would leave the
+                        // callee writing into a slot of the wrong type (§12.6.4.2)
+                        if matches!(
+                            parameter.passing,
+                            ParameterPassing::Ref | ParameterPassing::Out
+                        ) && !matches!(ty, Type::Error)
+                        {
+                            continue 'candidates;
+                        }
                         let system = self.system();
                         let convertible = system
                             .is_implicitly_convertible(ty, &parameter.parameter_type)
