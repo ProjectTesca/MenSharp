@@ -159,6 +159,23 @@ struct Layout {
     slots: HashMap<SymbolId, usize>,
 }
 
+/// One exported event entry: the stub that initializes statics, hands over
+/// the event's arguments and jumps into the method body.
+struct EventEntry {
+    name: String,
+    key: FunctionKey,
+    arguments: Vec<EventArgument>,
+    /// `OnOwnershipRequest`: Udon reads the result back from `__returnValue`.
+    returns_value: bool,
+}
+
+/// One value a built-in event hands over: the stub copies the named slot the
+/// runtime wrote into the function's parameter.
+struct EventArgument {
+    slot: String,
+    udon_type: String,
+}
+
 /// A synthesized virtual-call dispatcher: one per (root method, bindings).
 struct Dispatcher {
     /// The method name used to find overrides on each instantiated subtype.
@@ -360,7 +377,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // ones always, which is also what tests use). A behaviour exports its
         // inherited events too — walking the chain most-derived first means an
         // override claims the event name before the method it overrides.
-        let mut entries = Vec::new();
+        let mut entries: Vec<EventEntry> = Vec::new();
         let mut claimed: HashSet<String> = HashSet::new();
         let classes = if self.entry_chain.is_empty() {
             vec![entry]
@@ -377,9 +394,69 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if !eligible {
                     continue;
                 }
-                let name = udon_event_name(symbol.name);
+                let method_name = symbol.name.to_string();
+                let event = self.nodes.event(&method_name).cloned();
+                let name = match &event {
+                    Some(_) => udon_event_name(&method_name),
+                    None => method_name.clone(),
+                };
                 if !claimed.insert(name.clone()) {
                     continue;
+                }
+                let parameters = match self.signatures.members.get(&member) {
+                    Some(MemberSignature::Function(signature)) => signature.parameters.clone(),
+                    _ => Vec::new(),
+                };
+                let mut arguments = Vec::new();
+                match &event {
+                    // a built-in event may take its documented arguments —
+                    // the runtime writes them into slots named after event and
+                    // parameter before raising it — or none, ignoring them
+                    Some(event) if !parameters.is_empty() => {
+                        let matches = parameters.len() == event.parameters.len()
+                            && parameters.iter().zip(&event.parameters).all(
+                                |(parameter, expected)| {
+                                    self.matches_event_type(
+                                        &parameter.parameter_type,
+                                        &expected.dotnet_type,
+                                    )
+                                },
+                            );
+                        if !matches {
+                            let expected = event
+                                .parameters
+                                .iter()
+                                .map(|parameter| {
+                                    format!("{} {}", parameter.dotnet_type, parameter.name)
+                                })
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            let (file, span) = self.declaration_site(member);
+                            self.errors.push(CodegenError {
+                                message: format!(
+                                    "`{method_name}` is the built-in event `{name}`: declare it \
+                                     with exactly ({expected}), or with no parameters to ignore \
+                                     the event's arguments"
+                                ),
+                                file,
+                                span,
+                            });
+                            continue;
+                        }
+                        for parameter in &event.parameters {
+                            arguments.push(EventArgument {
+                                slot: event_argument_slot(&method_name, &parameter.name),
+                                udon_type: event_slot_type(&parameter.dotnet_type),
+                            });
+                        }
+                    }
+                    // not a built-in event, and takes arguments: no event can
+                    // carry them, so it stays an internal function — exporting
+                    // it would run the body with the arguments never written
+                    None if !parameters.is_empty() => {
+                        continue;
+                    }
+                    _ => {}
                 }
                 let key = FunctionKey {
                     symbol: member,
@@ -387,7 +464,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     bindings: Vec::new(),
                 };
                 self.ensure_function(&key);
-                entries.push((name, key));
+                entries.push(EventEntry {
+                    name,
+                    key,
+                    arguments,
+                    // the one event whose *result* Udon reads back, from
+                    // `__returnValue` (UdonSharp does the same copy)
+                    returns_value: method_name == "OnOwnershipRequest",
+                });
             }
         }
         // a behaviour may legitimately be all public variables and no events —
@@ -436,7 +520,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             sync: None,
         });
 
-        for (name, key) in &entries {
+        for entry in &entries {
+            let name = &entry.name;
+            let key = &entry.key;
             let label = self.program.add_label(format!("event_{name}"));
             self.program.entry_points.push(EntryPoint {
                 name: name.clone(),
@@ -461,13 +547,57 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .push(Op::JumpIfFalse(Target::Label(init_label)));
             self.program.code.push(Op::Label(continue_label));
 
+            // the event's arguments: the runtime wrote them into the named
+            // slots before raising the event; hand them to the function
             let function = &self.functions[key];
-            let (callee_return, callee_label) = (function.return_slot, function.label);
-            let halt = self.code_address_constant(format!("__halt_{name}"), None);
-            self.copy(halt, callee_return);
-            self.program
-                .code
-                .push(Op::Jump(Target::Label(callee_label)));
+            let offset = function.parameters.len() - entry.arguments.len();
+            let parameter_slots: Vec<DataId> = function.parameters[offset..].to_vec();
+            for (argument, parameter) in entry.arguments.iter().zip(parameter_slots) {
+                let slot = self.program.add_data(DataSymbol {
+                    name: argument.slot.clone(),
+                    udon_type: argument.udon_type.clone(),
+                    init: HeapInit::Null,
+                    export: false,
+                    sync: None,
+                });
+                self.copy(slot, parameter);
+            }
+
+            let function = &self.functions[key];
+            let (callee_return, callee_label, callee_result) =
+                (function.return_slot, function.label, function.result);
+            match callee_result.filter(|_| entry.returns_value) {
+                Some(result) => {
+                    // Udon reads the event's result from `__returnValue` once
+                    // the body finishes — so return here, copy it over, halt
+                    let done = self.program.add_label(format!("event_{name}__done"));
+                    let return_to_stub =
+                        self.code_address_constant(format!("__ret_body_{name}"), Some(done));
+                    self.copy(return_to_stub, callee_return);
+                    self.program
+                        .code
+                        .push(Op::Jump(Target::Label(callee_label)));
+                    self.program.code.push(Op::Label(done));
+                    let return_value = self.program.add_data(DataSymbol {
+                        name: "__returnValue".into(),
+                        udon_type: "SystemObject".into(),
+                        init: HeapInit::Null,
+                        export: false,
+                        sync: None,
+                    });
+                    self.copy(result, return_value);
+                    self.program
+                        .code
+                        .push(Op::Jump(Target::Address(HALT_ADDRESS)));
+                }
+                None => {
+                    let halt = self.code_address_constant(format!("__halt_{name}"), None);
+                    self.copy(halt, callee_return);
+                    self.program
+                        .code
+                        .push(Op::Jump(Target::Label(callee_label)));
+                }
+            }
         }
 
         // the shared static initializer body
@@ -916,6 +1046,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             _ => "SystemObject".into(),
         }
+    }
+
+    /// Does this M# type name the same thing as an event parameter's .NET
+    /// full name? Arrays compare structurally: `[]` would vanish in the
+    /// name mangling and collide with the element type.
+    fn matches_event_type(&self, ty: &Type, dotnet: &str) -> bool {
+        if let Some(element_name) = dotnet.strip_suffix("[]") {
+            if let Type::Array { element, rank: 1 } = ty {
+                return self.matches_event_type(element, element_name);
+            }
+            return false;
+        }
+        self.extern_type_name(ty)
+            .is_some_and(|name| name == mangle_dotnet_name(dotnet))
     }
 
     /// The type's spelling inside an extern signature; `None` when the type
@@ -1727,57 +1871,46 @@ pub fn behaviour_classes(declarations: &Declarations, signatures: &Signatures) -
 
 /// Unity/VRChat lifecycle methods map to Udon's built-in event names; other
 /// method names become custom events verbatim.
+/// `OnPlayerJoined` → `_onPlayerJoined`: Udon spells its built-in events as
+/// the method name with a leading underscore and a lower-case first letter.
+/// Which names get this treatment is decided by the SDK dump's `Event_` nodes
+/// (`UdonNodes::event`): everything else is a custom event under its own
+/// name, and silently rewriting an unknown `OnSomething` would produce an
+/// event nothing ever raises.
 fn udon_event_name(name: &str) -> String {
-    // Udon spells its built-in events as the Unity/VRChat method name with a
-    // leading underscore and a lower-case first letter. Only names on this list
-    // get that treatment: everything else is a custom event under its own name,
-    // and silently rewriting an unknown `OnSomething` would produce an event
-    // nothing ever raises.
-    const EVENTS: &[&str] = &[
-        // Unity lifecycle
-        "Start",
-        "Update",
-        "LateUpdate",
-        "FixedUpdate",
-        "OnEnable",
-        "OnDisable",
-        "OnDestroy",
-        // interaction and pickups
-        "Interact",
-        "OnPickup",
-        "OnDrop",
-        "OnPickupUseDown",
-        "OnPickupUseUp",
-        // players
-        "OnPlayerJoined",
-        "OnPlayerLeft",
-        "OnPlayerRespawn",
-        "OnSpawn",
-        "OnStationEntered",
-        "OnStationExited",
-        "OnMasterTransferred",
-        // networking
-        "OnPreSerialization",
-        "OnDeserialization",
-        "OnPostSerialization",
-        "OnOwnershipRequest",
-        "OnOwnershipTransferred",
-        // video players
-        "OnVideoStart",
-        "OnVideoEnd",
-        "OnVideoError",
-        "OnVideoLoop",
-        "OnVideoPause",
-        "OnVideoPlay",
-        "OnVideoReady",
-    ];
-    if !EVENTS.contains(&name) {
-        return name.to_string();
-    }
     let mut characters = name.chars();
     match characters.next() {
         Some(first) => format!("_{}{}", first.to_lowercase(), characters.as_str()),
         None => name.to_string(),
+    }
+}
+
+/// The heap slot the runtime writes one event argument into before raising
+/// the event: lower-cased event name plus upper-cased parameter name
+/// (`OnPlayerJoined`, `player` → `onPlayerJoinedPlayer`) — the same names
+/// Udon graphs and UdonSharp read.
+fn event_argument_slot(event: &str, parameter: &str) -> String {
+    let mut slot = String::new();
+    let mut characters = event.chars();
+    if let Some(first) = characters.next() {
+        slot.extend(first.to_lowercase());
+        slot.push_str(characters.as_str());
+    }
+    let mut characters = parameter.chars();
+    if let Some(first) = characters.next() {
+        slot.extend(first.to_uppercase());
+        slot.push_str(characters.as_str());
+    }
+    slot
+}
+
+/// The declared Udon heap type for an event argument's .NET type. Arrays are
+/// spelled out here — `[]` has no alphanumeric characters, so the general
+/// mangling would silently collide with the element type.
+fn event_slot_type(dotnet: &str) -> String {
+    match dotnet.strip_suffix("[]") {
+        Some(element) => format!("{}Array", mangle_dotnet_name(element)),
+        None => mangle_dotnet_name(dotnet),
     }
 }
 

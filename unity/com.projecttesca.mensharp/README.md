@@ -47,8 +47,26 @@ swap or delete a behaviour and the program that went with it goes too.
 ## Events
 
 Method names Udon knows (`Start`, `Update`, `Interact`, `OnPlayerJoined`,
-`OnDeserialization`, ...) become Udon events. Every other public method becomes
-a custom event under its own name, which is what `SendCustomEvent` raises.
+`OnDeserialization`, ...) become Udon events — the full set comes from the
+SDK's own event list. Every other parameterless public method becomes a custom
+event under its own name, which is what `SendCustomEvent` raises.
+
+Events that carry arguments work by declaring the documented parameters:
+
+```csharp
+public void OnPlayerJoined(VRCPlayerApi player)
+{
+    Debug.Log($"{player.displayName} joined");
+}
+
+public void OnPlayerTriggerEnter(VRCPlayerApi player) { ... }
+public void MidiNoteOn(int channel, int number, int velocity) { ... }
+```
+
+Declare them exactly as documented or with no parameters at all (to ignore the
+arguments); anything in between is a compile error, because Unity fires the
+event by name regardless and the mismatched parameters would silently stay
+unset.
 
 ## Networking
 
@@ -162,8 +180,6 @@ the variables, and both run. The inspector says so when it happens.
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- reading the arguments of the VRChat events that take them
-  (`OnPlayerJoined(VRCPlayerApi player)` — the parameterless form works);
 - `[SerializeField]`, `[FieldChangeCallback]`, `[RecursiveMethod]` (purely
   cosmetic attributes like `[Header]` are ignored without complaint);
 - recursion, exceptions, user-defined structs, and `switch` over enum values

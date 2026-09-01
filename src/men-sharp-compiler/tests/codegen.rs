@@ -1866,3 +1866,153 @@ fn a_byref_extern_parameter_is_spelled_with_a_ref_suffix() {
         "{text}"
     );
 }
+
+#[test]
+fn a_built_in_event_receives_its_arguments() {
+    // Before raising `_midiNoteOn`, the runtime writes each argument into the
+    // slot named after event and parameter (midiNoteOnChannel, ...); the
+    // entry stub hands them to the method as its parameters.
+    let Some(dir) = dotnet_shared_dir() else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int seenChannel;
+                public static int seenNumber;
+                public static int seenVelocity;
+
+                public static void MidiNoteOn(int channel, int number, int velocity)
+                {
+                    seenChannel = channel;
+                    seenNumber = number;
+                    seenVelocity = velocity;
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        output.errors
+    );
+
+    let text = output.program.to_uasm().unwrap();
+    assert!(text.contains(".export _midiNoteOn"), "{text}");
+    assert!(text.contains("midiNoteOnChannel: %SystemInt32"), "{text}");
+
+    let assembled = output.program.assemble().unwrap();
+    let mut emulator = Emulator::new(&output.program, &assembled);
+    assert!(emulator.set_value("midiNoteOnChannel", Value::Int32(9)));
+    assert!(emulator.set_value("midiNoteOnNumber", Value::Int32(60)));
+    assert!(emulator.set_value("midiNoteOnVelocity", Value::Int32(127)));
+    emulator
+        .run(&assembled, "_midiNoteOn")
+        .unwrap_or_else(|error| panic!("emulator error: {error:?}\n{}", output.program.dump()));
+    assert_eq!(int_of(&emulator, "seenChannel"), 9);
+    assert_eq!(int_of(&emulator, "seenNumber"), 60);
+    assert_eq!(int_of(&emulator, "seenVelocity"), 127);
+}
+
+#[test]
+fn an_event_with_the_wrong_parameters_is_an_error() {
+    // Unity fires an event named like a built-in regardless of its parameter
+    // list, so a mismatch would run with unset values — U# refuses it, and so
+    // does this compiler
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static void MidiNoteOn(int channel) { }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output
+            .errors
+            .iter()
+            .any(|error| error.message.contains("built-in event `_midiNoteOn`")),
+        "{:#?}",
+        output.errors
+    );
+}
+
+#[test]
+fn a_parameterized_method_is_not_an_event() {
+    // no event can carry arguments to it, so exporting it would run the body
+    // with the parameters never written — it stays an internal function
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        public int total;
+                        public void Interact() { TakeDamage(5); }
+                        public void TakeDamage(int amount) { total += amount; }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    assert!(text.contains(".export _interact"), "{text}");
+    assert!(!text.contains(".export TakeDamage"), "{text}");
+}

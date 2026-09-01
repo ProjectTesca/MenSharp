@@ -1683,7 +1683,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return Piece::Error;
         }
 
-        let event = self.string_constant(&udon_event_name(&name));
+        // raising a built-in event on the other behaviour goes by its Udon
+        // spelling; a custom event goes by the method's own name
+        let event_name = if self.nodes.event(&name).is_some() {
+            udon_event_name(&name)
+        } else {
+            name.clone()
+        };
+        let event = self.string_constant(&event_name);
         self.call_extern(
             ctx,
             "VRCUdonCommonInterfacesIUdonEventReceiver\

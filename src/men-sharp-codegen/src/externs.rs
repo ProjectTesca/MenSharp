@@ -34,10 +34,28 @@ pub struct ExternNode {
     pub parameters: Vec<ParameterKind>,
 }
 
+/// One value a built-in event hands to the program: before raising the event,
+/// the runtime writes it into the heap slot named after event and parameter
+/// (`onPlayerJoined` + `Player` → `onPlayerJoinedPlayer`).
+#[derive(Debug, Clone)]
+pub struct EventParameter {
+    pub name: String,
+    /// The .NET full name, as the dump spells it (`VRC.SDKBase.VRCPlayerApi`).
+    pub dotnet_type: String,
+}
+
+/// A built-in event (`Event_OnPlayerJoined`, stored without the prefix).
+#[derive(Debug, Clone)]
+pub struct EventNode {
+    pub parameters: Vec<EventParameter>,
+}
+
 /// The whitelist for one Unity version.
 pub struct UdonNodes {
     pub unity_version: String,
     externs: HashMap<String, ExternNode>,
+    /// Built-in events by their `Event_`-less name (`OnPlayerJoined`).
+    events: HashMap<String, EventNode>,
     /// Mangled names of types the heap can declare (`Type_…` nodes).
     types: std::collections::HashSet<String>,
 }
@@ -60,6 +78,11 @@ impl UdonNodes {
 
     pub fn extern_node(&self, signature: &str) -> Option<&ExternNode> {
         self.externs.get(signature)
+    }
+
+    /// The built-in event a method of this name would handle, if any.
+    pub fn event(&self, name: &str) -> Option<&EventNode> {
+        self.events.get(name)
     }
 
     pub fn has_signature(&self, signature: &str) -> bool {
@@ -112,6 +135,7 @@ fn parse_dump(version: &str, json: &str) -> UdonNodes {
     let mut nodes = UdonNodes {
         unity_version: version.to_string(),
         externs: HashMap::new(),
+        events: HashMap::new(),
         types: std::collections::HashSet::new(),
     };
 
@@ -178,35 +202,78 @@ fn parse_node(reader: &mut Reader, nodes: &mut UdonNodes) {
     }
     reader.expect(b'}');
 
-    // extern-shaped names carry a `__`; the rest are graph-editor nodes
-    // (Branch, Event_…, Const_…, Type_…) that codegen never emits — but the
-    // `Type_` ones do tell us which types the heap may declare.
+    // extern-shaped names carry a `__`; `Event_` names are the built-in
+    // events; the rest are graph-editor nodes (Branch, Const_…, Type_…) that
+    // codegen never emits — but the `Type_` ones do tell us which types the
+    // heap may declare.
     if full_name.contains(".__") {
-        nodes.externs.insert(full_name, ExternNode { parameters });
+        nodes.externs.insert(
+            full_name,
+            ExternNode {
+                parameters: parameters.iter().map(|parameter| parameter.kind).collect(),
+            },
+        );
+    } else if let Some(event_name) = full_name.strip_prefix("Event_") {
+        // Only what the *runtime* raises. The Custom family is the graph's
+        // SendCustomEvent node, and an event with an IN parameter is a node
+        // configuration (OnVariableChange's variable name), not a value the
+        // runtime hands to the program.
+        let runtime_event = event_name != "Custom"
+            && !event_name.starts_with("Custom_")
+            && parameters
+                .iter()
+                .all(|parameter| parameter.kind == ParameterKind::Out);
+        if runtime_event {
+            let parameters = parameters
+                .into_iter()
+                .filter_map(|parameter| match (parameter.name, parameter.dotnet_type) {
+                    (Some(name), Some(dotnet_type)) => Some(EventParameter { name, dotnet_type }),
+                    _ => None,
+                })
+                .collect();
+            nodes
+                .events
+                .insert(event_name.to_string(), EventNode { parameters });
+        }
     } else if let Some(type_name) = full_name.strip_prefix("Type_") {
         nodes.types.insert(type_name.to_string());
     }
 }
 
-fn parse_parameter(reader: &mut Reader) -> ParameterKind {
-    let mut kind = ParameterKind::In;
+struct ParsedParameter {
+    name: Option<String>,
+    dotnet_type: Option<String>,
+    kind: ParameterKind,
+}
+
+fn parse_parameter(reader: &mut Reader) -> ParsedParameter {
+    let mut parameter = ParsedParameter {
+        name: None,
+        dotnet_type: None,
+        kind: ParameterKind::In,
+    };
     reader.expect(b'{');
     loop {
         let key = reader.string();
         reader.expect(b':');
         match key.as_str() {
             "kind" => {
-                kind = match reader.string().as_str() {
+                parameter.kind = match reader.string().as_str() {
                     "IN" => ParameterKind::In,
                     "OUT" => ParameterKind::Out,
                     "IN_OUT" => ParameterKind::InOut,
                     other => panic!("unexpected parameter kind {other:?}"),
                 };
             }
-            "name" | "type" => {
-                // may be the literal `null`
+            // either may be the literal `null`
+            "name" => {
                 if !reader.consume_null() {
-                    reader.string();
+                    parameter.name = Some(reader.string());
+                }
+            }
+            "type" => {
+                if !reader.consume_null() {
+                    parameter.dotnet_type = Some(reader.string());
                 }
             }
             other => panic!("unexpected parameter key {other:?}"),
@@ -216,7 +283,7 @@ fn parse_parameter(reader: &mut Reader) -> ParameterKind {
         }
     }
     reader.expect(b'}');
-    kind
+    parameter
 }
 
 struct Reader<'a> {
