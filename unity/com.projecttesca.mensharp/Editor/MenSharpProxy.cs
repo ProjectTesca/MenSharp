@@ -439,15 +439,42 @@ public static class MenSharpProxy
         return paired;
     }
 
-    /// Copies the proxy's public instance fields into the UdonBehaviour's
+    /// The fields Unity serializes on the proxy — public ones plus
+    /// `[SerializeField]`, minus `[NonSerialized]` — which is also exactly
+    /// what the compiler exports. Walked class by class because GetFields
+    /// never returns a base class's private fields.
+    private static IEnumerable<FieldInfo> SerializedFields(Type type)
+    {
+        for (Type current = type;
+            current != null
+                && current != typeof(MenSharpBehaviour)
+                && current != typeof(MonoBehaviour);
+            current = current.BaseType)
+        {
+            foreach (FieldInfo field in current.GetFields(
+                BindingFlags.Public | BindingFlags.NonPublic
+                | BindingFlags.Instance | BindingFlags.DeclaredOnly))
+            {
+                if (field.IsDefined(typeof(NonSerializedAttribute), false))
+                {
+                    continue;
+                }
+                if (!field.IsPublic && !field.IsDefined(typeof(SerializeField), false))
+                {
+                    continue;
+                }
+                yield return field;
+            }
+        }
+    }
+
+    /// Copies the proxy's serialized instance fields into the UdonBehaviour's
     /// public variable table — the values the Udon heap starts from.
     public static void TransferValues(MenSharpBehaviour proxy, UdonBehaviour udon)
     {
         IUdonVariableTable table = udon.publicVariables;
         var summary = new System.Text.StringBuilder();
-        foreach (FieldInfo field in proxy
-            .GetType()
-            .GetFields(BindingFlags.Public | BindingFlags.Instance))
+        foreach (FieldInfo field in SerializedFields(proxy.GetType()))
         {
             object value = field.GetValue(proxy);
             Type valueType = field.FieldType;

@@ -2016,3 +2016,141 @@ fn a_parameterized_method_is_not_an_event() {
     assert!(text.contains(".export _interact"), "{text}");
     assert!(!text.contains(".export TakeDamage"), "{text}");
 }
+
+#[test]
+fn serialize_field_exports_a_private_field() {
+    // Unity's own serialization rule, which is also what UdonSharp exports:
+    // `public` opts in, `[SerializeField]` opts a private field in,
+    // `[NonSerialized]` opts a public field out
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Spawner : MenSharp.MenSharpBehaviour
+                    {
+                        [SerializeField] private int hidden = 3;
+                        [NonSerialized] public int scratch;
+                        public int shown;
+                        public void Interact() { shown = hidden + scratch; }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Spawner",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    assert!(text.contains("    .export hidden"), "{text}");
+    assert!(text.contains("    .export shown"), "{text}");
+    assert!(!text.contains(".export scratch"), "{text}");
+}
+
+#[test]
+fn a_field_change_callback_routes_the_write_through_the_setter() {
+    // the runtime writes the new value into the field, the previous one into
+    // `_old_<slot>`, and raises `_onVarChange_<slot>`; the stub hands the new
+    // value to the property setter with the field restored to its old value
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        [SerializeField] [FieldChangeCallback(nameof(Level))]
+                        private int _level;
+                        public int delta;
+
+                        public int Level
+                        {
+                            get { return _level; }
+                            set { delta = value - _level; _level = value; }
+                        }
+
+                        public void Interact() { }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    assert!(text.contains(".export _onVarChange__level"), "{text}");
+    assert!(text.contains("_old__level: %SystemInt32"), "{text}");
+
+    let assembled = program.output.program.assemble().unwrap();
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    // what the runtime does before raising the event
+    assert!(emulator.set_value("_level", Value::Int32(7)));
+    assert!(emulator.set_value("_old__level", Value::Int32(3)));
+    emulator
+        .run(&assembled, "_onVarChange__level")
+        .unwrap_or_else(|error| {
+            panic!(
+                "emulator error: {error:?}\n{}",
+                program.output.program.dump()
+            )
+        });
+    // delta = new - old proves the setter saw the field's OLD value
+    assert_eq!(int_of(&emulator, "delta"), 4);
+    assert_eq!(int_of(&emulator, "_level"), 7);
+}
+
+#[test]
+fn a_field_change_callback_without_the_property_is_an_error() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "test.cs",
+                r#"
+                namespace Game
+                {
+                    public class Door : MenSharp.MenSharpBehaviour
+                    {
+                        [FieldChangeCallback("Missing")] public int value;
+                        public void Interact() { }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program
+            .output
+            .errors
+            .iter()
+            .any(|error| error.message.contains("no property of that name")),
+        "{:#?}",
+        program.output.errors
+    );
+}

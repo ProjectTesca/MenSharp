@@ -101,6 +101,28 @@ so you can see what is synced without reading the generated assembly.
 `RequestSerialization()` and `SendCustomEvent(name)` are externs on the
 behaviour itself.
 
+Which fields the inspector shows (and the program exports) follows Unity's own
+serialization rule: `public` opts in, `[SerializeField]` opts a private field
+in, `[NonSerialized]` opts a public field out.
+
+To *react* to a variable changing — arriving over the network, or written by
+another program — route it through a property:
+
+```csharp
+[UdonSynced] [FieldChangeCallback(nameof(Level))]
+private int _level;
+
+public int Level
+{
+    get => _level;
+    set { _level = value; UpdateDisplay(); }
+}
+```
+
+External writes to `_level` run the `Level` setter with the written value (the
+field still holds the old one, so the setter can compare). Writes from your
+own code go to the field directly, as in UdonSharp.
+
 ## Talking to another behaviour
 
 ```csharp

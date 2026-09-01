@@ -82,13 +82,30 @@ public class MenSharpBehaviourEditor : Editor
     {
         foreach (UnityEngine.Object each in targets)
         {
-            FieldInfo field = each
-                .GetType()
-                .GetField(property.name, BindingFlags.Public | BindingFlags.Instance);
-            var synced = field?.GetCustomAttribute<UdonSyncedAttribute>();
+            var synced = FindField(each.GetType(), property.name)
+                ?.GetCustomAttribute<UdonSyncedAttribute>();
             if (synced != null)
             {
                 return synced.Mode.ToString();
+            }
+        }
+        return null;
+    }
+
+    /// GetField, except it also finds a `[SerializeField]` private field
+    /// declared on a base class — which the inspector does serialize and
+    /// GetField never returns.
+    private static FieldInfo FindField(Type type, string name)
+    {
+        for (Type current = type; current != null; current = current.BaseType)
+        {
+            FieldInfo field = current.GetField(
+                name,
+                BindingFlags.Public | BindingFlags.NonPublic
+                | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            if (field != null)
+            {
+                return field;
             }
         }
         return null;

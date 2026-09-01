@@ -55,4 +55,19 @@ namespace MenSharp
 
         public BehaviourSyncMode Mode { get; }
     }
+
+    /// Routes external writes to this field — `SetProgramVariable` from
+    /// another program, or network sync — through the named property's
+    /// setter instead of landing silently. Writes from your own code go to
+    /// the field directly, as in UdonSharp.
+    [AttributeUsage(AttributeTargets.Field)]
+    public class FieldChangeCallbackAttribute : Attribute
+    {
+        public FieldChangeCallbackAttribute(string callbackPropertyName)
+        {
+            CallbackPropertyName = callbackPropertyName;
+        }
+
+        public string CallbackPropertyName { get; }
+    }
 }

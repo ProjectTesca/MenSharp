@@ -36,8 +36,8 @@ use men_sharp_asm::{
     DataId, DataSymbol, EntryPoint, HALT_ADDRESS, HeapInit, LabelId, Op, Program, Target,
 };
 use men_sharp_parser::ast::{
-    Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator, Block, EntityID,
-    Expression, ForInitializer, FunctionBody, InitializerValue, InterpolationPart,
+    AccessorKind, Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator,
+    Block, EntityID, Expression, ForInitializer, FunctionBody, InitializerValue, InterpolationPart,
     LiteralExpression, PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, TypeRefBase,
     UnaryOperator,
 };
@@ -157,6 +157,18 @@ struct Layout {
     size: usize,
     /// Field or auto-property symbol → element index.
     slots: HashMap<SymbolId, usize>,
+}
+
+/// One `[FieldChangeCallback]` field: the `_onVarChange_<slot>` entry the
+/// runtime raises when `SetProgramVariable` or network sync writes the field.
+struct FieldCallback {
+    /// `_onVarChange_<slot>`.
+    name: String,
+    field_slot: DataId,
+    /// `_old_<slot>` — where the runtime leaves the previous value.
+    old_slot_name: String,
+    udon_type: String,
+    setter: FunctionKey,
 }
 
 /// One exported event entry: the stub that initializes statics, hands over
@@ -474,6 +486,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 });
             }
         }
+        // `[FieldChangeCallback]` fields each get an `_onVarChange_…` entry;
+        // collected before the queue drains so their setters get compiled
+        let callbacks = self.collect_field_callbacks();
+
         // a behaviour may legitimately be all public variables and no events —
         // an explicit entry class was asked for by name, so it must have one
         if entries.is_empty() && self.entry_class.is_none() {
@@ -523,29 +539,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         for entry in &entries {
             let name = &entry.name;
             let key = &entry.key;
-            let label = self.program.add_label(format!("event_{name}"));
-            self.program.entry_points.push(EntryPoint {
-                name: name.clone(),
-                label,
-            });
-            self.program.code.push(Op::Label(label));
-
-            // prime the initializer's return address, then jump into it
-            // unless statics are already initialized
-            let continue_label = self.program.add_label(format!("event_{name}__init_done"));
-            let return_constant = self.program.add_data(DataSymbol {
-                name: format!("__ret_event_{name}"),
-                udon_type: "SystemUInt32".into(),
-                init: HeapInit::CodeAddress(continue_label),
-                export: false,
-                sync: None,
-            });
-            self.copy(return_constant, init_return);
-            self.program.code.push(Op::Push(initialized));
-            self.program
-                .code
-                .push(Op::JumpIfFalse(Target::Label(init_label)));
-            self.program.code.push(Op::Label(continue_label));
+            self.begin_entry_stub(name, init_label, init_return, initialized);
 
             // the event's arguments: the runtime wrote them into the named
             // slots before raising the event; hand them to the function
@@ -600,10 +594,239 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
         }
 
+        for callback in &callbacks {
+            self.begin_entry_stub(&callback.name, init_label, init_return, initialized);
+            let function = &self.functions[&callback.setter];
+            let (setter_label, setter_return, parameter) = (
+                function.label,
+                function.return_slot,
+                function.parameters.last().copied(),
+            );
+            let Some(parameter) = parameter else {
+                // a setter always takes its value; nothing sane to do without
+                continue;
+            };
+            // the runtime already wrote the new value into the field and the
+            // previous one into `_old_…`: hand the new value to the setter,
+            // put the old value back, and let the setter decide what sticks
+            self.copy(callback.field_slot, parameter);
+            let old = self.program.add_data(DataSymbol {
+                name: callback.old_slot_name.clone(),
+                udon_type: callback.udon_type.clone(),
+                init: HeapInit::Null,
+                export: false,
+                sync: None,
+            });
+            self.copy(old, callback.field_slot);
+            let halt = self.code_address_constant(format!("__halt_{}", callback.name), None);
+            self.copy(halt, setter_return);
+            self.program
+                .code
+                .push(Op::Jump(Target::Label(setter_label)));
+        }
+
         // the shared static initializer body
         self.emit_static_initializer(init_label, init_return, initialized);
 
         self.check_for_recursion();
+    }
+
+    /// Opens one exported entry point: label, `.export`, and the check that
+    /// runs the static initializer once before anything else.
+    fn begin_entry_stub(
+        &mut self,
+        name: &str,
+        init_label: LabelId,
+        init_return: DataId,
+        initialized: DataId,
+    ) {
+        let label = self.program.add_label(format!("event_{name}"));
+        self.program.entry_points.push(EntryPoint {
+            name: name.to_string(),
+            label,
+        });
+        self.program.code.push(Op::Label(label));
+
+        // prime the initializer's return address, then jump into it
+        // unless statics are already initialized
+        let continue_label = self.program.add_label(format!("event_{name}__init_done"));
+        let return_constant = self.program.add_data(DataSymbol {
+            name: format!("__ret_event_{name}"),
+            udon_type: "SystemUInt32".into(),
+            init: HeapInit::CodeAddress(continue_label),
+            export: false,
+            sync: None,
+        });
+        self.copy(return_constant, init_return);
+        self.program.code.push(Op::Push(initialized));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(init_label)));
+        self.program.code.push(Op::Label(continue_label));
+    }
+
+    /// `[FieldChangeCallback(nameof(Prop))]` on behaviour fields: when
+    /// `SetProgramVariable` or network sync writes the field, the runtime
+    /// leaves the previous value in `_old_<slot>` and raises
+    /// `_onVarChange_<slot>` — one entry per such field, validated the way
+    /// UdonSharp validates them.
+    fn collect_field_callbacks(&mut self) -> Vec<FieldCallback> {
+        let mut callbacks = Vec::new();
+        let mut claimed: HashSet<SymbolId> = HashSet::new();
+        for class in self.entry_chain.clone() {
+            let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
+            for member in members {
+                let symbol = self.declarations.table.symbol(member);
+                if symbol.kind != SymbolKind::Field || symbol.is_static {
+                    continue;
+                }
+                let Some(property_name) = self.field_change_callback_of(member) else {
+                    continue;
+                };
+                let (file, span) = self.declaration_site(member);
+                // the property may live anywhere in the chain, like any member
+                let property = self
+                    .entry_chain
+                    .clone()
+                    .into_iter()
+                    .flat_map(|class| {
+                        self.declarations
+                            .table
+                            .symbol(class)
+                            .members_named(&property_name)
+                            .to_vec()
+                    })
+                    .find(|&candidate| {
+                        self.declarations.table.symbol(candidate).kind == SymbolKind::Property
+                    });
+                let Some(property) = property else {
+                    self.errors.push(CodegenError {
+                        message: format!(
+                            "`[FieldChangeCallback]` names `{property_name}`, but this \
+                             behaviour has no property of that name"
+                        ),
+                        file,
+                        span,
+                    });
+                    continue;
+                };
+                if !self.property_has_setter(property) {
+                    self.errors.push(CodegenError {
+                        message: format!(
+                            "`{property_name}` has no setter — the callback is a call to \
+                             it with the value that was written"
+                        ),
+                        file,
+                        span,
+                    });
+                    continue;
+                }
+                let field_type = self.signatures.members.get(&member);
+                let property_type = self.signatures.members.get(&property);
+                let types_match = matches!(
+                    (field_type, property_type),
+                    (
+                        Some(MemberSignature::Field(field)),
+                        Some(MemberSignature::Property(property))
+                    ) if field == property
+                );
+                if !types_match {
+                    self.errors.push(CodegenError {
+                        message: format!(
+                            "`{property_name}` must have the same type as the field: its \
+                             setter receives the value that was written"
+                        ),
+                        file,
+                        span,
+                    });
+                    continue;
+                }
+                if !claimed.insert(property) {
+                    self.errors.push(CodegenError {
+                        message: format!(
+                            "two fields point their `[FieldChangeCallback]` at \
+                             `{property_name}`; a change could not say which field it was"
+                        ),
+                        file,
+                        span,
+                    });
+                    continue;
+                }
+                let Some(slot) = self.statics.get(&member).copied() else {
+                    continue;
+                };
+                let slot_name = self.program.data[slot.0].name.clone();
+                let udon_type = self.program.data[slot.0].udon_type.clone();
+                let setter = FunctionKey {
+                    symbol: property,
+                    role: Role::Setter,
+                    bindings: Vec::new(),
+                };
+                self.ensure_function(&setter);
+                callbacks.push(FieldCallback {
+                    name: format!("_onVarChange_{slot_name}"),
+                    field_slot: slot,
+                    old_slot_name: format!("_old_{slot_name}"),
+                    udon_type,
+                    setter,
+                });
+            }
+        }
+        callbacks
+    }
+
+    /// The property name from `[FieldChangeCallback(nameof(Prop))]` (or a
+    /// plain string), `None` when the member has no such attribute.
+    fn field_change_callback_of(&mut self, member: SymbolId) -> Option<String> {
+        for sections in self.attribute_sections(member) {
+            for attribute in sections.iter().flat_map(|section| section.attributes) {
+                let name = attribute_name(attribute)
+                    .map(|spelling| spelling.strip_suffix("Attribute").unwrap_or(spelling));
+                if name != Some("FieldChangeCallback") {
+                    continue;
+                }
+                let spelling = attribute
+                    .arguments
+                    .as_ref()
+                    .and_then(|list| list.arguments.first())
+                    .and_then(|argument| match &argument.value {
+                        ArgumentValue::Expression(expression) => string_literal_of(expression)
+                            .or_else(|| nameof_argument(expression).map(str::to_string)),
+                        _ => None,
+                    });
+                if spelling.is_none() {
+                    let (file, span) = self.declaration_site(member);
+                    self.errors.push(CodegenError {
+                        message: "`[FieldChangeCallback]` takes the property to call: write \
+                                  `[FieldChangeCallback(nameof(Property))]`"
+                            .into(),
+                        file,
+                        span,
+                    });
+                }
+                return spelling;
+            }
+        }
+        None
+    }
+
+    /// Does this source property declare a `set` accessor?
+    fn property_has_setter(&self, property: SymbolId) -> bool {
+        self.declarations
+            .table
+            .symbol(property)
+            .declarations
+            .iter()
+            .any(|site| match &site.syntax {
+                SyntaxRef::Property(property) => match &property.body {
+                    FunctionBody::Accessors(accessors) => accessors
+                        .accessors
+                        .iter()
+                        .any(|accessor| accessor.kind.value == AccessorKind::Set),
+                    _ => false,
+                },
+                _ => false,
+            })
     }
 
     /// `JUMP_INDIRECT` on a constant that resolves to `HALT_ADDRESS` (or a
@@ -1414,13 +1637,34 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     /// Does this behaviour member become a public variable — something the
-    /// inspector shows and anything on the network may write? Only what the
-    /// source made `public`. A private field is an implementation detail:
-    /// exporting it would put it in the UdonBehaviour's variable table, where
-    /// it can be overwritten by everything from the inspector to another
-    /// program, which is precisely what `private` says it is not.
+    /// inspector shows, the proxy's values transfer into, and anything on the
+    /// network may write? The rule is Unity's own serialization rule, which
+    /// is also what UdonSharp exports: `public` opts in, `[SerializeField]`
+    /// opts a non-public field in, `[NonSerialized]` opts a public field out.
+    /// A plain private field is an implementation detail: exporting it would
+    /// put it in the UdonBehaviour's variable table, where it can be
+    /// overwritten by everything from the inspector to another program.
     pub(super) fn is_public_variable(&self, member: SymbolId) -> bool {
+        if self.has_attribute(member, "NonSerialized") {
+            return false;
+        }
         self.declarations.table.symbol(member).accessibility == Accessibility::Public
+            || self.has_attribute(member, "SerializeField")
+    }
+
+    /// Is an attribute of this name (with or without the `Attribute` suffix)
+    /// written on the member? By spelling, like every attribute here.
+    fn has_attribute(&self, member: SymbolId, name: &str) -> bool {
+        self.attribute_sections(member).iter().any(|sections| {
+            sections
+                .iter()
+                .flat_map(|section| section.attributes)
+                .any(|attribute| {
+                    attribute_name(attribute)
+                        .map(|spelling| spelling.strip_suffix("Attribute").unwrap_or(spelling))
+                        == Some(name)
+                })
+        })
     }
 
     /// Where a symbol was declared, for diagnostics that have no expression to
@@ -1746,6 +1990,25 @@ fn string_literal_of<'a>(expression: &'a Expression<'a, 'a>) -> Option<String> {
 /// The last identifier in an expression written as a name (`UdonSyncMode.Linear`
 /// -> `Linear`). Attribute arguments are never type-checked, so this reads the
 /// syntax; anything else returns `None` and is reported by the caller.
+/// The name inside `nameof(...)`, when the expression is exactly that.
+/// Attributes are read off the syntax, so the operand is a spelling here, not
+/// a resolved member.
+fn nameof_argument<'a>(expression: &'a Expression<'a, 'a>) -> Option<&'a str> {
+    let Expression::Primary(primary) = expression else {
+        return None;
+    };
+    if !primary.chain.is_empty() {
+        return None;
+    }
+    let PrimaryLeft::Nameof {
+        value: Ok(value), ..
+    } = &primary.left
+    else {
+        return None;
+    };
+    last_name_of(value)
+}
+
 fn last_name_of<'a>(expression: &'a Expression<'a, 'a>) -> Option<&'a str> {
     let Expression::Primary(primary) = expression else {
         return None;
@@ -1776,14 +2039,9 @@ const BEHAVIOUR_EXTERN_TYPE: &str = "VRCUdonCommonInterfacesIUdonEventReceiver";
 fn unimplemented_attribute(name: &str) -> Option<&'static str> {
     let name = name.strip_suffix("Attribute").unwrap_or(name);
     match name {
-        "FieldChangeCallback" => Some("the callback would never run"),
         "RecursiveMethod" => Some(
             "calls use static frames, so recursion is rejected outright rather than \
              given a stack",
-        ),
-        "SerializeField" | "NonSerialized" => Some(
-            "which fields become public variables is decided by `public` alone, so this \
-             would not change what the inspector shows",
         ),
         _ => None,
     }
