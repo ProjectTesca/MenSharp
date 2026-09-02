@@ -536,6 +536,38 @@ impl Emulator {
                 self.heap[args[1]] = Value::Type(Rc::from(name));
                 Ok(())
             }
+            // no hierarchy without the real types: exact match, or `object`
+            "SystemType.__IsInstanceOfType__SystemObject__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let wanted = match &self.heap[args[0]] {
+                    Value::Type(name) => name.to_string(),
+                    other => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "IsInstanceOfType on {other:?}"
+                        )));
+                    }
+                };
+                let actual = match &self.heap[args[1]] {
+                    Value::Null => None,
+                    Value::Boolean(_) => Some("System.Boolean"),
+                    Value::Int32(_) => Some("System.Int32"),
+                    Value::Int64(_) => Some("System.Int64"),
+                    Value::UInt32(_) => Some("System.UInt32"),
+                    Value::Single(_) => Some("System.Single"),
+                    Value::Double(_) => Some("System.Double"),
+                    Value::Char(_) => Some("System.Char"),
+                    Value::Str(_) => Some("System.String"),
+                    Value::Array(_) => Some("System.Object[]"),
+                    Value::Type(_) => Some("System.Type"),
+                    Value::SelfComponent(_) => Some("<self>"),
+                };
+                let is = match actual {
+                    None => false,
+                    Some(actual) => wanted == "System.Object" || actual == wanted,
+                };
+                self.heap[args[2]] = Value::Boolean(is);
+                Ok(())
+            }
             "SystemType.__op_Equality__SystemType_SystemType__SystemBoolean"
             | "SystemType.__op_Inequality__SystemType_SystemType__SystemBoolean" => {
                 let args = self.pop_arguments(3)?;

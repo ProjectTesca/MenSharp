@@ -61,6 +61,30 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ) && self.behaviour_in_type(ty).is_none()
     }
 
+    /// `(Collider)obj`: a cast to an engine (or .NET) class or interface
+    /// from something not statically one — `object`, a base class, an
+    /// interface — which C# checks at runtime. Value-type targets are
+    /// conversions, handled elsewhere.
+    fn is_external_reference_downcast(&self, from: &Type, to: &Type) -> bool {
+        let external_reference = matches!(
+            to,
+            Type::Named {
+                target: TypeTarget::External(_),
+                ..
+            }
+        ) && self.is_reference_type(to);
+        if !external_reference {
+            return false;
+        }
+        let from_is_reference = self.is_reference_type(from) || self.has_type_id(from);
+        let system = men_sharp_semantics::TypeSystem {
+            declarations: self.declarations,
+            signatures: self.signatures,
+            external: self.external,
+        };
+        from_is_reference && !system.is_implicitly_convertible(from, to)
+    }
+
     /// The synthesized `bool (object)` test for `target`, registered like a
     /// dispatcher so its body is emitted once every subtype is known.
     fn type_test_for(&mut self, ctx: &Ctx<'ast>, target: &Type) -> Option<FunctionKey> {
@@ -250,14 +274,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.current_frame = None;
     }
 
-    /// `value is T` as a bool slot, for the shapes this backend can decide:
-    /// a type with a type id (through its test), or an external value type
-    /// or string (by exact runtime type). `None` after reporting otherwise.
+    /// `value is T` as a bool slot: a type with a type id through its
+    /// synthesized test, an engine or .NET type through
+    /// `Type.IsInstanceOfType`. `None` after reporting otherwise.
     fn lower_runtime_type_test(
         &mut self,
         ctx: &mut Ctx<'ast>,
         value: DataId,
-        from: &Type,
         to: &Type,
         span: Range<usize>,
     ) -> Option<DataId> {
@@ -266,62 +289,53 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let test = self.type_test_for(ctx, &to)?;
             return self.call_function(ctx, &test, None, &[value], &[], span);
         }
-        let exact_external = matches!(
-            &to,
+        // an engine or .NET type: `typeof(T).IsInstanceOfType(x)` — null
+        // gives false, and a subclass, an interface implementation or a
+        // boxed value type all count, as C# has it
+        let wanted = self.external_type_constant(ctx, &to, &span)?;
+        let result = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemType.__IsInstanceOfType__SystemObject__SystemBoolean",
+            &[wanted, value, result],
+            span,
+        );
+        Some(result)
+    }
+
+    /// `typeof(T)` for an external type — reporting when there is none.
+    fn external_type_constant(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        ty: &Type,
+        span: &Range<usize>,
+    ) -> Option<DataId> {
+        if !matches!(
+            ty,
             Type::Named {
                 target: TypeTarget::External(_),
                 ..
             }
-        ) && (!self.is_reference_type(&to)
-            || self.heap_type(&to) == "SystemString");
-        if !exact_external {
+        ) {
             self.error(
                 ctx,
                 format!(
-                    "`is`/`as` with `{}` is not supported by the Udon backend yet: only the \
-                     program's own classes, structs and interfaces, value types and string \
-                     can be tested at runtime",
-                    self.display_type(&to)
+                    "`is`/`as` with `{}` is not supported by the Udon backend yet",
+                    self.display_type(ty)
                 ),
-                span,
-            );
-            return None;
-        }
-        let Some(wanted) = self.type_constant(&to) else {
-            self.error(ctx, "this type has no `System.Type` Udon can name", span);
-            return None;
-        };
-        // null → false; else exact runtime type
-        let result = self.temp("SystemBoolean");
-        let no = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
-        self.copy(no, result);
-        let end = self.fresh_label("is_end");
-        if self.is_reference_type(from) || self.heap_type(from) == "SystemObject" {
-            let null = self.constant("SystemObject", "null", HeapInit::Null);
-            let is_null = self.temp("SystemBoolean");
-            self.call_extern(
-                ctx,
-                "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean",
-                &[value, null, is_null],
                 span.clone(),
             );
-            self.jump_if(is_null, end);
+            return None;
         }
-        let runtime_type = self.temp("SystemType");
-        self.call_extern(
-            ctx,
-            "SystemObject.__GetType__SystemType",
-            &[value, runtime_type],
-            span.clone(),
-        );
-        self.call_extern(
-            ctx,
-            "SystemType.__op_Equality__SystemType_SystemType__SystemBoolean",
-            &[runtime_type, wanted, result],
-            span,
-        );
-        self.program.code.push(Op::Label(end));
-        Some(result)
+        let constant = self.type_constant(ty);
+        if constant.is_none() {
+            self.error(
+                ctx,
+                "this type has no `System.Type` Udon can name",
+                span.clone(),
+            );
+        }
+        constant
     }
 
     /// `x is T` / `x is T t`: the test, and on success the value bound to
@@ -351,9 +365,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .get(&EntityID::from(pattern_type))
             .cloned()
             .map(|ty| self.substitute(&ty, &ctx.key.bindings))?;
-        let from = self.type_of(ctx, &is.value);
         let value = self.lower_expression(ctx, &is.value)?;
-        let result = self.lower_runtime_type_test(ctx, value, &from, &to, is.span.clone())?;
+        let result = self.lower_runtime_type_test(ctx, value, &to, is.span.clone())?;
         if let Some(name) = designation {
             let local = self.temp_for(&to);
             let skip = self.fresh_label("is_bind_skip");
@@ -377,10 +390,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         whole: &'ast Expression<'ast, 'ast>,
     ) -> Option<DataId> {
         let to = self.type_of(ctx, whole);
-        let from = self.type_of(ctx, &as_expression.value);
         let value = self.lower_expression(ctx, &as_expression.value)?;
-        let test =
-            self.lower_runtime_type_test(ctx, value, &from, &to, as_expression.span.clone())?;
+        let test = self.lower_runtime_type_test(ctx, value, &to, as_expression.span.clone())?;
         let udon_type = self.heap_type(&to);
         let null = self.constant(&udon_type, "null", HeapInit::Null);
         let result = self.temp_for(&to);
@@ -405,11 +416,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> DataId {
         let to = self.substitute(to, &ctx.key.bindings);
-        if !self.has_type_id(&to) || matches!(from, Type::Null) || self.is_subtype(from, &to) {
+        if matches!(from, Type::Null) {
             return source;
         }
-        let Some(test) = self.type_test_for(ctx, &to) else {
+        let external_downcast = self.is_external_reference_downcast(from, &to);
+        if !external_downcast && (!self.has_type_id(&to) || self.is_subtype(from, &to)) {
             return source;
+        }
+        let test = if external_downcast {
+            None
+        } else {
+            match self.type_test_for(ctx, &to) {
+                Some(test) => Some(test),
+                None => return source,
+            }
         };
         let done = self.fresh_label("cast_ok");
         let null = self.constant("SystemObject", "null", HeapInit::Null);
@@ -421,7 +441,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             span.clone(),
         );
         self.jump_if(is_null, done);
-        if let Some(ok) = self.call_function(ctx, &test, None, &[source], &[], span.clone()) {
+        let ok = match test {
+            Some(test) => self.call_function(ctx, &test, None, &[source], &[], span.clone()),
+            None => {
+                let Some(wanted) = self.external_type_constant(ctx, &to, &span) else {
+                    self.program.code.push(Op::Label(done));
+                    return source;
+                };
+                let ok = self.temp("SystemBoolean");
+                self.call_extern(
+                    ctx,
+                    "SystemType.__IsInstanceOfType__SystemObject__SystemBoolean",
+                    &[wanted, source, ok],
+                    span.clone(),
+                );
+                Some(ok)
+            }
+        };
+        if let Some(ok) = ok {
             self.program.code.push(Op::Push(ok));
             let fail = self.fresh_label("cast_fail");
             self.program.code.push(Op::JumpIfFalse(Target::Label(fail)));

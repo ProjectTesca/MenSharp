@@ -4585,3 +4585,78 @@ fn a_failed_cast_halts_the_program() {
         ),
     }
 }
+
+#[test]
+fn external_types_are_tested_at_runtime_too() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int tests;
+                public static string asString;
+                public static int asNull;
+                public static void Main()
+                {
+                    object text = "t";
+                    object number = 5;
+                    object none = null;
+                    tests = ((text is string) ? 1 : 0) + ((text is object) ? 10 : 0)
+                        + ((number is int) ? 100 : 0) + ((number is string) ? 1000 : 0)
+                        + ((none is object) ? 10000 : 0) + ((text is int) ? 100000 : 0);
+                    asString = text as string;
+                    var missing = number as string;
+                    asNull = missing == null ? 1 : 0;
+                    string cast = (string)text;      // checked, passes
+                    string fromNull = (string)none;  // null passes
+                    asString = cast + (fromNull == null ? "!" : "?");
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "tests"), 111);
+    assert_eq!(string_of(&emulator, "asString"), "t!");
+    assert_eq!(int_of(&emulator, "asNull"), 1);
+}
+
+#[test]
+fn a_failed_cast_to_an_external_type_halts_too() {
+    let Some((program, result)) = run_sources_result(
+        vec![SourceCode::new(
+            "test.cs",
+            r#"
+            namespace Game
+            {
+                public class Program
+                {
+                    public static int after;
+                    public static void Main()
+                    {
+                        object number = 5;
+                        string text = (string)number;
+                        after = text.Length;
+                    }
+                }
+            }
+            "#,
+        )],
+        "Main",
+    ) else {
+        return;
+    };
+    match result {
+        Err(men_sharp_asm::EmulatorError::Exception(message)) => {
+            assert!(message.contains("InvalidCastException"), "{message}");
+        }
+        Err(other) => panic!("expected a halt, got {other:?}\n{program}"),
+        Ok(emulator) => panic!(
+            "the cast was not checked: after = {:?}\n{program}",
+            emulator.value_of("after")
+        ),
+    }
+}

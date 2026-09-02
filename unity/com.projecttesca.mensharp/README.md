@@ -235,9 +235,10 @@ var circle = (Circle)shape;           // InvalidCastException when it is not one
 A failed cast stops the program the way an unhandled exception does on Udon:
 the error is logged (`InvalidCastException: the object is not a `Game.Circle``)
 and the behaviour halts, at the cast, instead of reading the wrong object's
-fields later. `is`/`as` work with your own classes, structs and interfaces and
-with value types and `string` (`o is int`); for other engine types they are a
-compile error for now.
+fields later. `is`/`as` and checked casts work with your own classes, structs
+and interfaces (by type id) and with engine and .NET types (`c is Collider`,
+`hit.collider as BoxCollider`, `o is int` — through `Type.IsInstanceOfType`,
+so subclasses and interfaces count as in C#).
 
 Behaviours inherit from one another. The leaf class is the whole instance: it
 exports its bases' public variables and events too, and a virtual method called
