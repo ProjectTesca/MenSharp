@@ -313,6 +313,27 @@ public class MenSharpMeta
     /// on the component rather than part of the program, so the pairing applies
     /// it — see MenSharpProxy.
     public string syncMode;
+    /// The value in heap slot 0 (slot 1 holds the program name): what the
+    /// Udon VM's halt report shows first in its heap dump, and so what the
+    /// runtime log watcher uses to find this asset. 0 when absent.
+    public long programId;
+    /// Code address → source position, in address order. The watcher maps the
+    /// report's program counter to the last entry at or before it.
+    public MenSharpSourceMark[] lines;
+}
+
+[Serializable]
+public class MenSharpSourceMark
+{
+    public uint address;
+    public string file;
+    public int line;
+    public int column;
+    public string function;
+    /// "" for a source position, "function" for the start of a function
+    /// (no position until the next mark), "halt" for the compiler's own
+    /// halt after an unhandled exception was reported.
+    public string kind;
 }
 
 [Serializable]

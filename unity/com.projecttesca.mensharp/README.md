@@ -318,7 +318,17 @@ trace and goes on adding to it; `throw e;` starts it over, as in C#.
 What an engine or .NET call throws *inside itself* — `GetComponent` on a
 destroyed object, `int.Parse("x")`, a Unity API given null — cannot be
 caught: the Udon VM stops the behaviour before any of your code runs again.
-That is Udon's rule, not a C# one, so check such inputs before the call.
+That is Udon's rule, not a C# one, so check such inputs before the call. You
+do get told where it happened: in the editor (play mode included) a second
+console entry follows the VM's report, naming the call and its position —
+`MenSharp: the Udon VM halted inside `SystemInt32.Parse`, called from
+Game.Door.Open at Assets/MenSharp/Door.cs:57:21` — with the program asset as
+its context. This works because every program carries an address → source
+table in its sidecar and its own id in heap slot 0, which the VM's report
+prints. The table also knows where each function starts and where M#'s own
+stop after `Unhandled exception:` is, so a halt in compiler-generated code
+is named as such, and the VM's report about an unhandled M# exception gets
+no second explanation — the trace above it is the whole story.
 
 The cost is small: a `try` costs nothing to enter, a `throw` is a jump, and
 each call is followed by one flag test. The runtime checks above add a

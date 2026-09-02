@@ -19,6 +19,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn lower_statement(&mut self, ctx: &mut Ctx<'ast>, statement: &'ast Statement<'ast, 'ast>) {
+        self.emit_source_mark(ctx, &statement.span());
         match statement {
             Statement::Block(block) => self.lower_block(ctx, block),
             Statement::Empty { .. } => {}

@@ -76,12 +76,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     // ------------------------------------------------------ source sites
 
-    /// `File.cs:line:column` for a span, 1-based, the file named as the
-    /// driver saw it (from `Assets/` on when the path reaches that far).
+    /// `File.cs:line:column` for a span.
     fn source_position(&mut self, file: FileId, offset: usize) -> String {
-        let Some(source) = self.declarations.sources.get(file.0 as usize).cloned() else {
-            return "?".into();
-        };
+        match self.source_location(file, offset) {
+            Some((name, line, column)) => format!("{name}:{line}:{column}"),
+            None => "?".into(),
+        }
+    }
+
+    /// File name, line and column (1-based) for a span, the file named as
+    /// the driver saw it (from `Assets/` on when the path reaches that far).
+    fn source_location(&mut self, file: FileId, offset: usize) -> Option<(String, u32, u32)> {
+        let source = self.declarations.sources.get(file.0 as usize).cloned()?;
         let starts = self.line_starts.entry(file).or_insert_with(|| {
             let mut starts = vec![0];
             starts.extend(
@@ -102,7 +108,124 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             + 1;
         let name: &str = &source.name;
         let name = name.find("Assets/").map_or(name, |at| &name[at..]);
-        format!("{name}:{line}:{column}")
+        Some((name.to_string(), line as u32, column as u32))
+    }
+
+    /// The function a frame line names: the user's path, or the stub's
+    /// mangled name.
+    fn frame_function_name(&self, ctx: &Ctx<'_>) -> String {
+        match ctx.key.role {
+            Role::Method | Role::Getter | Role::Setter | Role::Constructor => {
+                let mut path = self.display_path(ctx.key.symbol);
+                if let Some(class) = path.strip_suffix("..ctor") {
+                    let name = class.rsplit('.').next().unwrap_or(class).to_string();
+                    path = format!("{class}.{name}");
+                }
+                path
+            }
+            Role::DefaultConstructor => {
+                let class = self.display_path(ctx.key.symbol);
+                let name = class.rsplit('.').next().unwrap_or(&class).to_string();
+                format!("{class}.{name}")
+            }
+            Role::UnhandledException => "the unhandled exception report".into(),
+            _ => self
+                .functions
+                .get(&ctx.key)
+                .map(|function| function.name.clone())
+                .unwrap_or_default(),
+        }
+    }
+
+    /// An [`Op::Source`] for the code that follows, unless the previous one
+    /// already says the same.
+    pub(super) fn emit_source_mark(&mut self, ctx: &Ctx<'_>, span: &Range<usize>) {
+        if *span == (0..0) {
+            return;
+        }
+        let key = (ctx.file, span.start, ctx.key.clone());
+        if self.last_source_mark.as_ref() == Some(&key) {
+            return;
+        }
+        let Some((file, line, column)) = self.source_location(ctx.file, span.start) else {
+            return;
+        };
+        let function = self.frame_function_name(ctx);
+        self.push_source_mark(men_sharp_asm::SourceMark {
+            file,
+            line,
+            column,
+            function,
+            kind: men_sharp_asm::SourceMarkKind::Position,
+        });
+        self.last_source_mark = Some(key);
+    }
+
+    /// The mark every function starts with: from here to the first
+    /// statement the code is the compiler's, and a halt in it must not be
+    /// attributed to the function that happens to precede it in the
+    /// program. Functions without a source (dispatchers, the unhandled
+    /// exception reporter) keep this as their only mark.
+    pub(super) fn emit_function_start_mark(&mut self, ctx: &Ctx<'_>) {
+        let function = self.frame_function_name(ctx);
+        self.push_source_mark(men_sharp_asm::SourceMark {
+            file: String::new(),
+            line: 0,
+            column: 0,
+            function,
+            kind: men_sharp_asm::SourceMarkKind::FunctionStart,
+        });
+        self.last_source_mark = None;
+    }
+
+    /// The mark before the compiler's own halt: the VM report that follows
+    /// is expected, and the unhandled exception was already reported.
+    pub(super) fn emit_halt_mark(&mut self, ctx: &Ctx<'_>) {
+        let function = self.frame_function_name(ctx);
+        self.push_source_mark(men_sharp_asm::SourceMark {
+            file: String::new(),
+            line: 0,
+            column: 0,
+            function,
+            kind: men_sharp_asm::SourceMarkKind::Halt,
+        });
+        self.last_source_mark = None;
+    }
+
+    fn push_source_mark(&mut self, mark: men_sharp_asm::SourceMark) {
+        let index = self.program.source_marks.len() as u32;
+        self.program.source_marks.push(mark);
+        self.program.code.push(Op::Source(index));
+    }
+
+    /// Heap slots 0 and 1: a program id and the program name. The VM's
+    /// halt report dumps the heap from address 0, so these are what the
+    /// Unity side reads to find the program (and its sidecar) the report
+    /// is about — the same convention UdonSharp uses.
+    pub(super) fn emit_program_identity(&mut self, entry_path: &[&str]) {
+        let name = entry_path.join(".");
+        // FNV-1a over the name: stable across builds, distinct across programs
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in name.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        let id = (hash & 0x7fff_ffff_ffff_ffff) as i64;
+        self.program.add_data(DataSymbol {
+            name: "__program_id".into(),
+            udon_type: "SystemInt64".into(),
+            init: HeapInit::Int64(id),
+            export: false,
+            sync: None,
+        });
+        self.program.add_data(DataSymbol {
+            name: "__program_name".into(),
+            udon_type: "SystemString".into(),
+            init: HeapInit::Str(name),
+            export: false,
+            sync: None,
+        });
+        self.program.program_id = Some(id);
     }
 
     /// `Game.Door.Open in Assets/MenSharp/Door.cs:42:13` — a frame line.

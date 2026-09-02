@@ -228,6 +228,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
 
         self.program.code.push(Op::Label(label));
+        self.emit_function_start_mark(&ctx);
 
         // `[UdonExtern("...")]`: the body *is* the extern. Some of what Udon
         // offers has no .NET type to call — `VRCInstantiate` is a wrapper

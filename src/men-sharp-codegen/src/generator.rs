@@ -100,6 +100,7 @@ pub fn generate(
         type_order: Vec::new(),
         exception_state: None,
         line_starts: HashMap::new(),
+        last_source_mark: None,
         dispatchers: HashMap::new(),
         emitted_dispatchers: HashSet::new(),
         call_edges: HashMap::new(),
@@ -307,6 +308,9 @@ struct Generator<'a, 'ast> {
     /// Byte offsets where each line starts, per file — built on first use,
     /// for the `File.cs:line:column` in stack traces.
     line_starts: HashMap<FileId, Vec<usize>>,
+    /// The last source mark emitted, so a run of externs from one statement
+    /// shares one entry.
+    last_source_mark: Option<(FileId, usize, FunctionKey)>,
     dispatchers: HashMap<FunctionKey, Dispatcher>,
     /// Dispatchers (and type tests) whose body has been emitted: their
     /// subtype list is closed, so a type instantiated afterwards is an
@@ -475,6 +479,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     // ------------------------------------------------------------- driving
 
     fn run(&mut self, entry_path: &[&str]) {
+        // heap slots 0 and 1: the program's identity, which is what the VM's
+        // heap dump shows first when an extern throws and halts it — the
+        // Unity side maps the id back to this program's sidecar
+        self.emit_program_identity(entry_path);
         let Some(entry) = self.find_symbol(entry_path) else {
             self.errors.push(CodegenError {
                 message: format!("entry class `{}` was not found", entry_path.join(".")),
@@ -1111,6 +1119,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return_slot: slot, // unused
             caught: Vec::new(),
         };
+        self.emit_function_start_mark(&ctx);
         if let Some(value_slot) = self.lower_expression(&mut ctx, value) {
             let _ = ty;
             self.copy(value_slot, slot);
@@ -1735,6 +1744,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if signature.contains("SendCustomEvent") || signature.contains("SetProgramVariable") {
             self.external_callers.insert(ctx.key.clone());
         }
+        // where this extern is in the source: an extern's own exception halts
+        // the VM at this address, and the sidecar table maps it back
+        self.emit_source_mark(ctx, &span);
         match self.nodes.extern_node(signature) {
             None => {
                 self.error(ctx, format!("`{signature}` is not exposed by Udon"), span);

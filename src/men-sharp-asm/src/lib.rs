@@ -12,7 +12,7 @@ pub mod program;
 pub use emulator::{Emulator, EmulatorError, Value};
 pub use program::{
     AssembleError, Assembled, DataId, DataSymbol, EntryPoint, HALT_ADDRESS, HeapInit, LabelId, Op,
-    Program, Resolved, Target, UdonType,
+    Program, Resolved, SourceMark, SourceMarkKind, Target, UdonType,
 };
 
 #[cfg(test)]

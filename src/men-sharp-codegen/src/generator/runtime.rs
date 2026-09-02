@@ -30,6 +30,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // `int.Parse` on a sentence is a guaranteed FormatException, and
         // its text repeats the message in the VM's own report
         let sink = self.temp("SystemInt32");
+        self.emit_halt_mark(ctx);
         self.call_extern(
             ctx,
             "SystemInt32.__Parse__SystemString__SystemInt32",

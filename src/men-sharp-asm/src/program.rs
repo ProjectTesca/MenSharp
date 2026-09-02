@@ -128,12 +128,47 @@ pub enum Op {
     SaveFrame(u32),
     /// The matching restore placeholder; see [`Op::SaveFrame`].
     RestoreFrame(u32),
+    /// Pseudo-instruction: the code from here on comes from
+    /// [`Program::source_marks`]`[index]`. Zero bytes; lands in the sidecar
+    /// as an address → source position table, which is how the Unity side
+    /// turns the VM's "Program Counter was at" into a file and line when an
+    /// extern throws (nothing of the program's runs after that).
+    Source(u32),
+}
+
+/// One entry of the address → source table.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMark {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    pub function: String,
+    pub kind: SourceMarkKind,
+}
+
+/// What a [`SourceMark`] stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum SourceMarkKind {
+    /// A statement or an engine call at the position.
+    #[default]
+    Position,
+    /// The start of a function: the code from here has no source position
+    /// until the next mark — so a halt inside compiler-generated code is
+    /// not attributed to whatever function happened to come before it.
+    FunctionStart,
+    /// The compiler's own halt (after reporting an unhandled exception):
+    /// the VM's report about it is expected, and already explained.
+    Halt,
 }
 
 impl Op {
     pub fn byte_size(&self) -> u32 {
         match self {
-            Op::Label(_) | Op::Comment(_) | Op::SaveFrame(_) | Op::RestoreFrame(_) => 0,
+            Op::Label(_)
+            | Op::Comment(_)
+            | Op::SaveFrame(_)
+            | Op::RestoreFrame(_)
+            | Op::Source(_) => 0,
             Op::Nop | Op::Pop | Op::Copy => 4,
             Op::Push(_)
             | Op::Jump(_)
@@ -169,6 +204,12 @@ pub struct Program {
     /// find the other behaviours declared beside this one, which it cannot ask
     /// Unity about (a `.cs` asset only ever maps to the class named after it).
     pub source: Option<String>,
+    /// What [`Op::Source`] indexes.
+    pub source_marks: Vec<SourceMark>,
+    /// The value the code generator put in the program's first heap slot
+    /// (with the program name in the second): what identifies this program
+    /// in the VM's heap dump when it halts on an extern's exception.
+    pub program_id: Option<i64>,
 }
 
 impl Program {
@@ -210,7 +251,7 @@ impl Program {
         for op in &self.code {
             let size = op.byte_size();
             let resolved = match op {
-                Op::Label(_) | Op::Comment(_) => None,
+                Op::Label(_) | Op::Comment(_) | Op::Source(_) => None,
                 Op::SaveFrame(_) | Op::RestoreFrame(_) => {
                     return Err(AssembleError::UnresolvedFrameMarker);
                 }
@@ -298,7 +339,7 @@ impl Program {
                         pending_labels.push(name);
                     }
                 }
-                Op::Comment(_) | Op::SaveFrame(_) | Op::RestoreFrame(_) => {}
+                Op::Comment(_) | Op::SaveFrame(_) | Op::RestoreFrame(_) | Op::Source(_) => {}
                 _ => {
                     for label in pending_labels.drain(..) {
                         let _ = writeln!(out, "    {label}:");
@@ -319,7 +360,11 @@ impl Program {
                             format!("JUMP_INDIRECT, {}", self.data[data.0].name)
                         }
                         Op::Extern(signature) => format!("EXTERN, \"{signature}\""),
-                        Op::Label(_) | Op::Comment(_) | Op::SaveFrame(_) | Op::RestoreFrame(_) => {
+                        Op::Label(_)
+                        | Op::Comment(_)
+                        | Op::SaveFrame(_)
+                        | Op::RestoreFrame(_)
+                        | Op::Source(_) => {
                             unreachable!()
                         }
                     };
@@ -409,6 +454,42 @@ impl Program {
         if let Some(source) = &self.source {
             let _ = write!(out, ",\n  \"source\": {}", json_string(source));
         }
+        if let Some(id) = self.program_id {
+            let _ = write!(out, ",\n  \"programId\": {id}");
+        }
+        // address → source position, in address order; a position repeats
+        // at most once in a row
+        out.push_str(",\n  \"lines\": [");
+        let mut address = 0u32;
+        let mut first = true;
+        let mut last: Option<u32> = None;
+        for op in &self.code {
+            if let Op::Source(index) = op
+                && last != Some(*index)
+                && let Some(mark) = self.source_marks.get(*index as usize)
+            {
+                if !first {
+                    out.push(',');
+                }
+                first = false;
+                let kind = match mark.kind {
+                    SourceMarkKind::Position => "",
+                    SourceMarkKind::FunctionStart => ", \"kind\": \"function\"",
+                    SourceMarkKind::Halt => ", \"kind\": \"halt\"",
+                };
+                let _ = write!(
+                    out,
+                    "\n    {{\"address\": {address}, \"file\": {}, \"line\": {}, \"column\": {}, \"function\": {}{kind}}}",
+                    json_string(&mark.file),
+                    mark.line,
+                    mark.column,
+                    json_string(&mark.function)
+                );
+                last = Some(*index);
+            }
+            address += op.byte_size();
+        }
+        out.push_str("\n  ]");
         out.push_str("\n}\n");
         Ok(out)
     }
@@ -424,6 +505,15 @@ impl Program {
                 }
                 Op::Comment(text) => {
                     let _ = writeln!(out, "    # {text}");
+                }
+                Op::Source(index) => {
+                    if let Some(mark) = self.source_marks.get(*index as usize) {
+                        let _ = writeln!(
+                            out,
+                            "    # {}:{}:{} {}",
+                            mark.file, mark.line, mark.column, mark.function
+                        );
+                    }
                 }
                 _ => {
                     let _ = writeln!(out, "    0x{address:08X}  {op:?}");

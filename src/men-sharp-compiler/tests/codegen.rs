@@ -5317,3 +5317,103 @@ namespace Game
          \x20  at Game.Program.Main in Assets/MenSharp/Door.cs:27:19"
     );
 }
+
+/// The address → source table marks where every function starts and where
+/// the compiler's own halt is, so the Unity side neither attributes a halt
+/// in generated code to the function that happens to precede it, nor
+/// explains M#'s own stop after an unhandled exception as an engine error.
+#[test]
+fn the_source_table_marks_function_starts_and_the_halt() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let mut sources = vec![SourceCode::new(
+        "Assets/MenSharp/Program.cs",
+        r#"
+        using System;
+        namespace Game
+        {
+            abstract class Shape { public abstract int Area(); }
+            class Circle : Shape { public int r = 2; public override int Area() { return 3 * r * r; } }
+            public class Program
+            {
+                static int total;
+                public static void Main()
+                {
+                    Shape shape = new Circle();
+                    total = shape.Area();
+                    throw new InvalidOperationException("boom");
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(output.errors.is_empty(), "{:#?}", output.errors);
+    let meta = output.program.to_meta_json().unwrap();
+
+    // one entry per line: (function, kind)
+    let entries: Vec<(String, String)> = meta
+        .lines()
+        .filter(|line| line.trim_start().starts_with("{\"address\""))
+        .map(|line| {
+            let field = |name: &str| {
+                let key = format!("\"{name}\": \"");
+                let start = line.find(&key).map(|at| at + key.len());
+                start.map_or(String::new(), |start| {
+                    line[start..][..line[start..].find('"').unwrap()].to_string()
+                })
+            };
+            (field("function"), field("kind"))
+        })
+        .collect();
+
+    // every function's first entry is its start mark, positions follow
+    let mut seen = std::collections::HashSet::new();
+    for (function, kind) in &entries {
+        if seen.insert(function.clone()) {
+            assert_eq!(kind, "function", "{function} starts with {kind:?}\n{meta}");
+        }
+    }
+    let main = |kind: &str| {
+        entries
+            .iter()
+            .filter(|(function, k)| function == "Game.Program.Main" && k == kind)
+            .count()
+    };
+    assert_eq!(main("function"), 1, "{meta}");
+    assert!(main("") >= 3, "{meta}");
+    // synthesized functions have a start too: the default constructor,
+    // the unhandled exception report — and the compiler's own halt is
+    // marked as such, inside the latter
+    let report = "the unhandled exception report";
+    assert!(
+        entries
+            .iter()
+            .any(|(f, k)| f == "Game.Circle.Circle" && k == "function"),
+        "{meta}"
+    );
+    assert!(
+        entries.iter().any(|(f, k)| f == report && k == "function"),
+        "{meta}"
+    );
+    assert!(
+        entries.iter().any(|(f, k)| f == report && k == "halt"),
+        "{meta}"
+    );
+}
