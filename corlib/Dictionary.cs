@@ -11,13 +11,14 @@
 // value); a struct of your own gets the compiler's field-wise versions and
 // a class its override or reference identity — as without a comparer.
 //
-// Without exceptions (M# has none yet) the failure cases are defined
-// instead of thrown: `this[missing]` reads `default(TValue)` (use
-// TryGetValue), `Add` on a present key overwrites. A null key is not
-// checked and fails inside the hashing extern, as it would throw in C#.
+// `this[missing]` throws KeyNotFoundException and `Add` on a present key
+// ArgumentException, as .NET's do. A null key is not checked and fails
+// inside the hashing extern, as it would throw in C#.
 // The nested types (`Dictionary<,>.Enumerator`, `KeyCollection`, ...) are
 // top-level classes here until M# has nested types that see the outer
 // type parameters; `foreach` binds to them by the enumerator pattern.
+
+using System;
 
 namespace System.Collections.Generic
 {
@@ -105,13 +106,17 @@ namespace System.Collections.Generic
             {
                 int i = FindEntry(key);
                 if (i >= 0) { return values[i]; }
-                return default(TValue);
+                throw new KeyNotFoundException("The given key '" + key + "' was not present in the dictionary.");
             }
             set { Insert(key, value); }
         }
 
         public void Add(TKey key, TValue value)
         {
+            if (FindEntry(key) >= 0)
+            {
+                throw new ArgumentException("An item with the same key has already been added. Key: " + key);
+            }
             Insert(key, value);
         }
 

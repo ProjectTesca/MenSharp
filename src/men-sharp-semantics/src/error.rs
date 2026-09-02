@@ -74,6 +74,12 @@ pub enum SemanticErrorKind {
         type_name: String,
         member: String,
     },
+    /// `throw x` where `x` is not a `System.Exception` (CS0155).
+    ThrowNeedsException {
+        type_name: String,
+    },
+    /// A bare `throw;` outside a `catch` block (CS0156).
+    RethrowOutsideCatch,
     /// `x is _`: a discard is not a pattern on its own (C# reads `_` as a
     /// type name there and fails to find it).
     DiscardIsNotAPattern,

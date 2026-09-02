@@ -59,6 +59,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 vec![self.corlib_type("Object")],
                 self.corlib_type("Boolean"),
             ),
+            (Role::UnhandledException, _) => (Vec::new(), Type::Void),
             // the receiver is an ordinary `object` parameter, not `this`: it
             // may be anything, including a boxed int no `object[]` slot
             // could hold
@@ -90,7 +91,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         match key.role {
             Role::DefaultConstructor | Role::StructEquals | Role::StructHashCode => true,
-            Role::TypeTest | Role::ObjectDispatcher(_) => false,
+            Role::TypeTest | Role::ObjectDispatcher(_) | Role::UnhandledException => false,
             _ => !self.declarations.table.symbol(key.symbol).is_static,
         }
     }
@@ -109,6 +110,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::GetterDispatcher => name.push_str("_get_dispatch"),
             Role::SetterDispatcher => name.push_str("_set_dispatch"),
             Role::TypeTest => name.push_str("_is"),
+            Role::UnhandledException => name.push_str("_unhandled_exception"),
             Role::ObjectDispatcher(member) => {
                 name.push_str("_object_");
                 name.push_str(member.name());
@@ -222,6 +224,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             loop_stack: Vec::new(),
             result,
             return_slot,
+            caught: Vec::new(),
         };
 
         self.program.code.push(Op::Label(label));
@@ -251,6 +254,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             (Role::StructEquals, _) => self.emit_struct_equals(&mut ctx),
             (Role::StructHashCode, _) => self.emit_struct_hash_code(&mut ctx),
+            (Role::UnhandledException, _) => self.emit_unhandled_exception_body(&mut ctx),
             (Role::Constructor, Some(SyntaxRef::Constructor(declaration))) => {
                 self.bind_parameters(
                     &mut ctx,
@@ -742,6 +746,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         for (scratch, place) in returned {
             self.write_place(ctx, place, scratch, span.clone());
         }
+
+        // the callee may have returned early with an exception pending: it
+        // continues unwinding from here — to this function's handler, or on
+        // out of it
+        self.emit_pending_check(ctx);
 
         result.map(|result| {
             let symbol = &self.program.data[result.0];
@@ -1525,6 +1534,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             loop_stack: Vec::new(),
             result: function.result,
             return_slot: function.return_slot,
+            caught: Vec::new(),
         }
     }
 
@@ -1574,6 +1584,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 loop_stack: Vec::new(),
                 result,
                 return_slot,
+                caught: Vec::new(),
             };
 
             // type_id = (int) this[0]

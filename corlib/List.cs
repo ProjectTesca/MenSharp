@@ -7,10 +7,11 @@
 // bottoms out in whitelisted externs (array ctor/Get/Set, Array.Copy).
 //
 // Deliberately minimal for now: no IEnumerable (foreach binds to the
-// enumerator pattern below, which needs no interface), no exceptions (bounds
-// are the underlying array's problem until M# exceptions land), no
-// Sort/Contains (both need comparers, which need interfaces on the object
-// model).
+// enumerator pattern below, which needs no interface), no Sort/Contains
+// (both need comparers, which need interfaces on the object model). The
+// indexer and RemoveAt throw ArgumentOutOfRangeException as .NET's do.
+
+using System;
 
 namespace System.Collections.Generic
 {
@@ -41,8 +42,16 @@ namespace System.Collections.Generic
 
         public T this[int index]
         {
-            get { return items[index]; }
-            set { items[index] = value; }
+            get
+            {
+                if (index < 0 || index >= size) { throw new ArgumentOutOfRangeException("index"); }
+                return items[index];
+            }
+            set
+            {
+                if (index < 0 || index >= size) { throw new ArgumentOutOfRangeException("index"); }
+                items[index] = value;
+            }
         }
 
         public void Clear()
@@ -52,6 +61,7 @@ namespace System.Collections.Generic
 
         public void RemoveAt(int index)
         {
+            if (index < 0 || index >= size) { throw new ArgumentOutOfRangeException("index"); }
             int i = index;
             while (i < size - 1)
             {

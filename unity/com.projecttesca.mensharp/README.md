@@ -267,14 +267,53 @@ switch (shape)
 string size = n switch { < 3 => "small", < 10 => "medium", _ => "large" };
 ```
 
-A switch expression no arm matches halts the program (C#'s
-SwitchExpressionException). Positional (`is (0, var y)`) and list patterns
-are not supported yet.
+A switch expression no arm matches throws `SwitchExpressionException`, as in
+C#. Positional (`is (0, var y)`) and list patterns are not supported yet.
 
-A failed cast stops the program the way an unhandled exception does on Udon:
-the error is logged (`InvalidCastException: the object is not a `Game.Circle``)
-and the behaviour halts, at the cast, instead of reading the wrong object's
-fields later. `is`/`as` and checked casts work with your own classes, structs
+## Exceptions
+
+`throw`, `try`/`catch`/`finally`, `catch (T e) when (...)`, `throw;` and
+`x ?? throw new ...` work as in C#, across calls and recursion. `System.Exception`
+and the usual family (`InvalidOperationException`, `ArgumentException`,
+`ArgumentNullException`, `ArgumentOutOfRangeException`, `IndexOutOfRangeException`,
+`NullReferenceException`, `InvalidCastException`, `DivideByZeroException`,
+`KeyNotFoundException`, `NotSupportedException`, `NotImplementedException`,
+`FormatException`, ...) come from the mini-corlib, since Udon exposes none of
+the real ones; derive your own from them as usual.
+
+```csharp
+class DoorLockedException : InvalidOperationException
+{
+    public int Code;
+    public DoorLockedException(int code) : base("door " + code + " is locked") { Code = code; }
+}
+
+try { Open(3); }
+catch (DoorLockedException e) when (e.Code == 3) { Debug.Log(e.Message); }
+finally { busy = false; }
+```
+
+What the compiler can see coming throws the C# exception instead of crashing
+the VM: an index outside an array (`IndexOutOfRangeException`), a member or
+call on a null object of your own classes (`NullReferenceException`), integer
+`/` and `%` by zero (`DivideByZeroException`), a failed cast, a switch
+expression with no matching arm, `List` and `Dictionary` misuse
+(`ArgumentOutOfRangeException`, `KeyNotFoundException`, `ArgumentException`).
+An exception nothing catches is reported to the console as
+`Unhandled exception: <type>: <message>` and halts the behaviour, as an
+unhandled exception halts a program.
+
+What an engine or .NET call throws *inside itself* — `GetComponent` on a
+destroyed object, `int.Parse("x")`, a Unity API given null — cannot be
+caught: the Udon VM stops the behaviour before any of your code runs again.
+That is Udon's rule, not a C# one, so check such inputs before the call.
+
+The cost is small: a `try` costs nothing to enter, a `throw` is a jump, and
+each call is followed by one flag test. The runtime checks above add a
+comparison or two where they apply.
+
+A failed cast throws `InvalidCastException` (see *Exceptions* below), at the
+cast, instead of reading the wrong object's fields later. `is`/`as` and checked casts work with your own classes, structs
 and interfaces (by type id) and with engine and .NET types (`c is Collider`,
 `hit.collider as BoxCollider`, `o is int` — through `Type.IsInstanceOfType`,
 so subclasses and interfaces count as in C#).
@@ -378,9 +417,9 @@ Both collections are source ports compiled with your code (Udon exposes
 neither the real ones nor `KeyValuePair`), so they cost no externs beyond
 array access, `GetHashCode` and `Equals` — which dispatch on the boxed key,
 so strings, numbers, enums and engine structs hash by value and your own
-classes by identity, as in .NET. Since M# has no exceptions yet, the cases
-that would throw are defined instead: `dictionary[missingKey]` reads
-`default`, `Add` on a present key overwrites.
+classes by identity, as in .NET. `dictionary[missingKey]` throws
+`KeyNotFoundException` and `Add` on a present key `ArgumentException`, and
+`list[i]` outside the count `ArgumentOutOfRangeException`, as in .NET.
 
 ## Structs
 
@@ -409,8 +448,6 @@ points — each copy is an allocation. Structs without their own
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- exceptions (`try`/`catch`/`throw`) — a failed cast already halts the way an
-  unhandled exception would, see above;
 - positional (`is (0, var y)`, `Deconstruct`) and list patterns;
 - conversion operators (`implicit operator` / `explicit operator`);
 - static abstract/virtual interface members (C# 11 generic math);

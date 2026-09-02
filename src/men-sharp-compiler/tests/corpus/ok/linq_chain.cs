@@ -1,3 +1,4 @@
+// corpus: reference-assemblies-only — LINQ over the reference assembly's List<T>
 using System.Collections.Generic;
 using System.Linq;
 

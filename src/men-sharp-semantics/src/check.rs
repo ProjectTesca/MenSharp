@@ -193,6 +193,7 @@ pub fn check_file(
         targets: HashMap::new(),
         enumerations: HashMap::new(),
         constructor_chains: HashMap::new(),
+        catch_depth: 0,
     };
 
     // rebuild the same file scope signature resolution used
@@ -348,6 +349,9 @@ struct Checker<'a, 'ast> {
     targets: HashMap<EntityID, ResolvedTarget>,
     enumerations: HashMap<EntityID, ForeachEnumeration>,
     constructor_chains: HashMap<SymbolId, ConstructorChain>,
+    /// How many `catch` blocks enclose the current position — where a bare
+    /// `throw;` is legal.
+    catch_depth: usize,
 }
 
 impl<'a, 'ast> Checker<'a, 'ast> {
@@ -590,6 +594,41 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
 
         self.type_stack.pop();
+    }
+
+    // ------------------------------------------------------- exceptions
+
+    /// `throw` takes a `System.Exception` — the mini-corlib's, which is what
+    /// the name resolves to (CS0155 otherwise).
+    fn require_exception(&mut self, ty: &Type, span: Range<usize>) {
+        if matches!(ty, Type::Error | Type::Null) {
+            return;
+        }
+        let Some(exception) = self.lookup_type_path(&["System", "Exception"]) else {
+            return;
+        };
+        if !self.system().is_implicitly_convertible(ty, &exception) {
+            let kind = SemanticErrorKind::ThrowNeedsException {
+                type_name: self.display(ty),
+            };
+            self.error(kind, span);
+        }
+    }
+
+    /// A source type by namespace path, as a type.
+    fn lookup_type_path(&self, path: &[&str]) -> Option<Type> {
+        let table = &self.resolver.declarations.table;
+        let mut current = table.root();
+        for segment in path {
+            current = *table.symbol(current).members_named(segment).first()?;
+        }
+        if !table.symbol(current).kind.is_type() {
+            return None;
+        }
+        Some(Type::Named {
+            target: TypeTarget::Source(current),
+            arguments: Vec::new(),
+        })
     }
 
     // ------------------------------------------------- operator pairs
@@ -1526,7 +1565,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         self.check_condition(condition);
                     }
                     if let Ok(block) = &catch.block {
+                        self.catch_depth += 1;
                         self.check_block(block);
+                        self.catch_depth -= 1;
                     }
                     self.locals.pop();
                 }
@@ -1615,11 +1656,20 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     (None, true) => {}
                 }
             }
-            Statement::Throw(statement) => {
-                if let Some(value) = &statement.value {
-                    self.check_expression(value);
+            Statement::Throw(statement) => match &statement.value {
+                Some(value) => {
+                    let ty = self.check_expression(value);
+                    self.require_exception(&ty, value.span());
                 }
-            }
+                None => {
+                    if self.catch_depth == 0 {
+                        self.error(
+                            SemanticErrorKind::RethrowOutsideCatch,
+                            statement.span.clone(),
+                        );
+                    }
+                }
+            },
             Statement::Yield(statement) => {
                 if let Some(value) = &statement.value {
                     self.check_expression(value);
@@ -2008,7 +2058,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             Expression::Throw(throw) => {
                 if let Ok(value) = &throw.value {
-                    self.check_expression(value);
+                    let ty = self.check_expression(value);
+                    self.require_exception(&ty, value.span());
                 }
                 // a throw expression has no value; Error converts everywhere,
                 // matching C#'s "convertible to any type"

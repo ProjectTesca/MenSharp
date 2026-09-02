@@ -19,9 +19,11 @@ fn dotnet_shared_dir() -> Option<std::path::PathBuf> {
     None
 }
 
-/// Compile `source`, run entry `event`, and return the finished emulator.
+/// Compile `source` (with the mini-corlib, as every real compilation has
+/// it: the runtime checks throw its exception types), run entry `event`,
+/// and return the finished emulator.
 fn run(source: &str, event: &str) -> Option<Emulator> {
-    run_sources(vec![SourceCode::new("test.cs", source)], event)
+    run_with_corlib(source, event)
 }
 
 /// [`run`] with the mini-corlib (`List<T>`, ...) compiled in.
@@ -39,10 +41,16 @@ fn run_sources(sources: Vec<SourceCode>, event: &str) -> Option<Emulator> {
 /// [`run_sources`] that hands back the emulator's verdict instead of
 /// panicking on it — for programs expected to halt.
 fn run_sources_result(
-    sources: Vec<SourceCode>,
+    mut sources: Vec<SourceCode>,
     event: &str,
 ) -> Option<(String, Result<Emulator, men_sharp_asm::EmulatorError>)> {
     let dir = dotnet_shared_dir()?;
+    if !sources
+        .iter()
+        .any(|source| source.name.starts_with("corlib/"))
+    {
+        sources.extend(Compiler::corlib_sources());
+    }
     let compiler = Compiler::new(CompilerSettings::default()).unwrap();
     let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
     let references = compiler.load_references(&bytes).unwrap();
@@ -5070,4 +5078,178 @@ fn a_switch_expression_with_no_matching_arm_halts() {
             emulator.value_of("after")
         ),
     }
+}
+
+#[test]
+fn exceptions_are_thrown_caught_and_finalized() {
+    let Some(emulator) = run(
+        r#"
+        using System;
+        namespace Game
+        {
+            public class DoorLocked : InvalidOperationException
+            {
+                public int Code;
+                public DoorLocked(int code) : base("locked " + code) { Code = code; }
+            }
+            public class Program
+            {
+                public static int caught;
+                public static int values;
+                public static string trace;
+                static string log = "";
+                static void Deep(int n) { if (n == 0) { throw new DoorLocked(42); } Deep(n - 1); }
+                static int Fact(int n) { if (n < 0) throw new ArgumentException("neg"); return n <= 1 ? 1 : n * Fact(n - 1); }
+                static int WithFinally(bool boom)
+                {
+                    try { log += "[t"; if (boom) throw new Exception("boom"); log += "n"; return 1; }
+                    finally { log += "f]"; }
+                }
+                static int Loop()
+                {
+                    int hits = 0;
+                    for (int i = 0; i < 3; i++)
+                    {
+                        try { if (i == 1) continue; if (i == 2) break; hits += 10; }
+                        finally { hits += 1; }
+                    }
+                    return hits;   // 10+1, +1, +1
+                }
+                public static void Main()
+                {
+                    // by type, through recursion, with `when`
+                    try { Deep(3); caught = -1; }
+                    catch (DoorLocked e) when (e.Code == 41) { caught = 1; }
+                    catch (DoorLocked e) when (e.Code == 42) { caught = e.Code; }
+                    catch (Exception) { caught = 2; }
+                    // nested, rethrow, finally order, base type
+                    try
+                    {
+                        try { Fact(-1); }
+                        catch (ArgumentException) { log += "a"; throw; }
+                        finally { log += "F"; }
+                    }
+                    catch (Exception e) { log += "o:" + e.Message; }
+                    // finally around return, normal and exceptional
+                    int w1 = WithFinally(false);
+                    int w2 = 0;
+                    try { WithFinally(true); } catch (Exception e) { w2 = e.Message == "boom" ? 7 : 0; }
+                    values = w1 * 10 + w2 + Loop() * 100 + Fact(4) * 10000;   // 241317
+                    // the compiler's own checks
+                    int[] arr = new int[2];
+                    string checks = "";
+                    try { arr[5] = 1; } catch (IndexOutOfRangeException) { checks += "I"; }
+                    try { int x = arr[-1]; } catch (IndexOutOfRangeException) { checks += "i"; }
+                    DoorLocked none = null;
+                    try { int c = none.Code; } catch (NullReferenceException) { checks += "N"; }
+                    try { none.ToString(); checks += "?"; } catch (NullReferenceException) { checks += "n"; }
+                    int zero = arr[0];
+                    try { int q = 10 / zero; } catch (DivideByZeroException) { checks += "D"; }
+                    try { int q = 10 % zero; } catch (DivideByZeroException) { checks += "d"; }
+                    object o = "str";
+                    try { var d = (DoorLocked)o; } catch (InvalidCastException e) { checks += "C" + (e.Message.Length > 0 ? "m" : ""); }
+                    try { int s = zero switch { 1 => 1 }; } catch (System.Runtime.CompilerServices.SwitchExpressionException) { checks += "S"; }
+                    try { throw new ArgumentNullException("p"); } catch (ArgumentException e) { checks += "A" + e.Message.Length; }
+                    var list = new System.Collections.Generic.List<int> { 1 };
+                    try { list[3] = 1; } catch (ArgumentOutOfRangeException) { checks += "L"; }
+                    var map = new System.Collections.Generic.Dictionary<string, int> { { "a", 1 } };
+                    try { int v = map["b"]; } catch (System.Collections.Generic.KeyNotFoundException) { checks += "K"; }
+                    try { map.Add("a", 2); } catch (ArgumentException) { checks += "k"; }
+                    trace = log + "|" + checks + "|" + (10 / 2);
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "caught"), 42);
+    assert_eq!(int_of(&emulator, "values"), 241317);
+    assert_eq!(
+        string_of(&emulator, "trace"),
+        "aFo:neg[tnf][tf]|IiNnDdCmSA21LKk|5"
+    );
+}
+
+#[test]
+fn an_uncaught_exception_reports_and_halts() {
+    let Some((program, result)) = run_sources_result(
+        vec![SourceCode::new(
+            "test.cs",
+            r#"
+            using System;
+            namespace Game
+            {
+                public class Program
+                {
+                    public static int before;
+                    public static int after;
+                    public static int finalized;
+                    static void F() { throw new InvalidOperationException("door is locked"); }
+                    public static void Main()
+                    {
+                        before = 1;
+                        try { F(); } finally { finalized = 1; }
+                        after = 2;
+                    }
+                }
+            }
+            "#,
+        )],
+        "Main",
+    ) else {
+        return;
+    };
+    match result {
+        Err(men_sharp_asm::EmulatorError::Exception(message)) => {
+            assert!(
+                message.contains("System.InvalidOperationException: door is locked"),
+                "{message}"
+            );
+        }
+        Err(other) => panic!("expected a halt, got {other:?}\n{program}"),
+        Ok(emulator) => panic!(
+            "no halt: after = {:?}\n{program}",
+            emulator.value_of("after")
+        ),
+    }
+}
+
+#[test]
+fn throw_takes_an_exception_and_rethrow_needs_a_catch() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static void Main()
+                {
+                    throw "text";        // CS0155
+                }
+                static void G() { throw; }   // CS0156
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let kinds: Vec<String> = bodies
+        .errors
+        .iter()
+        .map(|error| format!("{:?}", error.kind))
+        .filter(|kind| kind.contains("ThrowNeedsException") || kind.contains("RethrowOutsideCatch"))
+        .collect();
+    assert_eq!(kinds.len(), 2, "{:#?}", bodies.errors);
 }

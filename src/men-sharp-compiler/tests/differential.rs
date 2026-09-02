@@ -198,7 +198,19 @@ fn men_sharp_errors(
 ) -> Vec<SemanticError> {
     let source = std::fs::read_to_string(file).unwrap();
     let name = file.file_name().unwrap().to_string_lossy().into_owned();
-    let files = compiler.parse(vec![SourceCode::new(name, source)]);
+    // with the mini-corlib, as every real compilation: `System.Exception`,
+    // `List<T>` and friends are its classes, not the reference assembly's.
+    // A file that exercises the reference assembly's own collections (LINQ
+    // over `List<T>`, say) opts out with a marker on its first lines.
+    let reference_only = source
+        .lines()
+        .take(5)
+        .any(|line| line.contains("corpus: reference-assemblies-only"));
+    let mut sources = vec![SourceCode::new(name, source)];
+    if !reference_only {
+        sources.extend(Compiler::corlib_sources());
+    }
+    let files = compiler.parse(sources);
     let declarations = compiler.collect_declarations(&files);
     let signatures = compiler.resolve_signatures(&declarations, references);
     let bodies = compiler.check_bodies(&declarations, &signatures, references);

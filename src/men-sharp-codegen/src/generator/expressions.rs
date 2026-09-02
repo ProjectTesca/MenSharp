@@ -96,6 +96,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             Statement::Foreach(statement) => self.lower_foreach(ctx, statement),
             Statement::Switch(statement) => self.lower_switch(ctx, statement),
+            Statement::Try(statement) => self.lower_try(ctx, statement),
+            Statement::Throw(statement) => self.lower_throw_statement(ctx, statement),
             Statement::Return(ReturnStatement { value, span, .. }) => {
                 if let Some(value) = value {
                     // a returned local or parameter is not copied: its slot
@@ -125,31 +127,47 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         }
                     }
                 }
+                // leaving every `try` region: their `finally` blocks first
+                self.emit_finally_copies(ctx, 0);
                 self.program.code.push(Op::JumpIndirect(ctx.return_slot));
             }
-            Statement::Break(statement) => match ctx.loop_stack.last() {
-                Some(
-                    BreakFrame::Loop { break_target, .. } | BreakFrame::Switch { break_target },
-                ) => {
-                    let target = *break_target;
-                    self.program.code.push(Op::Jump(Target::Label(target)));
+            Statement::Break(statement) => {
+                let frame =
+                    ctx.loop_stack.iter().enumerate().rev().find_map(
+                        |(index, frame)| match frame {
+                            BreakFrame::Loop { break_target, .. }
+                            | BreakFrame::Switch { break_target } => Some((index, *break_target)),
+                            BreakFrame::Try { .. } => None,
+                        },
+                    );
+                match frame {
+                    Some((index, target)) => {
+                        self.emit_finally_copies(ctx, index + 1);
+                        self.program.code.push(Op::Jump(Target::Label(target)));
+                    }
+                    None => self.error(
+                        ctx,
+                        "`break` outside a loop or `switch`",
+                        statement.span.clone(),
+                    ),
                 }
-                None => self.error(
-                    ctx,
-                    "`break` outside a loop or `switch`",
-                    statement.span.clone(),
-                ),
-            },
+            }
             // `continue` skips over `switch` frames to the enclosing loop
             Statement::Continue(statement) => {
-                let target = ctx.loop_stack.iter().rev().find_map(|frame| match frame {
-                    BreakFrame::Loop {
-                        continue_target, ..
-                    } => Some(*continue_target),
-                    BreakFrame::Switch { .. } => None,
-                });
-                match target {
-                    Some(target) => self.program.code.push(Op::Jump(Target::Label(target))),
+                let frame =
+                    ctx.loop_stack.iter().enumerate().rev().find_map(
+                        |(index, frame)| match frame {
+                            BreakFrame::Loop {
+                                continue_target, ..
+                            } => Some((index, *continue_target)),
+                            BreakFrame::Switch { .. } | BreakFrame::Try { .. } => None,
+                        },
+                    );
+                match frame {
+                    Some((index, target)) => {
+                        self.emit_finally_copies(ctx, index + 1);
+                        self.program.code.push(Op::Jump(Target::Label(target)));
+                    }
                     None => self.error(ctx, "`continue` outside a loop", statement.span.clone()),
                 }
             }
@@ -585,9 +603,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.program.code.push(Op::Label(next));
         }
 
-        let message =
-            self.string_constant("SwitchExpressionException: the switch expression matched no arm");
-        self.emit_halt(ctx, message, switch.span.clone());
+        self.throw_new(
+            ctx,
+            &[
+                "System",
+                "Runtime",
+                "CompilerServices",
+                "SwitchExpressionException",
+            ],
+            None,
+            switch.span.clone(),
+        );
         self.program.code.push(Op::Label(end));
         Some(result)
     }
@@ -657,6 +683,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             Expression::Is(is) => self.lower_is(ctx, is),
             Expression::Switch(switch) => self.lower_switch_expression(ctx, switch, expression),
+            Expression::Throw(throw) => self.lower_throw_expression(ctx, throw),
             Expression::As(as_expression) => self.lower_as(ctx, as_expression, expression),
             other => {
                 self.error(
@@ -840,6 +867,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         if let Some(result) = self.user_operator_call(ctx, node, &[left, right], span.clone()) {
             return result;
+        }
+        if matches!(operator, Divide | Modulo) {
+            self.check_divisor(ctx, right.0, right.1, span.clone());
         }
 
         let system_is = |ty: &Type, name: &str| {
@@ -1491,6 +1521,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             self.error(ctx, "field is missing from the object layout", span);
                             return Place::Error;
                         };
+                        if let Some((slot, receiver_type)) = &receiver
+                            && Some(*slot) != ctx.this_slot
+                            && self.has_type_id(receiver_type)
+                        {
+                            self.check_not_null(ctx, *slot, span.clone());
+                        }
                         let object = receiver.map(|(slot, _)| slot).or(ctx.this_slot);
                         match object {
                             Some(object) => Place::Field {
@@ -1510,6 +1546,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             && let Some(object) =
                                 receiver.as_ref().map(|(slot, _)| *slot).or(ctx.this_slot)
                         {
+                            if let Some((slot, receiver_type)) = &receiver
+                                && Some(*slot) != ctx.this_slot
+                                && self.has_type_id(receiver_type)
+                            {
+                                self.check_not_null(ctx, *slot, span.clone());
+                            }
                             return Place::Field {
                                 object,
                                 index: self.int_constant(index as i32),
@@ -1679,6 +1721,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 element,
                 array_type,
             } => {
+                self.check_array_access(ctx, array, index, &array_type, span.clone());
                 let value = self.array_get(ctx, array, index, &array_type, &element, span);
                 Some((value, element))
             }
@@ -1750,7 +1793,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 index,
                 array_type,
                 ..
-            } => self.array_set(ctx, array, index, value, &array_type, span),
+            } => {
+                self.check_array_access(ctx, array, index, &array_type, span.clone());
+                self.array_set(ctx, array, index, value, &array_type, span)
+            }
             Place::Accessor {
                 receiver,
                 symbol,
@@ -2654,6 +2700,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 } else {
                     receiver.as_ref().map(|(slot, _)| *slot).or(ctx.this_slot)
                 };
+                if !call.is_static
+                    && !call.is_extension
+                    && let Some((slot, receiver_type)) = &receiver
+                    && Some(*slot) != ctx.this_slot
+                    && self.has_type_id(receiver_type)
+                    && !self.is_source_struct(receiver_type)
+                {
+                    self.check_not_null(ctx, *slot, span.clone());
+                }
                 // a behaviour needs no dispatcher: there is one instance, so
                 // the most derived override is known here
                 let symbol = if !call.is_static
@@ -2740,6 +2795,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     };
                     if let Some((slot, receiver_type)) = receiver_value {
                         let receiver_type = self.substitute(&receiver_type, &ctx.key.bindings);
+                        if Some(slot) != ctx.this_slot
+                            && self.has_type_id(&receiver_type)
+                            && !self.is_source_struct(&receiver_type)
+                        {
+                            self.check_not_null(ctx, slot, span.clone());
+                        }
                         if let Some(piece) = self.object_member_call(
                             ctx,
                             &member_name,

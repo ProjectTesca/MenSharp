@@ -98,6 +98,7 @@ pub fn generate(
         static_constructors: Vec::new(),
         layouts: HashMap::new(),
         type_order: Vec::new(),
+        exception_state: None,
         dispatchers: HashMap::new(),
         emitted_dispatchers: HashSet::new(),
         call_edges: HashMap::new(),
@@ -161,6 +162,9 @@ enum Role {
     /// `as`. Synthesized after the fixpoint like a dispatcher, since it
     /// enumerates every instantiated subtype.
     TypeTest,
+    /// The one function every uncaught exception ends in: reports it and
+    /// halts the behaviour. `symbol` is the root namespace.
+    UnhandledException,
     /// The stub behind `Equals`, `GetHashCode` or `ToString` on a receiver
     /// whose runtime type is open (`object`, a non-sealed class, an
     /// interface): finds the user's override by type id, else falls back to
@@ -251,6 +255,13 @@ struct EventArgument {
     udon_type: String,
 }
 
+/// See [`Generator::exception_state`].
+#[derive(Clone, Copy)]
+struct ExceptionState {
+    exception: DataId,
+    pending: DataId,
+}
+
 /// A synthesized virtual-call dispatcher: one per (root method, bindings).
 struct Dispatcher {
     /// The member name used to find overrides on each instantiated subtype.
@@ -288,6 +299,10 @@ struct Generator<'a, 'ast> {
     static_constructors: Vec<FunctionKey>,
     layouts: HashMap<Type, Layout>,
     type_order: Vec<Type>,
+    /// The heap slots exceptions travel in: the exception itself and the
+    /// "one is pending" flag every call checks after returning. Made on
+    /// first use.
+    exception_state: Option<ExceptionState>,
     dispatchers: HashMap<FunctionKey, Dispatcher>,
     /// Dispatchers (and type tests) whose body has been emitted: their
     /// subtype list is closed, so a type instantiated afterwards is an
@@ -329,10 +344,14 @@ struct Ctx<'ast> {
     locals: Vec<HashMap<&'ast str, (DataId, Type)>>,
     this_slot: Option<DataId>,
     this_type: Option<Type>,
-    /// What `break`/`continue` bind to, innermost last.
-    loop_stack: Vec<BreakFrame>,
+    /// What `break`/`continue` bind to, innermost last — and the `try`
+    /// regions in between, which exceptions unwind to.
+    loop_stack: Vec<BreakFrame<'ast>>,
     result: Option<DataId>,
     return_slot: DataId,
+    /// The exception each enclosing `catch` block caught, innermost last:
+    /// what a bare `throw;` rethrows.
+    caught: Vec<DataId>,
 }
 
 impl Ctx<'_> {
@@ -378,13 +397,20 @@ impl Piece {
 
 /// One enclosing construct `break` can leave. `continue` skips over `Switch`
 /// frames to the nearest loop, as C# does.
-enum BreakFrame {
+enum BreakFrame<'ast> {
     Loop {
         continue_target: LabelId,
         break_target: LabelId,
     },
     Switch {
         break_target: LabelId,
+    },
+    /// A `try` region: where an exception raised (or returned into) this
+    /// region goes, and the `finally` block every exit out of it has to
+    /// run first.
+    Try {
+        handler: LabelId,
+        finally: Option<&'ast Block<'ast, 'ast>>,
     },
 }
 
@@ -609,6 +635,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // refers to their class; compile them with everything else so their
         // bodies take part in the dispatch fixpoint below
         self.schedule_static_constructors();
+        // where every uncaught exception ends: compiled with everything
+        // else, since it dispatches `ToString` and `Message`
+        let unhandled = self.unhandled_key();
+        self.ensure_function(&unhandled);
 
         // fixpoint: draining the queue may register new types, which may make
         // dispatchers incomplete, which enqueues more functions, ...
@@ -670,38 +700,31 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let function = &self.functions[key];
             let (callee_return, callee_label, callee_result) =
                 (function.return_slot, function.label, function.result);
-            match callee_result.filter(|_| entry.returns_value) {
-                Some(result) => {
-                    // Udon reads the event's result from `__returnValue` once
-                    // the body finishes — so return here, copy it over, halt
-                    let done = self.program.add_label(format!("event_{name}__done"));
-                    let return_to_stub =
-                        self.code_address_constant(format!("__ret_body_{name}"), Some(done));
-                    self.copy(return_to_stub, callee_return);
-                    self.program
-                        .code
-                        .push(Op::Jump(Target::Label(callee_label)));
-                    self.program.code.push(Op::Label(done));
-                    let return_value = self.program.add_data(DataSymbol {
-                        name: "__returnValue".into(),
-                        udon_type: "SystemObject".into(),
-                        init: HeapInit::Null,
-                        export: false,
-                        sync: None,
-                    });
-                    self.copy(result, return_value);
-                    self.program
-                        .code
-                        .push(Op::Jump(Target::Address(HALT_ADDRESS)));
-                }
-                None => {
-                    let halt = self.code_address_constant(format!("__halt_{name}"), None);
-                    self.copy(halt, callee_return);
-                    self.program
-                        .code
-                        .push(Op::Jump(Target::Label(callee_label)));
-                }
+            // the body returns here so an exception it left pending can be
+            // reported; then the event's result (if any) goes to
+            // `__returnValue`, where Udon reads it, and the event halts
+            let done = self.program.add_label(format!("event_{name}__done"));
+            let return_to_stub =
+                self.code_address_constant(format!("__ret_body_{name}"), Some(done));
+            self.copy(return_to_stub, callee_return);
+            self.program
+                .code
+                .push(Op::Jump(Target::Label(callee_label)));
+            self.program.code.push(Op::Label(done));
+            self.emit_unhandled_check(name);
+            if let Some(result) = callee_result.filter(|_| entry.returns_value) {
+                let return_value = self.program.add_data(DataSymbol {
+                    name: "__returnValue".into(),
+                    udon_type: "SystemObject".into(),
+                    init: HeapInit::Null,
+                    export: false,
+                    sync: None,
+                });
+                self.copy(result, return_value);
             }
+            self.program
+                .code
+                .push(Op::Jump(Target::Address(HALT_ADDRESS)));
         }
 
         for callback in &callbacks {
@@ -777,6 +800,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .code
             .push(Op::JumpIfFalse(Target::Label(init_label)));
         self.program.code.push(Op::Label(continue_label));
+        // a static constructor may have thrown
+        self.emit_unhandled_check(&format!("{name}__init"));
     }
 
     /// `[FieldChangeCallback(nameof(Prop))]` on behaviour fields: when
@@ -1001,6 +1026,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 loop_stack: Vec::new(),
                 result: None,
                 return_slot: init_return, // unused
+                caught: Vec::new(),
             };
             self.call_function(&mut ctx, &key, None, &[], &[], span);
         }
@@ -1079,6 +1105,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             loop_stack: Vec::new(),
             result: None,
             return_slot: slot, // unused
+            caught: Vec::new(),
         };
         if let Some(value_slot) = self.lower_expression(&mut ctx, value) {
             let _ = ty;
@@ -2677,6 +2704,7 @@ fn event_slot_type(dotnet: &str) -> String {
     }
 }
 
+mod exceptions;
 mod expressions;
 mod functions;
 mod patterns;

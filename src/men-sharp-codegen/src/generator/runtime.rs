@@ -432,11 +432,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.program.code.push(Op::JumpIfFalse(Target::Label(fail)));
             self.program.code.push(Op::Jump(Target::Label(done)));
             self.program.code.push(Op::Label(fail));
-            let message = self.string_constant(&format!(
-                "InvalidCastException: the object is not a `{}`",
-                self.display_type(&to)
-            ));
-            self.emit_halt(ctx, message, span);
+            let message =
+                self.string_constant(&format!("the object is not a `{}`", self.display_type(&to)));
+            self.throw_new(
+                ctx,
+                &["System", "InvalidCastException"],
+                Some(message),
+                span,
+            );
         }
         self.program.code.push(Op::Label(done));
         source

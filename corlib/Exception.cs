@@ -1,0 +1,133 @@
+// MenSharp mini-corlib: System.Exception and the standard exceptions.
+//
+// Udon whitelists no exception constructor, so these are ordinary M#
+// classes compiled with user code (like List<T>), thrown and caught by the
+// compiler's own unwinding. Derive from them as from the .NET ones:
+//
+//     class DoorLockedException : InvalidOperationException { ... }
+//
+// `ToString()` is left to the object model: an exception class that does not
+// override it prints as its type name, and the unhandled-exception report
+// adds `: Message` after it.
+
+namespace System
+{
+    public class Exception
+    {
+        private readonly string message;
+        private readonly Exception inner;
+
+        public Exception() { message = null; inner = null; }
+        public Exception(string message) { this.message = message; inner = null; }
+        public Exception(string message, Exception innerException) { this.message = message; inner = innerException; }
+
+        public virtual string Message => message == null ? "" : message;
+        public Exception InnerException => inner;
+    }
+
+    public class SystemException : Exception
+    {
+        public SystemException() { }
+        public SystemException(string message) : base(message) { }
+        public SystemException(string message, Exception innerException) : base(message, innerException) { }
+    }
+
+    public class InvalidOperationException : SystemException
+    {
+        public InvalidOperationException() : base("Operation is not valid due to the current state of the object.") { }
+        public InvalidOperationException(string message) : base(message) { }
+        public InvalidOperationException(string message, Exception innerException) : base(message, innerException) { }
+    }
+
+    public class ArgumentException : SystemException
+    {
+        private readonly string paramName;
+
+        public ArgumentException() : base("Value does not fall within the expected range.") { }
+        public ArgumentException(string message) : base(message) { }
+        public ArgumentException(string message, Exception innerException) : base(message, innerException) { }
+        public ArgumentException(string message, string paramName) : base(message) { this.paramName = paramName; }
+
+        public string ParamName => paramName;
+    }
+
+    public class ArgumentNullException : ArgumentException
+    {
+        public ArgumentNullException() : base("Value cannot be null.") { }
+        public ArgumentNullException(string paramName) : base("Value cannot be null.", paramName) { }
+        public ArgumentNullException(string paramName, string message) : base(message, paramName) { }
+    }
+
+    public class ArgumentOutOfRangeException : ArgumentException
+    {
+        public ArgumentOutOfRangeException() : base("Specified argument was out of the range of valid values.") { }
+        public ArgumentOutOfRangeException(string paramName) : base("Specified argument was out of the range of valid values.", paramName) { }
+        public ArgumentOutOfRangeException(string paramName, string message) : base(message, paramName) { }
+    }
+
+    public class IndexOutOfRangeException : SystemException
+    {
+        public IndexOutOfRangeException() : base("Index was outside the bounds of the array.") { }
+        public IndexOutOfRangeException(string message) : base(message) { }
+    }
+
+    public class NullReferenceException : SystemException
+    {
+        public NullReferenceException() : base("Object reference not set to an instance of an object.") { }
+        public NullReferenceException(string message) : base(message) { }
+    }
+
+    public class InvalidCastException : SystemException
+    {
+        public InvalidCastException() : base("Specified cast is not valid.") { }
+        public InvalidCastException(string message) : base(message) { }
+    }
+
+    public class DivideByZeroException : SystemException
+    {
+        public DivideByZeroException() : base("Attempted to divide by zero.") { }
+        public DivideByZeroException(string message) : base(message) { }
+    }
+
+    public class NotSupportedException : SystemException
+    {
+        public NotSupportedException() : base("Specified method is not supported.") { }
+        public NotSupportedException(string message) : base(message) { }
+    }
+
+    public class NotImplementedException : SystemException
+    {
+        public NotImplementedException() : base("The method or operation is not implemented.") { }
+        public NotImplementedException(string message) : base(message) { }
+    }
+
+    public class FormatException : SystemException
+    {
+        public FormatException() : base("One of the identified items was in an invalid format.") { }
+        public FormatException(string message) : base(message) { }
+    }
+
+    public class OverflowException : SystemException
+    {
+        public OverflowException() : base("Arithmetic operation resulted in an overflow.") { }
+        public OverflowException(string message) : base(message) { }
+    }
+}
+
+namespace System.Collections.Generic
+{
+    public class KeyNotFoundException : SystemException
+    {
+        public KeyNotFoundException() : base("The given key was not present in the dictionary.") { }
+        public KeyNotFoundException(string message) : base(message) { }
+    }
+}
+
+namespace System.Runtime.CompilerServices
+{
+    public class SwitchExpressionException : InvalidOperationException
+    {
+        public SwitchExpressionException() : base("Non-exhaustive switch expression failed to match its input.") { }
+        public SwitchExpressionException(string message) : base(message) { }
+    }
+}
