@@ -232,67 +232,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     // ------------------------------------------- Equals / GetHashCode
 
-    /// `object.Equals(x)` / `object.GetHashCode()` called on a struct or class
-    /// of the user's: the declared override if there is one, the synthesized
-    /// field-wise version for a struct, and for a class without an override
-    /// `None` — the `System.Object` extern (reference identity) is right.
-    pub(super) fn object_member_override(
-        &mut self,
-        ctx: &mut Ctx<'ast>,
-        name: &str,
-        receiver: (DataId, Type),
-        values: &[DataId],
-        return_type: &Type,
-        span: Range<usize>,
-    ) -> Option<Piece> {
-        let (slot, ty) = receiver;
-        let Type::Named {
-            target: TypeTarget::Source(symbol),
-            ..
-        } = &ty
-        else {
-            return None;
-        };
-        if !self.is_source_class(&ty) {
-            return None;
-        }
-        let declared = self
-            .declarations
-            .table
-            .symbol(*symbol)
-            .members_named(name)
-            .iter()
-            .copied()
-            .find(|&member| {
-                let entry = self.declarations.table.symbol(member);
-                entry.kind == SymbolKind::Method
-                    && !entry.is_static
-                    && matches!(
-                        self.signatures.members.get(&member),
-                        Some(MemberSignature::Function(function))
-                            if function.parameters.len() == values.len()
-                    )
-            });
-        let key = match declared {
-            Some(method) => FunctionKey {
-                symbol: method,
-                role: Role::Method,
-                bindings: self.bindings_for(ctx, method, &ty, &[]),
-            },
-            None if self.is_source_struct(&ty) => FunctionKey {
-                symbol: *symbol,
-                role: match name {
-                    "Equals" => Role::StructEquals,
-                    _ => Role::StructHashCode,
-                },
-                bindings: self.struct_bindings(&ty),
-            },
-            None => return None,
-        };
-        let result = self.call_function(ctx, &key, Some(slot), values, &[], span)?;
-        Some(Piece::Value(result, return_type.clone()))
-    }
-
     /// Body of the synthesized `bool Equals(object other)`: other is not
     /// null, is an `object[]` of the same type id, and every field is equal
     /// (`object.Equals` — value equality for boxed primitives and strings,

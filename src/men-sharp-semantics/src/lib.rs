@@ -38,7 +38,8 @@ pub mod symbol;
 pub mod types;
 
 pub use check::{
-    BodyCheck, ForeachEnumeration, ResolvedCall, ResolvedMember, ResolvedTarget, check_file,
+    BodyCheck, ConstructorChain, ConstructorChainKind, ForeachEnumeration, ResolvedCall,
+    ResolvedMember, ResolvedTarget, check_file,
 };
 pub use collect::{
     DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode, collect_file,

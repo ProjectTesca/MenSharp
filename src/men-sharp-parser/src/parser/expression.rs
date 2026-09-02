@@ -25,7 +25,7 @@ use crate::{
         peek_greater_run,
         query::parse_query_expression,
         statement::parse_block,
-        types::{parse_generics_info, parse_type, predefined_type},
+        types::{parse_generics_info, parse_type, parse_type_after_is, predefined_type},
     },
 };
 
@@ -392,7 +392,7 @@ fn parse_relational<'input, 'allocator>(
             }
             TokenKind::As => {
                 let as_keyword = lexer.take_span();
-                let target_type = match parse_type(lexer, errors, allocator) {
+                let target_type = match parse_type_after_is(lexer, errors, allocator) {
                     Some(target_type) => Ok(target_type),
                     None => {
                         errors.push(recover_until(

@@ -42,9 +42,9 @@ use men_sharp_parser::ast::{
     UnaryOperator,
 };
 use men_sharp_semantics::{
-    Accessibility, BodyCheck, Declarations, ExternalTypes, FileId, ForeachEnumeration,
-    MemberOrigin, MemberSignature, ResolvedCall, ResolvedMember, ResolvedTarget, Signatures,
-    SymbolId, SymbolKind, SyntaxRef, Type, TypeTarget,
+    Accessibility, BodyCheck, ConstructorChain, ConstructorChainKind, Declarations, ExternalTypes,
+    FileId, ForeachEnumeration, MemberOrigin, MemberSignature, ResolvedCall, ResolvedMember,
+    ResolvedTarget, Signatures, SymbolId, SymbolKind, SyntaxRef, Type, TypeTarget,
 };
 
 use crate::externs::{UdonNodes, mangle_dotnet_name};
@@ -93,9 +93,13 @@ pub fn generate(
         queue: VecDeque::new(),
         statics: HashMap::new(),
         static_init: Vec::new(),
+        static_init_emitted: HashSet::new(),
+        static_init_phase: false,
+        static_constructors: Vec::new(),
         layouts: HashMap::new(),
         type_order: Vec::new(),
         dispatchers: HashMap::new(),
+        emitted_dispatchers: HashSet::new(),
         call_edges: HashMap::new(),
         temp_counter: 0,
         entry_class: None,
@@ -147,6 +151,49 @@ enum Role {
     /// do whenever the declaring class is itself instantiated, or reached
     /// through `base.`, making the stub dispatch to itself forever.
     Dispatcher,
+    /// The dispatch stub of a virtual/abstract/interface property or indexer
+    /// getter (`symbol` is the property).
+    GetterDispatcher,
+    /// ... and setter.
+    SetterDispatcher,
+    /// `bool (object)`: is the value an object of type `symbol` (with these
+    /// bindings) or a subtype — the runtime test behind casts, `is` and
+    /// `as`. Synthesized after the fixpoint like a dispatcher, since it
+    /// enumerates every instantiated subtype.
+    TypeTest,
+    /// The stub behind `Equals`, `GetHashCode` or `ToString` on a receiver
+    /// whose runtime type is open (`object`, a non-sealed class, an
+    /// interface): finds the user's override by type id, else falls back to
+    /// the `System.Object` extern. `symbol` is the root namespace — there is
+    /// one stub per member in the whole program.
+    ObjectDispatcher(ObjectMember),
+}
+
+/// The `System.Object` members every type may override.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum ObjectMember {
+    Equals,
+    GetHashCode,
+    ToString,
+}
+
+impl ObjectMember {
+    fn of(name: &str) -> Option<Self> {
+        match name {
+            "Equals" => Some(Self::Equals),
+            "GetHashCode" => Some(Self::GetHashCode),
+            "ToString" => Some(Self::ToString),
+            _ => None,
+        }
+    }
+
+    fn name(self) -> &'static str {
+        match self {
+            Self::Equals => "Equals",
+            Self::GetHashCode => "GetHashCode",
+            Self::ToString => "ToString",
+        }
+    }
 }
 
 /// A compiled (or scheduled) function instance.
@@ -206,8 +253,10 @@ struct EventArgument {
 
 /// A synthesized virtual-call dispatcher: one per (root method, bindings).
 struct Dispatcher {
-    /// The method name used to find overrides on each instantiated subtype.
+    /// The member name used to find overrides on each instantiated subtype.
     name: String,
+    /// What the stub stands in for: a method body, a getter or a setter.
+    target: Role,
     receiver: Type,
     emitted_for: Vec<Type>,
 }
@@ -227,9 +276,23 @@ struct Generator<'a, 'ast> {
     statics: HashMap<SymbolId, DataId>,
     /// Static fields with initializers, in declaration order.
     static_init: Vec<(SymbolId, FileId)>,
+    /// Static fields whose initializer has been emitted into the static
+    /// initializer body already.
+    static_init_emitted: HashSet<SymbolId>,
+    /// Set while the static initializer body is being emitted: a static
+    /// field first met there gets its initializer emitted on the spot,
+    /// before the read that met it — C#'s "initialized before first use".
+    static_init_phase: bool,
+    /// Every static constructor in the compilation, in declaration order;
+    /// the static initializer runs them after the field initializers.
+    static_constructors: Vec<FunctionKey>,
     layouts: HashMap<Type, Layout>,
     type_order: Vec<Type>,
     dispatchers: HashMap<FunctionKey, Dispatcher>,
+    /// Dispatchers (and type tests) whose body has been emitted: their
+    /// subtype list is closed, so a type instantiated afterwards is an
+    /// internal error rather than a silently missing branch.
+    emitted_dispatchers: HashSet<FunctionKey>,
     call_edges: HashMap<FunctionKey, HashSet<FunctionKey>>,
     temp_counter: usize,
     /// Set when the entry class is a `MenSharpBehaviour` subclass: its
@@ -542,19 +605,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return;
         }
 
+        // static constructors run at startup whether or not anything else
+        // refers to their class; compile them with everything else so their
+        // bodies take part in the dispatch fixpoint below
+        self.schedule_static_constructors();
+
         // fixpoint: draining the queue may register new types, which may make
         // dispatchers incomplete, which enqueues more functions, ...
+        // ... and a dispatcher body may itself schedule functions (the
+        // fallbacks it calls) or meet a cast that needs a type test, so the
+        // whole thing repeats until nothing is left to emit
         loop {
-            while let Some(key) = self.queue.pop_front() {
-                self.compile_function(&key);
+            loop {
+                while let Some(key) = self.queue.pop_front() {
+                    self.compile_function(&key);
+                }
+                if !self.ensure_dispatcher_impls() {
+                    break;
+                }
             }
-            if !self.ensure_dispatcher_impls() {
+            if !self.emit_dispatcher_bodies() && self.queue.is_empty() {
                 break;
             }
-        }
-        self.emit_dispatcher_bodies();
-        while let Some(key) = self.queue.pop_front() {
-            self.compile_function(&key);
         }
 
         // entry stubs: initialize statics once, call the method, halt
@@ -901,12 +973,80 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let true_constant = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
         self.copy(true_constant, initialized);
 
-        let inits = std::mem::take(&mut self.static_init);
-        for (field, file) in &inits {
-            self.emit_static_field_initializer(*field, *file);
+        // an initializer's expression may meet further static fields; those
+        // join the list as it is walked (and are emitted inline where met,
+        // see `ensure_static`), so this is an index loop, not an iterator
+        self.static_init_phase = true;
+        let mut index = 0;
+        while index < self.static_init.len() {
+            let (field, file) = self.static_init[index];
+            index += 1;
+            if self.static_init_emitted.insert(field) {
+                self.emit_static_field_initializer(field, file);
+            }
         }
-        self.static_init = inits;
+        self.static_init_phase = false;
+
+        // then every static constructor body (§15.12): after its class's
+        // field initializers — all of them ran above — and once
+        let constructors = self.static_constructors.clone();
+        for key in constructors {
+            let (file, span) = self.declaration_site(key.symbol);
+            let mut ctx = Ctx {
+                key: key.clone(),
+                file,
+                locals: vec![HashMap::new()],
+                this_slot: None,
+                this_type: None,
+                loop_stack: Vec::new(),
+                result: None,
+                return_slot: init_return, // unused
+            };
+            self.call_function(&mut ctx, &key, None, &[], &[], span);
+        }
         self.program.code.push(Op::JumpIndirect(init_return));
+    }
+
+    /// Every `static T()` in the compilation, queued for compilation and
+    /// remembered for the static initializer. A generic class's static
+    /// constructor would need one run per instantiation, which nothing
+    /// here models yet — an error rather than a silent skip.
+    fn schedule_static_constructors(&mut self) {
+        let mut found = Vec::new();
+        for (symbol, entry) in self.declarations.table.iter() {
+            if entry.kind != SymbolKind::Constructor || !entry.is_static {
+                continue;
+            }
+            let Some(owner) = entry.parent else {
+                continue;
+            };
+            if !self
+                .declarations
+                .table
+                .symbol(owner)
+                .type_parameters
+                .is_empty()
+            {
+                let (file, span) = self.declaration_site(symbol);
+                self.errors.push(CodegenError {
+                    message: "a static constructor of a generic class is not supported by the \
+                              Udon backend yet"
+                        .into(),
+                    file,
+                    span,
+                });
+                continue;
+            }
+            found.push(FunctionKey {
+                symbol,
+                role: Role::Constructor,
+                bindings: Vec::new(),
+            });
+        }
+        for key in &found {
+            self.ensure_function(key);
+        }
+        self.static_constructors = found;
     }
 
     fn emit_static_field_initializer(&mut self, field: SymbolId, file: FileId) {
@@ -1205,6 +1345,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// The same path as [`Generator::symbol_path`], but spelled the way the
     /// user wrote it — for diagnostics, where a mangled name means nothing.
+    /// A type as the user would write it, for diagnostics.
+    pub(super) fn display_type(&self, ty: &Type) -> String {
+        men_sharp_semantics::TypeSystem {
+            declarations: self.declarations,
+            signatures: self.signatures,
+            external: self.external,
+        }
+        .display(ty)
+    }
+
     fn display_path(&self, symbol: SymbolId) -> String {
         let mut parts = Vec::new();
         let mut current = Some(symbol);
@@ -1416,6 +1566,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         let name = self.external.display_name(*id);
         Some(self.constant("SystemType", &name, HeapInit::TypeOf(name.clone())))
+    }
+
+    /// `typeof(object[])` — what every M# object is at runtime, and the first
+    /// thing a type test checks before reading a type id out of one.
+    pub(super) fn object_array_type_constant(&mut self) -> DataId {
+        let name = "System.Object[]";
+        self.constant("SystemType", name, HeapInit::TypeOf(name.to_string()))
     }
 
     /// A type's extern spelling, then its base classes' — what an operator or
@@ -1791,6 +1948,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn is_auto_property(&self, symbol: SymbolId) -> bool {
+        // `{ get; }` on an abstract or interface property declares no storage:
+        // the accessor is dispatched, and the implementing type owns the value
+        if self.is_bodiless(symbol) {
+            return false;
+        }
         let entry = self.declarations.table.symbol(symbol);
         entry.declarations.iter().all(|site| {
             matches!(&site.syntax, SyntaxRef::Property(property)
@@ -2243,6 +2405,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.statics.insert(field, slot);
         if runs_at_startup && let Some(file) = file {
             self.static_init.push((field, file));
+            // met while the static initializer is being emitted (by another
+            // initializer's expression): initialize it right here, ahead of
+            // the read that is being lowered
+            if self.static_init_phase && self.static_init_emitted.insert(field) {
+                self.emit_static_field_initializer(field, file);
+            }
         }
         slot
     }
@@ -2511,4 +2679,5 @@ fn event_slot_type(dotnet: &str) -> String {
 
 mod expressions;
 mod functions;
+mod runtime;
 mod structs;

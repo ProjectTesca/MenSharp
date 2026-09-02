@@ -64,6 +64,22 @@ pub enum SemanticErrorKind {
     },
     /// No overload accepts these arguments.
     NoMatchingOverload,
+    /// `new` of an abstract class (CS0144).
+    CannotInstantiateAbstractType {
+        type_name: String,
+    },
+    /// A concrete type leaves an abstract or interface member unimplemented
+    /// (CS0534 / CS0535).
+    MissingImplementation {
+        type_name: String,
+        member: String,
+    },
+    /// A constructor (written or implicit) has to call a base constructor,
+    /// and none takes the arguments given — for the implicit `base()`, none
+    /// takes zero (CS7036 / CS1729).
+    NoMatchingBaseConstructor {
+        type_name: String,
+    },
     /// More than one overload fits equally well.
     AmbiguousOverload,
     /// Generic method type arguments could not be inferred from the arguments;

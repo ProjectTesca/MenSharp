@@ -676,8 +676,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let source = self.lower_expression(ctx, value)?;
                 let from = self.type_of(ctx, value);
                 let to = self.type_of(ctx, expression);
-                Some(self.convert(ctx, source, &from, &to, expression.span()))
+                let converted = self.convert(ctx, source, &from, &to, expression.span());
+                Some(self.checked_cast(ctx, converted, &from, &to, expression.span()))
             }
+            Expression::Is(is) => self.lower_is(ctx, is),
+            Expression::As(as_expression) => self.lower_as(ctx, as_expression, expression),
             other => {
                 self.error(
                     ctx,
@@ -1002,6 +1005,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ty: &Type,
         span: Range<usize>,
     ) -> DataId {
+        let ty = &self.substitute(ty, &ctx.key.bindings);
+        // a value that may be an object of the user's: its own `ToString`
+        if self.has_type_id(ty)
+            || (self.heap_type(ty) == "SystemObject"
+                && matches!(
+                    ty,
+                    Type::Named {
+                        target: TypeTarget::External(_),
+                        ..
+                    }
+                ))
+        {
+            return self.object_to_string(ctx, slot, ty, span);
+        }
         if let Some(name) = self.extern_type_name(ty) {
             if name == "SystemString" {
                 return slot;
@@ -1518,6 +1535,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// The getter/setter to call for a property or indexer: the accessor
+    /// itself, or — when it is virtual, abstract or an interface member and
+    /// there is an instance to dispatch on — the stub that picks the
+    /// override by the receiver's type id.
+    fn accessor_key(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        has_receiver: bool,
+        symbol: SymbolId,
+        bindings: Vec<(SymbolId, Type)>,
+        role: Role,
+    ) -> FunctionKey {
+        if has_receiver && self.is_virtual(symbol) && !self.is_entry_member(symbol) {
+            let declaring = self.declaring_type_of(symbol, &bindings);
+            return self.dispatcher_for(ctx, symbol, &declaring, &[], role);
+        }
+        if self.is_entry_member(symbol) && self.is_virtual(symbol) {
+            // one behaviour instance: its most derived accessor is known
+            return FunctionKey {
+                symbol: self.entry_override(symbol),
+                role,
+                bindings,
+            };
+        }
+        FunctionKey {
+            symbol,
+            role,
+            bindings,
+        }
+    }
+
     fn read_place(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -1546,11 +1594,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 indices,
                 ty,
             } => {
-                let key = FunctionKey {
-                    symbol,
-                    role: Role::Getter,
-                    bindings,
-                };
+                let key =
+                    self.accessor_key(ctx, receiver.is_some(), symbol, bindings, Role::Getter);
                 let result = self.call_function(ctx, &key, receiver, &indices, &[], span)?;
                 Some((result, ty))
             }
@@ -1618,11 +1663,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 mut indices,
                 ..
             } => {
-                let key = FunctionKey {
-                    symbol,
-                    role: Role::Setter,
-                    bindings,
-                };
+                let key =
+                    self.accessor_key(ctx, receiver.is_some(), symbol, bindings, Role::Setter);
                 indices.push(value);
                 self.call_function(ctx, &key, receiver, &indices, &[], span);
             }
@@ -2309,7 +2351,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// By-value arguments of a constructor call, evaluated in written order
     /// and returned in parameter order (named arguments may reorder them).
-    fn constructor_arguments(
+    pub(super) fn constructor_arguments(
         &mut self,
         ctx: &mut Ctx<'ast>,
         call: &ResolvedCall,
@@ -2525,7 +2567,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     && self.is_virtual(symbol)
                     && !self.is_entry_member(symbol)
                 {
-                    self.dispatcher_for(ctx, call, symbol, &call.declaring_type)
+                    // a struct or sealed receiver has no subtypes: bind the
+                    // implementation directly (the "static dispatch" a
+                    // monomorphized `T : IShape` allows); otherwise the stub
+                    // that compares type ids at runtime
+                    let receiver_type = receiver
+                        .as_ref()
+                        .map(|(_, ty)| self.substitute(ty, &ctx.key.bindings));
+                    let bindings =
+                        self.bindings_for(ctx, symbol, &call.declaring_type, &call.type_arguments);
+                    let direct = receiver_type.as_ref().and_then(|receiver_type| {
+                        self.direct_implementation(receiver_type, symbol, &bindings, Role::Method)
+                    });
+                    match direct {
+                        Some(key) => key,
+                        None => self.dispatcher_for(
+                            ctx,
+                            symbol,
+                            &call.declaring_type,
+                            &call.type_arguments,
+                            Role::Method,
+                        ),
+                    }
                 } else {
                     FunctionKey {
                         symbol,
@@ -2551,22 +2614,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             MemberOrigin::External { member, .. } => {
                 let member_name = member.name.clone();
-                // `Equals`/`GetHashCode` on a struct or class of the user's:
-                // the declared override, or the synthesized field-wise
-                // version for a struct — never the reference-identity extern
-                if matches!(member_name.as_str(), "Equals" | "GetHashCode")
-                    && let Some((slot, receiver_type)) = &receiver
+                // `Equals`/`GetHashCode`/`ToString` on `object` or on a type
+                // of the user's: the override the runtime type selects — the
+                // reference-identity extern only when nothing overrides
+                if !call.is_static
+                    && matches!(member_name.as_str(), "Equals" | "GetHashCode" | "ToString")
                 {
-                    let receiver_type = self.substitute(receiver_type, &ctx.key.bindings);
-                    if let Some(piece) = self.object_member_override(
-                        ctx,
-                        &member_name,
-                        (*slot, receiver_type),
-                        &values,
-                        &return_type,
-                        span.clone(),
-                    ) {
-                        return piece;
+                    let receiver_value = match &receiver {
+                        Some((slot, receiver_type)) => Some((*slot, receiver_type.clone())),
+                        None => ctx.this_slot.zip(ctx.this_type.clone()),
+                    };
+                    if let Some((slot, receiver_type)) = receiver_value {
+                        let receiver_type = self.substitute(&receiver_type, &ctx.key.bindings);
+                        if let Some(piece) = self.object_member_call(
+                            ctx,
+                            &member_name,
+                            (slot, receiver_type),
+                            &values,
+                            &return_type,
+                            span.clone(),
+                        ) {
+                            return piece;
+                        }
                     }
                 }
                 let Some(signature) = self.external_signature(ctx, call, &span) else {

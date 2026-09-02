@@ -125,6 +125,10 @@ impl Value {
 pub enum EmulatorError {
     UnknownEntryPoint(String),
     UnknownExtern(String),
+    /// An extern threw — on Udon the VM logs it and halts the behaviour.
+    /// The compiler's own halt (a failed cast, later `throw`) is one of
+    /// these on purpose; the message is what it logged.
+    Exception(String),
     StackUnderflow,
     InvalidJump(u32),
     TypeError(String),
@@ -487,11 +491,25 @@ impl Emulator {
                 self.heap[args[2]] = Value::Boolean(parsed.is_ok());
                 Ok(())
             }
-            "SystemObject.__ToString__SystemString" => {
+            "SystemObject.__ToString__SystemString"
+            | "SystemConvert.__ToString__SystemObject__SystemString" => {
                 let args = self.pop_arguments(2)?;
                 let value = self.heap[args[0]].display();
                 self.heap[args[1]] = Value::Str(Rc::from(value));
                 Ok(())
+            }
+            "SystemInt32.__Parse__SystemString__SystemInt32" => {
+                let args = self.pop_arguments(2)?;
+                let text = self.string_or_empty(args[0]);
+                match text.trim().parse::<i32>() {
+                    Ok(value) => {
+                        self.heap[args[1]] = Value::Int32(value);
+                        Ok(())
+                    }
+                    Err(_) => Err(EmulatorError::Exception(format!(
+                        "FormatException: The input string '{text}' was not in a correct format."
+                    ))),
+                }
             }
             // ---- Object identity / equality ----
             "SystemObject.__GetType__SystemType" => {
@@ -500,16 +518,19 @@ impl Emulator {
                     Value::Null => {
                         return Err(EmulatorError::TypeError("GetType on null".to_string()));
                     }
-                    Value::Boolean(_) => "SystemBoolean",
-                    Value::Int32(_) => "SystemInt32",
-                    Value::Int64(_) => "SystemInt64",
-                    Value::UInt32(_) => "SystemUInt32",
-                    Value::Single(_) => "SystemSingle",
-                    Value::Double(_) => "SystemDouble",
-                    Value::Char(_) => "SystemChar",
-                    Value::Str(_) => "SystemString",
-                    Value::Array(_) => "SystemObjectArray",
-                    Value::Type(_) => "SystemType",
+                    // .NET names, which is what a `typeof` constant carries
+                    Value::Boolean(_) => "System.Boolean",
+                    Value::Int32(_) => "System.Int32",
+                    Value::Int64(_) => "System.Int64",
+                    Value::UInt32(_) => "System.UInt32",
+                    Value::Single(_) => "System.Single",
+                    Value::Double(_) => "System.Double",
+                    Value::Char(_) => "System.Char",
+                    Value::Str(_) => "System.String",
+                    // the emulator's arrays are untyped: every one reads as
+                    // object[], which is what M# objects are
+                    Value::Array(_) => "System.Object[]",
+                    Value::Type(_) => "System.Type",
                     Value::SelfComponent(name) => &name.clone(),
                 };
                 self.heap[args[1]] = Value::Type(Rc::from(name));
@@ -552,7 +573,8 @@ impl Emulator {
             "SystemObject.__Equals__SystemObject__SystemBoolean"
             | "SystemObject.__Equals__SystemObject_SystemObject__SystemBoolean"
             | "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean"
-            | "SystemObject.__op_Equality__SystemObject_SystemObject__SystemBoolean" => {
+            | "SystemObject.__op_Equality__SystemObject_SystemObject__SystemBoolean"
+            | "SystemObject.__op_Inequality__SystemObject_SystemObject__SystemBoolean" => {
                 let args = self.pop_arguments(3)?;
                 let equal = match (&self.heap[args[0]], &self.heap[args[1]]) {
                     (Value::Null, Value::Null) => true,
@@ -562,7 +584,8 @@ impl Emulator {
                     (Value::Str(a), Value::Str(b)) => a == b,
                     _ => false,
                 };
-                self.heap[args[2]] = Value::Boolean(equal);
+                let wanted = equal != signature.contains("op_Inequality");
+                self.heap[args[2]] = Value::Boolean(wanted);
                 Ok(())
             }
             // ---- Arrays (any element type: the emulator's arrays are untyped) ----

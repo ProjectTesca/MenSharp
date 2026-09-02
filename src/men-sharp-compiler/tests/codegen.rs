@@ -32,6 +32,16 @@ fn run_with_corlib(source: &str, event: &str) -> Option<Emulator> {
 }
 
 fn run_sources(sources: Vec<SourceCode>, event: &str) -> Option<Emulator> {
+    let (program, result) = run_sources_result(sources, event)?;
+    Some(result.unwrap_or_else(|error| panic!("emulator error: {error:?}\n{program}")))
+}
+
+/// [`run_sources`] that hands back the emulator's verdict instead of
+/// panicking on it — for programs expected to halt.
+fn run_sources_result(
+    sources: Vec<SourceCode>,
+    event: &str,
+) -> Option<(String, Result<Emulator, men_sharp_asm::EmulatorError>)> {
     let dir = dotnet_shared_dir()?;
     let compiler = Compiler::new(CompilerSettings::default()).unwrap();
     let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
@@ -60,10 +70,8 @@ fn run_sources(sources: Vec<SourceCode>, event: &str) -> Option<Emulator> {
 
     let assembled = output.program.assemble().unwrap();
     let mut emulator = Emulator::new(&output.program, &assembled);
-    emulator
-        .run(&assembled, event)
-        .unwrap_or_else(|error| panic!("emulator error: {error:?}\n{}", output.program.dump()));
-    Some(emulator)
+    let result = emulator.run(&assembled, event).map(|()| emulator);
+    Some((output.program.dump(), result))
 }
 
 fn int_of(emulator: &Emulator, name: &str) -> i32 {
@@ -3978,4 +3986,602 @@ fn an_extern_params_call_passes_one_array() {
         text.contains("\"SystemStringArray.__ctor__SystemInt32__SystemStringArray\""),
         "{text}"
     );
+}
+
+#[test]
+fn abstract_members_dispatch_on_the_runtime_type() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public abstract class Shape
+            {
+                public abstract int Area();
+                public abstract string Name { get; }
+                public abstract int Level { get; set; }
+                public virtual int Twice() => Area() * 2;
+                public virtual int Bonus => 1;
+                public int Describe() => Name.Length * 100 + Area();
+            }
+
+            public class Circle : Shape
+            {
+                private int r;
+                public Circle(int r) { this.r = r; }
+                public override int Area() => 3 * r * r;
+                public override string Name => "circle";
+                public override int Level { get; set; }
+                public override int Bonus => 5;
+            }
+
+            public class Square : Shape
+            {
+                private int s;
+                public Square(int s) { this.s = s; }
+                public override int Area() => s * s;
+                public override string Name => "sq";
+                public override int Level { get; set; }
+                public override int Twice() => Area() * 2 + 1;
+            }
+
+            public class Program
+            {
+                public static int areas;
+                public static int twice;
+                public static int names;
+                public static int levels;
+                public static int bonus;
+                public static int described;
+
+                public static void Main()
+                {
+                    Shape[] shapes = new Shape[] { new Circle(2), new Square(3) };
+                    foreach (Shape shape in shapes)
+                    {
+                        areas += shape.Area();          // 12 + 9 = 21
+                        twice += shape.Twice();         // 24 + 19 = 43
+                        names += shape.Name.Length;     // 6 + 2 = 8
+                        shape.Level = shape.Area();     // abstract setter
+                        levels += shape.Level;          // 21
+                        bonus += shape.Bonus;           // 5 + 1 = 6 (virtual property)
+                    }
+                    described = shapes[0].Describe();   // 612
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "areas"), 21);
+    assert_eq!(int_of(&emulator, "twice"), 43);
+    assert_eq!(int_of(&emulator, "names"), 8);
+    assert_eq!(int_of(&emulator, "levels"), 21);
+    assert_eq!(int_of(&emulator, "bonus"), 6);
+    assert_eq!(int_of(&emulator, "described"), 612);
+}
+
+#[test]
+fn interface_calls_dispatch_on_classes_and_structs() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public interface IDescribable { string Describe(); }
+            public interface IShape : IDescribable
+            {
+                int Area();
+                string Name { get; }
+                int this[int scale] { get; }
+            }
+
+            public class Circle : IShape
+            {
+                public int r;
+                public Circle(int r) { this.r = r; }
+                public int Area() => 3 * r * r;
+                public string Name => "circle";
+                public int this[int scale] => Area() * scale;
+                public string Describe() => Name + Area();
+            }
+
+            public struct Unit : IShape
+            {
+                public int size;
+                public int Area() => size;
+                public string Name => "unit";
+                public int this[int scale] => size * scale;
+                // explicit: reachable only through the interface
+                string IDescribable.Describe() => "u" + size;
+            }
+
+            public class Holder { public IShape shape; }
+
+            public class Program
+            {
+                public static int viaInterface;
+                public static int viaInherited;
+                public static int list;
+                public static int genericClass;
+                public static int genericStruct;
+                public static int boxedCopy;
+                public static int field;
+                public static int indexer;
+                public static string explicitImpl;
+
+                static int Total<T>(T shape) where T : IShape => shape.Area() + shape.Name.Length;
+
+                public static void Main()
+                {
+                    IShape c = new Circle(2);
+                    viaInterface = c.Area() + c.Name.Length;        // 12 + 6 = 18
+                    IDescribable d = c;
+                    viaInherited = d.Describe().Length;             // "circle12" = 8
+
+                    var shapes = new List<IShape> { new Circle(1), new Unit { size = 7 } };
+                    foreach (var s in shapes) { list += s.Area(); } // 3 + 7 = 10
+
+                    genericClass = Total(new Circle(1));            // 3 + 6 = 9
+                    Unit u = new Unit { size = 4 };
+                    genericStruct = Total(u);                       // 4 + 4 = 8
+
+                    // a struct behind an interface is a boxed copy
+                    IShape boxed = u;
+                    u.size = 100;
+                    boxedCopy = boxed.Area();                       // 4
+
+                    var holder = new Holder { shape = new Unit { size = 6 } };
+                    field = holder.shape.Area();                    // 6
+                    indexer = c[10] + holder.shape[2];              // 120 + 12 = 132
+                    explicitImpl = ((IDescribable)holder.shape).Describe();   // "u6"
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "viaInterface"), 18);
+    assert_eq!(int_of(&emulator, "viaInherited"), 8);
+    assert_eq!(int_of(&emulator, "list"), 10);
+    assert_eq!(int_of(&emulator, "genericClass"), 9);
+    assert_eq!(int_of(&emulator, "genericStruct"), 8);
+    assert_eq!(int_of(&emulator, "boxedCopy"), 4);
+    assert_eq!(int_of(&emulator, "field"), 6);
+    assert_eq!(int_of(&emulator, "indexer"), 132);
+    assert_eq!(string_of(&emulator, "explicitImpl"), "u6");
+}
+
+#[test]
+fn abstract_and_interface_contracts_are_checked() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public interface IShape { int Area(); string Name { get; } }
+            public abstract class Base { public abstract int F(); }
+            public class NoArea : IShape { public string Name => "x"; }      // CS0535
+            public class NoF : Base { }                                      // CS0534
+            public class Fine : Base, IShape
+            {
+                public override int F() => 1;
+                public int Area() => 2;
+                public string Name => "fine";
+            }
+            public class Program
+            {
+                public static void Main()
+                {
+                    Base b = new Base();                                     // CS0144
+                    Fine f = new Fine();
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let mut missing: Vec<String> = bodies
+        .errors
+        .iter()
+        .filter_map(|error| match &error.kind {
+            men_sharp_semantics::SemanticErrorKind::MissingImplementation { type_name, member } => {
+                Some(format!("{type_name}: {member}"))
+            }
+            _ => None,
+        })
+        .collect();
+    missing.sort();
+    assert_eq!(
+        missing,
+        vec!["Game.NoArea: Game.IShape.Area", "Game.NoF: Game.Base.F"],
+        "{:#?}",
+        bodies.errors
+    );
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::CannotInstantiateAbstractType { .. }
+        )),
+        "{:#?}",
+        bodies.errors
+    );
+}
+
+#[test]
+fn constructors_chain_to_the_base() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class A
+            {
+                public int v = 5;
+                public int w;
+                public int fromVirtual;
+                public A() { w = 1; fromVirtual = F(); }
+                public A(int x) { w = x; }
+                public virtual int F() { return 1; }
+            }
+            public class B : A
+            {
+                public int own = 7;
+                public B() { }                                  // implicit base()
+                public B(int x) : base(x) { own = x * 2; }
+                public B(int x, int y) : this(x) { own += y; }  // this(x) → base(x)
+                public override int F() { return 2; }
+            }
+            public class C : A { }                              // implicit constructor, implicit base()
+            public abstract class S
+            {
+                public int v;
+                protected S(int x) { v = x + Extra(); }
+                protected abstract int Extra();
+            }
+            public class T : S
+            {
+                public T() : base(1) { }
+                protected override int Extra() { return 10; }
+            }
+            public class Program
+            {
+                public static int implicitBase;
+                public static int explicitBase;
+                public static int viaThis;
+                public static int noConstructor;
+                public static int virtualFromBase;
+                public static int abstractBase;
+                public static void Main()
+                {
+                    var b = new B();
+                    implicitBase = b.v * 100 + b.w * 10 + b.own;      // 517
+                    var b2 = new B(3);
+                    explicitBase = b2.v * 100 + b2.w * 10 + b2.own;   // 536
+                    var b3 = new B(3, 4);
+                    viaThis = b3.v * 100 + b3.w * 10 + b3.own;        // 540
+                    var c = new C();
+                    noConstructor = c.v * 10 + c.w;                   // 51
+                    virtualFromBase = b.fromVirtual;                  // 2
+                    abstractBase = new T().v;                         // 11
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "implicitBase"), 517);
+    assert_eq!(int_of(&emulator, "explicitBase"), 536);
+    assert_eq!(int_of(&emulator, "viaThis"), 540);
+    assert_eq!(int_of(&emulator, "noConstructor"), 51);
+    assert_eq!(int_of(&emulator, "virtualFromBase"), 2);
+    assert_eq!(int_of(&emulator, "abstractBase"), 11);
+}
+
+#[test]
+fn a_missing_base_constructor_is_an_error() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class A { public A(int x) { } }
+            public class B : A { }                          // CS7036: no base()
+            public class C : A { public C() { } }           // CS7036 again
+            public class D : A { public D() : base("x") { } } // no such overload
+            public class Program { public static void Main() { } }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let count = bodies
+        .errors
+        .iter()
+        .filter(|error| {
+            matches!(
+                error.kind,
+                men_sharp_semantics::SemanticErrorKind::NoMatchingBaseConstructor { .. }
+            )
+        })
+        .count();
+    assert_eq!(count, 3, "{:#?}", bodies.errors);
+}
+
+#[test]
+fn static_constructors_run_at_startup_after_field_initializers() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public static class Cfg
+            {
+                public static int seed;
+                public static int fromInitializer = Other.Base * 2; // non-literal: runs at startup
+                static Cfg() { seed = 42 + fromInitializer; }
+            }
+            public static class Other
+            {
+                public static int Base = Compute();
+                static int Compute() { return 10; }
+            }
+            public class Program
+            {
+                public static int seed;
+                public static int fromInitializer;
+                public static void Main()
+                {
+                    seed = Cfg.seed;
+                    fromInitializer = Cfg.fromInitializer;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "fromInitializer"), 20);
+    assert_eq!(int_of(&emulator, "seed"), 62);
+}
+
+#[test]
+fn explicit_implementations_win_for_their_own_interface() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public interface IA { int F(); }
+            public interface IB { int F(); }
+            public class C : IA, IB
+            {
+                int IA.F() { return 1; }
+                int IB.F() { return 2; }
+                public int F() { return 3; }
+            }
+            public sealed class D : IA, IB
+            {
+                int IB.F() { return 2; }
+                public int F() { return 3; }   // implements IA
+            }
+            public class Program
+            {
+                public static int result;
+                public static int viaSealed;
+                public static void Main()
+                {
+                    var c = new C();
+                    IA a = c;
+                    IB b = c;
+                    result = a.F() * 100 + b.F() * 10 + c.F();
+                    var d = new D();
+                    IA da = d;
+                    IB db = d;
+                    viaSealed = da.F() * 100 + db.F() * 10 + d.F();
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 123);
+    assert_eq!(int_of(&emulator, "viaSealed"), 323);
+}
+
+#[test]
+fn object_members_dispatch_through_object_receivers() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class A
+            {
+                public int v;
+                public override bool Equals(object o) { var a = o as A; return a != null && a.v == v; }
+                public override int GetHashCode() { return v; }
+                public override string ToString() { return "A" + v; }
+            }
+            public class B : A { }                     // inherits the overrides
+            public class Plain { }                     // reference identity, "Game.Plain"
+            public struct P { public int x; }          // synthesized Equals, type name
+            public class Program
+            {
+                public static int equalsViaObject;
+                public static int equalsViaBase;
+                public static int hashViaObject;
+                public static string toStringViaObject;
+                public static string concat;
+                public static string plain;
+                public static string structName;
+                public static int structEquals;
+                public static int plainIdentity;
+                public static string boxedInt;
+                public static string nullConcat;
+                public static void Main()
+                {
+                    object o = new A { v = 2 };
+                    equalsViaObject = o.Equals(new A { v = 2 }) ? 1 : 0;
+                    A a = new B { v = 3 };
+                    equalsViaBase = a.Equals(new B { v = 3 }) ? 1 : 0;
+                    hashViaObject = o.GetHashCode();
+                    toStringViaObject = o.ToString();
+                    concat = "x" + a + "y";
+                    object p = new Plain();
+                    plain = p.ToString();
+                    object s = new P { x = 1 };
+                    structName = s.ToString();
+                    structEquals = s.Equals(new P { x = 1 }) ? 1 : 0;
+                    plainIdentity = (p.Equals(new Plain()) ? 1 : 0) + (p.Equals(p) ? 10 : 0);
+                    object i = 5;
+                    boxedInt = i.ToString();
+                    A none = null;
+                    nullConcat = "n" + none;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "equalsViaObject"), 1);
+    assert_eq!(int_of(&emulator, "equalsViaBase"), 1);
+    assert_eq!(int_of(&emulator, "hashViaObject"), 2);
+    assert_eq!(string_of(&emulator, "toStringViaObject"), "A2");
+    assert_eq!(string_of(&emulator, "concat"), "xA3y");
+    assert_eq!(string_of(&emulator, "plain"), "Game.Plain");
+    assert_eq!(string_of(&emulator, "structName"), "Game.P");
+    assert_eq!(int_of(&emulator, "structEquals"), 1);
+    assert_eq!(int_of(&emulator, "plainIdentity"), 10);
+    assert_eq!(string_of(&emulator, "boxedInt"), "5");
+    assert_eq!(string_of(&emulator, "nullConcat"), "n");
+}
+
+#[test]
+fn casts_is_and_as_test_the_runtime_type() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        namespace Game
+        {
+            public interface IShape { int Area(); }
+            public abstract class S : IShape { public abstract int Area(); }
+            public class C : S { public int side; public override int Area() { return side * side; } }
+            public class D : S { public override int Area() { return 0; } }
+            public struct P : IShape { public int x; public int Area() { return x; } }
+            public class Program
+            {
+                public static int asAndIs;
+                public static int pattern;
+                public static int conditional;
+                public static int upcastAndNull;
+                public static int externals;
+                public static int viaInterface;
+                public static int unboxCopies;
+                public static void Main()
+                {
+                    S s = new C { side = 3 };
+                    var c = s as C;
+                    var d = s as D;
+                    asAndIs = (c == null ? 0 : c.side) * 100 + (d == null ? 1 : 0) * 10 + ((s is C) ? 1 : 0);
+                    if (s is C found) { pattern = found.side; }
+                    if (s is D wrong) { pattern += 100; }
+                    conditional = s is C ? 1 : 0;                 // `C ?` is the conditional, not C?
+                    object none = null;
+                    C fromNull = (C)none;                         // null passes a cast
+                    S up = (S)new C { side = 2 };                 // upcast: no test
+                    upcastAndNull = (fromNull == null ? 1 : 0) + up.Area() * 10;
+                    object boxed = 5;
+                    object text = "t";
+                    externals = ((boxed is int) ? 1 : 0) + ((text is string) ? 10 : 0) + ((boxed is string) ? 100 : 0) + ((none is int) ? 1000 : 0);
+                    IShape shape = new P { x = 7 };
+                    var list = new System.Collections.Generic.List<IShape> { new C { side = 2 }, shape };
+                    foreach (var item in list)
+                    {
+                        if (item is P p) { viaInterface += p.x; }
+                        if (item is S ss) { viaInterface += ss.Area() * 10; }
+                    }
+                    P unboxed = (P)shape;
+                    unboxed.x = 1;
+                    unboxCopies = ((P)shape).x * 10 + unboxed.x;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "asAndIs"), 311);
+    assert_eq!(int_of(&emulator, "pattern"), 3);
+    assert_eq!(int_of(&emulator, "conditional"), 1);
+    assert_eq!(int_of(&emulator, "upcastAndNull"), 41);
+    assert_eq!(int_of(&emulator, "externals"), 11);
+    assert_eq!(int_of(&emulator, "viaInterface"), 47);
+    assert_eq!(int_of(&emulator, "unboxCopies"), 71);
+}
+
+#[test]
+fn a_failed_cast_halts_the_program() {
+    let Some((program, result)) = run_sources_result(
+        vec![SourceCode::new(
+            "test.cs",
+            r#"
+            namespace Game
+            {
+                public class S { }
+                public class C : S { public int side = 3; }
+                public class D : S { }
+                public class Program
+                {
+                    public static int before;
+                    public static int after;
+                    public static void Main()
+                    {
+                        before = 1;
+                        S s = new D();
+                        C c = (C)s;
+                        after = c.side;
+                    }
+                }
+            }
+            "#,
+        )],
+        "Main",
+    ) else {
+        return;
+    };
+    match result {
+        Err(men_sharp_asm::EmulatorError::Exception(message)) => {
+            assert!(
+                message.contains("InvalidCastException") && message.contains("Game.C"),
+                "{message}"
+            );
+        }
+        Err(other) => panic!("expected a halt, got {other:?}\n{program}"),
+        Ok(emulator) => panic!(
+            "the cast was not checked: after = {:?}\n{program}",
+            emulator.value_of("after")
+        ),
+    }
 }

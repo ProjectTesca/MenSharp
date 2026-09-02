@@ -47,6 +47,27 @@ pub(crate) fn parse_type<'input, 'allocator>(
     errors: &mut Errors,
     allocator: &'allocator Bump,
 ) -> Option<TypeRef<'input, 'allocator>> {
+    parse_type_in(lexer, errors, allocator, false)
+}
+
+/// [`parse_type`] for the type after `is` / `as`, which may sit at the end
+/// of an expression: there a trailing `?` is the conditional operator when
+/// what follows it can start an expression (`x is T ? a : b`), and the
+/// nullable suffix only otherwise (`x is T? t`) — C#'s own disambiguation.
+pub(crate) fn parse_type_after_is<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut Errors,
+    allocator: &'allocator Bump,
+) -> Option<TypeRef<'input, 'allocator>> {
+    parse_type_in(lexer, errors, allocator, true)
+}
+
+fn parse_type_in<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut Errors,
+    allocator: &'allocator Bump,
+    after_is: bool,
+) -> Option<TypeRef<'input, 'allocator>> {
     let anchor = lexer.cast_anchor();
 
     // `ref T` / `ref readonly T`
@@ -84,7 +105,7 @@ pub(crate) fn parse_type<'input, 'allocator>(
     // `int* p` is unambiguous whatever the context, because a type keyword cannot be
     // multiplied. `Foo* p` reads exactly like `Foo * p`, so it needs an `unsafe` scope.
     let allow_pointer = matches!(base, TypeRefBase::Predefined(_)) || lexer.unsafe_depth > 0;
-    let suffixes = parse_type_suffixes(lexer, allocator, allow_pointer);
+    let suffixes = parse_type_suffixes(lexer, allocator, allow_pointer, after_is);
 
     Some(TypeRef {
         base,
@@ -118,6 +139,7 @@ fn parse_type_suffixes<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
     allocator: &'allocator Bump,
     allow_pointer: bool,
+    after_is: bool,
 ) -> &'allocator [TypeSuffix] {
     let mut suffixes = Vec::new_in(allocator);
 
@@ -128,7 +150,13 @@ fn parse_type_suffixes<'input, 'allocator>(
                 suffixes.push(TypeSuffix::Pointer { span });
             }
             TokenKind::QuestionMark => {
+                let anchor = lexer.cast_anchor();
                 let span = lexer.take_span();
+                if after_is && can_start_expression(lexer.kind()) {
+                    // `x is T ? a : b`: the `?` belongs to the conditional
+                    lexer.back_to_anchor(anchor);
+                    break;
+                }
                 suffixes.push(TypeSuffix::Nullable { span });
             }
             TokenKind::BracketLeft => {
@@ -445,4 +473,47 @@ fn parse_constraint_bound<'input, 'allocator>(
         }
         _ => parse_type(lexer, errors, allocator).map(ConstraintBound::Type),
     }
+}
+
+/// Whether a token can begin an expression — what decides, after `is T`,
+/// if a `?` is the conditional operator or a nullable suffix.
+fn can_start_expression(kind: TokenKind) -> bool {
+    predefined_type(kind).is_some()
+        || matches!(
+            kind,
+            TokenKind::Identifier
+                | TokenKind::IntegerLiteral
+                | TokenKind::RealLiteral
+                | TokenKind::CharLiteral
+                | TokenKind::StringLiteral
+                | TokenKind::VerbatimStringLiteral
+                | TokenKind::InterpolatedStringLiteral
+                | TokenKind::RawStringLiteral
+                | TokenKind::ParenthesisLeft
+                | TokenKind::Plus
+                | TokenKind::Minus
+                | TokenKind::Exclamation
+                | TokenKind::Tilde
+                | TokenKind::DoublePlus
+                | TokenKind::DoubleMinus
+                | TokenKind::Ampersand
+                | TokenKind::Asterisk
+                | TokenKind::New
+                | TokenKind::Typeof
+                | TokenKind::Default
+                | TokenKind::This
+                | TokenKind::Base
+                | TokenKind::True
+                | TokenKind::False
+                | TokenKind::Null
+                | TokenKind::Sizeof
+                | TokenKind::Nameof
+                | TokenKind::Checked
+                | TokenKind::Unchecked
+                | TokenKind::Await
+                | TokenKind::Delegate
+                | TokenKind::Stackalloc
+                | TokenKind::Throw
+                | TokenKind::Ref
+        )
 }

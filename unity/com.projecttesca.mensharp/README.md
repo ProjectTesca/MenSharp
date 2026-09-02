@@ -180,12 +180,72 @@ GameObject and takes nothing else — the position/rotation/parent overloads are
 written in terms of it. VRChat's own rules still apply: the original has to be
 in the scene (not a project prefab), and the clone is local to your client.
 
-## Inheritance
+## Inheritance, abstract classes and interfaces
+
+Classes of your own inherit, override (`virtual`/`abstract`/`override`, methods
+and properties and indexers alike), and implement interfaces — explicit
+implementations (`int IShape.Area()`) and interfaces extending interfaces
+included. A call through a base or interface type lands on the runtime type's
+implementation:
+
+```csharp
+public interface IShape { int Area(); string Name { get; } }
+public abstract class Shape : IShape
+{
+    public abstract int Area();
+    public abstract string Name { get; }
+    public virtual int Twice() => Area() * 2;
+}
+public struct Unit : IShape { ... }
+
+IShape s = new Circle(2);   // dispatches on the object's type id
+Total<T>(T shape) where T : IShape => shape.Area();   // a struct T binds statically
+```
+
+Every type is known at compile time, so a dispatch is a comparison of type ids
+against the implementations that exist in the program — there is no runtime
+lookup. A `sealed` class or a struct behind a constrained type parameter skips
+even that and calls the implementation directly. A concrete type that leaves an
+abstract or interface member unimplemented, or `new` of an abstract class, is
+the C# error it is (CS0534/CS0535/CS0144). When a class has both a public
+member and an explicit implementation of the same name, a call through the
+interface reaches the explicit one, as in C#.
+
+Constructors chain as in C#: field initializers, then `: base(...)` /
+`: this(...)` (or the implicit `base()`), then the body — so a base class's
+fields are initialized whichever subclass is constructed, and a virtual call
+from a base constructor lands on the subclass's override. A class whose base
+has no parameterless constructor must write `: base(...)` (CS7036). Static
+constructors run once at startup, after the static field initializers, before
+the first event.
+
+`Equals`, `GetHashCode` and `ToString` go to your override whatever the static
+type of the receiver — `object`, a base class, an interface — and so does
+string concatenation (`"got " + shape`). A struct without them gets field-wise
+equality and its type name, as in .NET.
+
+Casts, `is` and `as` test the runtime type:
+
+```csharp
+if (shape is Circle c) { ... }        // binds on success
+var square = shape as Square;         // null when it is not one
+var circle = (Circle)shape;           // InvalidCastException when it is not one
+```
+
+A failed cast stops the program the way an unhandled exception does on Udon:
+the error is logged (`InvalidCastException: the object is not a `Game.Circle``)
+and the behaviour halts, at the cast, instead of reading the wrong object's
+fields later. `is`/`as` work with your own classes, structs and interfaces and
+with value types and `string` (`o is int`); for other engine types they are a
+compile error for now.
 
 Behaviours inherit from one another. The leaf class is the whole instance: it
 exports its bases' public variables and events too, and a virtual method called
 from a base always lands on the leaf's override. Because the public variables
 share one inspector namespace, a name may not be declared twice in a hierarchy.
+A behaviour cannot be reached *through an interface*, though: another
+behaviour is another Udon program, only callable by event name, so call it
+through a variable of its own type.
 
 Adding both a behaviour and one deriving from it to the same GameObject is
 legal but rarely intended — they are two programs, each with its own copy of
@@ -309,8 +369,12 @@ points — each copy is an allocation. Structs without their own
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- exceptions;
-- pattern matching in `switch` beyond constant labels;
+- exceptions (`try`/`catch`/`throw`) — a failed cast already halts the way an
+  unhandled exception would, see above;
+- pattern matching in `switch` beyond constant labels, and `is` patterns other
+  than a type (`is Circle c`);
+- operator overloading (`public static V operator +(V a, V b)`);
+- static constructors of generic classes;
 - the bare declaration shorthand `int[] x = { 1, 2 };` — write
   `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.
 

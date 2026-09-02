@@ -18,7 +18,7 @@ use crate::{
     parser::{
         Errors, ParserLexer, alloc_slice,
         expression::EXPRESSION_RECOVERY,
-        types::{parse_type, predefined_type},
+        types::{parse_type_after_is, predefined_type},
     },
 };
 
@@ -228,7 +228,7 @@ fn parse_primary_pattern<'input, 'allocator>(
     }
 
     // `Type`, `Type x`, `Type { ... }`, `Type(...)`, `Type[...]`
-    let pattern_type = parse_type(lexer, errors, allocator)?;
+    let pattern_type = parse_type_after_is(lexer, errors, allocator)?;
 
     if lexer.kind() == TokenKind::ParenthesisLeft {
         return parse_parenthesized_or_positional(

@@ -55,6 +55,10 @@ pub struct Signatures {
     pub members: HashMap<SymbolId, MemberSignature>,
     /// Resolved constraint bounds per type-parameter symbol (`where T : Bound`).
     pub constraints: HashMap<SymbolId, Vec<Type>>,
+    /// For every explicit interface implementation (`int IShape.Area()`),
+    /// the interface it implements — what decides which interface's call
+    /// lands on it.
+    pub explicit_interfaces: HashMap<SymbolId, Type>,
     pub errors: Vec<SemanticError>,
 }
 
@@ -64,6 +68,7 @@ impl Signatures {
         self.base_types.extend(other.base_types);
         self.members.extend(other.members);
         self.constraints.extend(other.constraints);
+        self.explicit_interfaces.extend(other.explicit_interfaces);
         self.errors.extend(other.errors);
     }
 }
@@ -375,6 +380,18 @@ impl<'ast> Resolver<'_, 'ast> {
         };
 
         self.out.members.insert(symbol, signature);
+
+        let explicit_interface = match node.syntax {
+            SyntaxRef::Method(method) => method.explicit_interface.as_ref(),
+            SyntaxRef::Property(property) => property.explicit_interface.as_ref(),
+            SyntaxRef::Indexer(indexer) => indexer.explicit_interface.as_ref(),
+            SyntaxRef::Event { event, .. } => event.explicit_interface.as_ref(),
+            _ => None,
+        };
+        if let Some(name) = explicit_interface {
+            let interface = self.resolve_name_type(name, scopes, type_stack);
+            self.out.explicit_interfaces.insert(symbol, interface);
+        }
     }
 
     fn resolve_base_list(

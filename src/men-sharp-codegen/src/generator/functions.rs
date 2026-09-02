@@ -10,7 +10,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// parameter types (setter value last) and the return type.
     pub(super) fn function_shape(&self, key: &FunctionKey) -> (Vec<Type>, Type) {
         let member = self.signatures.members.get(&key.symbol);
-        let (parameters, return_type) = match (key.role, member) {
+        // a dispatch stub has the shape of what it dispatches to
+        let role = match key.role {
+            Role::GetterDispatcher => Role::Getter,
+            Role::SetterDispatcher => Role::Setter,
+            other => other,
+        };
+        let (parameters, return_type) = match (role, member) {
             (
                 Role::Method | Role::Constructor | Role::Dispatcher,
                 Some(MemberSignature::Function(signature)),
@@ -49,6 +55,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.corlib_type("Boolean"),
             ),
             (Role::StructHashCode, _) => (Vec::new(), self.corlib_type("Int32")),
+            (Role::TypeTest, _) => (
+                vec![self.corlib_type("Object")],
+                self.corlib_type("Boolean"),
+            ),
+            // the receiver is an ordinary `object` parameter, not `this`: it
+            // may be anything, including a boxed int no `object[]` slot
+            // could hold
+            (Role::ObjectDispatcher(member), _) => {
+                let object = self.corlib_type("Object");
+                match member {
+                    ObjectMember::Equals => {
+                        (vec![object.clone(), object], self.corlib_type("Boolean"))
+                    }
+                    ObjectMember::GetHashCode => (vec![object], self.corlib_type("Int32")),
+                    ObjectMember::ToString => (vec![object], self.corlib_type("String")),
+                }
+            }
             _ => (Vec::new(), Type::Void),
         };
         let parameters = parameters
@@ -66,10 +89,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return false;
         }
         match key.role {
-            Role::Constructor
-            | Role::DefaultConstructor
-            | Role::StructEquals
-            | Role::StructHashCode => true,
+            Role::DefaultConstructor | Role::StructEquals | Role::StructHashCode => true,
+            Role::TypeTest | Role::ObjectDispatcher(_) => false,
             _ => !self.declarations.table.symbol(key.symbol).is_static,
         }
     }
@@ -85,6 +106,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::StructEquals => name.push_str("_equals"),
             Role::StructHashCode => name.push_str("_hashcode"),
             Role::Dispatcher => name.push_str("_dispatch"),
+            Role::GetterDispatcher => name.push_str("_get_dispatch"),
+            Role::SetterDispatcher => name.push_str("_set_dispatch"),
+            Role::TypeTest => name.push_str("_is"),
+            Role::ObjectDispatcher(member) => {
+                name.push_str("_object_");
+                name.push_str(member.name());
+            }
         }
         for (_, ty) in &key.bindings {
             name.push('_');
@@ -214,7 +242,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let value_parameters = &parameters[usize::from(has_this)..];
         match (key.role, &syntax) {
             (Role::DefaultConstructor, _) => {
+                // the implicit constructor: field initializers, then `base()`
                 self.emit_field_initializers(&mut ctx);
+                let chain = self.bodies.constructor_chains.get(&key.symbol).cloned();
+                if let Some(chain) = chain {
+                    self.emit_constructor_chain(&mut ctx, &chain, &[], 0..0);
+                }
             }
             (Role::StructEquals, _) => self.emit_struct_equals(&mut ctx),
             (Role::StructHashCode, _) => self.emit_struct_hash_code(&mut ctx),
@@ -229,14 +262,34 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     value_parameters,
                     &parameter_types,
                 );
-                if declaration.initializer.is_some() {
-                    self.error(
-                        &ctx,
-                        "constructor initializers (`: base(...)` / `: this(...)`) are not supported by the Udon backend yet",
-                        declaration.span.clone(),
-                    );
+                if has_this {
+                    // §15.11.2: `: this(...)` hands everything (field
+                    // initializers included) to the sibling; otherwise the
+                    // field initializers run, then the base constructor,
+                    // then the body
+                    let chain = self.bodies.constructor_chains.get(&key.symbol).cloned();
+                    let arguments: &[Argument] = declaration
+                        .initializer
+                        .as_ref()
+                        .and_then(|initializer| initializer.arguments.as_ref().ok())
+                        .map(|list| list.arguments)
+                        .unwrap_or(&[]);
+                    let span = declaration
+                        .initializer
+                        .as_ref()
+                        .map(|initializer| initializer.span.clone())
+                        .unwrap_or_else(|| declaration.name.span.clone());
+                    match &chain {
+                        Some(chain) if chain.kind == ConstructorChainKind::This => {
+                            self.emit_constructor_chain(&mut ctx, chain, arguments, span);
+                        }
+                        Some(chain) => {
+                            self.emit_field_initializers(&mut ctx);
+                            self.emit_constructor_chain(&mut ctx, chain, arguments, span);
+                        }
+                        None => self.emit_field_initializers(&mut ctx),
+                    }
                 }
-                self.emit_field_initializers(&mut ctx);
                 self.emit_function_body(&mut ctx, &declaration.body);
             }
             (Role::Method, Some(SyntaxRef::Method(declaration))) => {
@@ -396,11 +449,51 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .iter()
                     .find(|accessor| accessor.kind.value == wanted);
                 match accessor {
+                    // `{ get; set; }` with storage of its own: reached as a
+                    // function only through dispatch (an override of a
+                    // virtual/abstract/interface property), so the accessor
+                    // is the slot read or write itself
+                    Some(accessor) if matches!(accessor.body, FunctionBody::None { .. }) => {
+                        self.emit_auto_accessor(ctx, role, list.span.clone());
+                    }
                     Some(accessor) => self.emit_function_body(ctx, &accessor.body),
                     None => self.error(ctx, "missing accessor", list.span.clone()),
                 }
             }
             _ => self.error(ctx, "unsupported accessor shape", 0..0),
+        }
+    }
+
+    fn emit_auto_accessor(&mut self, ctx: &mut Ctx<'ast>, role: Role, span: Range<usize>) {
+        let slot = ctx
+            .this_type
+            .clone()
+            .and_then(|this_type| self.layout_of(&this_type))
+            .and_then(|layout| layout.slots.get(&ctx.key.symbol).copied());
+        let (Some(index), Some(this)) = (slot, ctx.this_slot) else {
+            self.error(
+                ctx,
+                "a bodiless (abstract/extern) member cannot be called directly on Udon",
+                span,
+            );
+            return;
+        };
+        let index = self.int_constant(index as i32);
+        match role {
+            Role::Getter => {
+                let (_, ty) = self.function_shape(&ctx.key);
+                let value = self.get_element(ctx, this, index, &ty, span);
+                if let Some(result) = ctx.result {
+                    self.copy(value, result);
+                }
+            }
+            _ => {
+                let Some((value, _)) = ctx.lookup("value") else {
+                    self.error(ctx, "internal: setter without a value", span);
+                    return;
+                };
+                self.set_element(ctx, this, index, value, span);
+            }
         }
     }
 
@@ -462,6 +555,62 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if let Some(value) = self.owned_value(ctx, initializer) {
                 let index = self.int_constant(slot_index as i32);
                 self.set_element(ctx, object, index, value, 0..0);
+            }
+        }
+    }
+
+    /// The base (or sibling) constructor call at the top of a constructor,
+    /// on the object under construction.
+    fn emit_constructor_chain(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        chain: &ConstructorChain,
+        arguments: &'ast [Argument<'ast, 'ast>],
+        span: Range<usize>,
+    ) {
+        let Some(this) = ctx.this_slot else {
+            return;
+        };
+        let target_type = self.substitute(&chain.target_type, &ctx.key.bindings);
+        // the entry class is the program itself: its chain has nothing to run
+        if self.behaviour_in_type(&target_type).is_some() {
+            return;
+        }
+        match &chain.call {
+            Some(call) => {
+                let Some(values) = self.constructor_arguments(ctx, call, arguments) else {
+                    return;
+                };
+                if let MemberOrigin::Source(constructor) = call.origin {
+                    let key = FunctionKey {
+                        symbol: constructor,
+                        role: Role::Constructor,
+                        bindings: self.bindings_for(ctx, constructor, &call.declaring_type, &[]),
+                    };
+                    self.call_function(ctx, &key, Some(this), &values, &[], span);
+                }
+            }
+            None => {
+                // the target declares no constructor: its synthesized one
+                let Type::Named {
+                    target: TypeTarget::Source(class),
+                    arguments: class_arguments,
+                } = &target_type
+                else {
+                    return;
+                };
+                let parameters = &self.declarations.table.symbol(*class).type_parameters;
+                let bindings = parameters
+                    .iter()
+                    .copied()
+                    .zip(class_arguments.iter().cloned())
+                    .collect();
+                let key = FunctionKey {
+                    symbol: *class,
+                    role: Role::DefaultConstructor,
+                    bindings,
+                };
+                self.call_function(ctx, &key, Some(this), &[], &[], span);
             }
         }
     }
@@ -635,46 +784,165 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     pub(super) fn is_virtual(&self, symbol: SymbolId) -> bool {
-        self.declared_modifiers(symbol).iter().any(|modifier| {
-            matches!(
-                modifier,
-                Modifier::Virtual | Modifier::Abstract | Modifier::Override
-            )
-        })
+        self.is_interface_member(symbol)
+            || self.declared_modifiers(symbol).iter().any(|modifier| {
+                matches!(
+                    modifier,
+                    Modifier::Virtual | Modifier::Abstract | Modifier::Override
+                )
+            })
+    }
+
+    pub(super) fn is_interface_member(&self, symbol: SymbolId) -> bool {
+        self.declarations
+            .table
+            .symbol(symbol)
+            .parent
+            .is_some_and(|parent| {
+                self.declarations.table.symbol(parent).kind == SymbolKind::Interface
+            })
+    }
+
+    /// Declared without a body: an abstract or interface member. Never a
+    /// dispatch target — only a stub may stand in front of it.
+    pub(super) fn is_bodiless(&self, symbol: SymbolId) -> bool {
+        self.is_interface_member(symbol)
+            || self
+                .declared_modifiers(symbol)
+                .iter()
+                .any(|modifier| matches!(modifier, Modifier::Abstract | Modifier::Extern))
+    }
+
+    /// `sealed`, a struct, or otherwise a type no subtype can be created of:
+    /// a virtual call on it binds statically.
+    pub(super) fn is_final_type(&self, ty: &Type) -> bool {
+        let Type::Named {
+            target: TypeTarget::Source(symbol),
+            ..
+        } = ty
+        else {
+            return false;
+        };
+        let entry = self.declarations.table.symbol(*symbol);
+        match entry.kind {
+            SymbolKind::Struct | SymbolKind::RecordStruct => true,
+            SymbolKind::Class | SymbolKind::Record => entry.declarations.iter().any(|site| {
+                matches!(&site.syntax, SyntaxRef::Class(declaration)
+                    if declaration.modifiers.iter().any(|modifier| modifier.value == Modifier::Sealed))
+            }),
+            _ => false,
+        }
+    }
+
+    /// The type that declares `member`, instantiated per `bindings`.
+    pub(super) fn declaring_type_of(
+        &self,
+        member: SymbolId,
+        bindings: &[(SymbolId, Type)],
+    ) -> Type {
+        let mut owner = member;
+        while let Some(parent) = self.declarations.table.symbol(owner).parent {
+            owner = parent;
+            if self.declarations.table.symbol(owner).kind.is_type() {
+                break;
+            }
+        }
+        let arguments = self
+            .declarations
+            .table
+            .symbol(owner)
+            .type_parameters
+            .iter()
+            .map(|parameter| self.substitute(&Type::TypeParameter(*parameter), bindings))
+            .collect();
+        Type::Named {
+            target: TypeTarget::Source(owner),
+            arguments,
+        }
     }
 
     // ------------------------------------------------------------- dispatch
 
     /// A call through a virtual method becomes a call to a dispatcher — a
     /// synthesized function that switches on the receiver's type id.
+    /// The stub that dispatches `member` (a method body, getter or setter
+    /// per `target`) on the runtime type of a receiver statically typed
+    /// `declaring_type` — a class, an abstract class or an interface.
     pub(super) fn dispatcher_for(
         &mut self,
         ctx: &Ctx,
-        call: &ResolvedCall,
-        method: SymbolId,
+        member: SymbolId,
         declaring_type: &Type,
+        type_arguments: &[Type],
+        target: Role,
     ) -> FunctionKey {
-        let bindings = self.bindings_for(ctx, method, declaring_type, &call.type_arguments);
+        let bindings = self.bindings_for(ctx, member, declaring_type, type_arguments);
+        let role = match target {
+            Role::Getter => Role::GetterDispatcher,
+            Role::Setter => Role::SetterDispatcher,
+            _ => Role::Dispatcher,
+        };
         let key = FunctionKey {
-            symbol: method,
-            role: Role::Dispatcher,
+            symbol: member,
+            role,
             bindings: bindings.clone(),
         };
         if !self.dispatchers.contains_key(&key) {
             // frame slots for the dispatcher itself
             self.ensure_dispatcher_frame(&key);
             let receiver = self.substitute(declaring_type, &ctx.key.bindings);
-            let name = self.declarations.table.symbol(method).name.to_string();
+            let name = self.declarations.table.symbol(member).name.to_string();
             self.dispatchers.insert(
                 key.clone(),
                 Dispatcher {
                     name,
+                    target,
                     receiver,
                     emitted_for: Vec::new(),
                 },
             );
         }
         key
+    }
+
+    /// For a call on a receiver whose runtime type is already known — a
+    /// struct, a sealed class — the implementation itself, so no stub is
+    /// needed (the static dispatch a monomorphized `T : IShape` allows).
+    pub(super) fn direct_implementation(
+        &mut self,
+        receiver_type: &Type,
+        member: SymbolId,
+        bindings: &[(SymbolId, Type)],
+        target: Role,
+    ) -> Option<FunctionKey> {
+        if !self.is_final_type(receiver_type) {
+            return None;
+        }
+        let shape_key = FunctionKey {
+            symbol: member,
+            role: target,
+            bindings: bindings.to_vec(),
+        };
+        let (parameter_types, return_type) = self.function_shape(&shape_key);
+        let name = self.declarations.table.symbol(member).name.to_string();
+        let contract = self.contract_interface(member, bindings);
+        self.implementation_on(
+            receiver_type,
+            &name,
+            &parameter_types,
+            &return_type,
+            target,
+            contract.as_ref(),
+        )
+    }
+
+    /// When `member` is an interface member: that interface, instantiated —
+    /// the contract an explicit implementation must name to count.
+    fn contract_interface(&self, member: SymbolId, bindings: &[(SymbolId, Type)]) -> Option<Type> {
+        if !self.is_interface_member(member) {
+            return None;
+        }
+        Some(self.declaring_type_of(member, bindings))
     }
 
     /// Dispatcher frames live in `self.functions` (so `call_function` treats
@@ -697,6 +965,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let dispatcher = &self.dispatchers[&key];
             let receiver = dispatcher.receiver.clone();
             let name = dispatcher.name.clone();
+            if key.role == Role::TypeTest {
+                // nothing to call: the body enumerates types when emitted
+                continue;
+            }
+            if let Role::ObjectDispatcher(member) = key.role {
+                changed |= self.ensure_object_dispatcher_impls(&key, member.name());
+                continue;
+            }
             let candidates: Vec<Type> = self
                 .type_order
                 .iter()
@@ -708,7 +984,31 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if already {
                     continue;
                 }
-                if let Some(implementation) = self.override_for(&ty, &name, &key) {
+                if self.emitted_dispatchers.contains(&key) {
+                    let message = format!(
+                        "internal: `{}` was instantiated after the dispatch of `{}` on `{}` \
+                         was emitted",
+                        self.display_type(&ty),
+                        name,
+                        self.display_type(&receiver)
+                    );
+                    let ctx = self.dispatcher_ctx(&key);
+                    self.error(&ctx, message, 0..0);
+                }
+                if self.behaviour_in_type(&ty).is_some() {
+                    // a behaviour is a program reference, not an object[]:
+                    // there is no type id to read, and no way to call into
+                    // it but by event name
+                    let message = format!(
+                        "`{}` cannot be reached through `{}`: a behaviour is another Udon \
+                         program, which has no virtual dispatch — call it through a variable \
+                         of its own type",
+                        self.display_type(&ty),
+                        self.display_type(&receiver)
+                    );
+                    let ctx = self.dispatcher_ctx(&key);
+                    self.error(&ctx, message, 0..0);
+                } else if let Some(implementation) = self.override_for(&ty, &name, &key) {
                     self.ensure_function(&implementation);
                     changed = true;
                 }
@@ -730,29 +1030,101 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         name: &str,
         dispatcher: &FunctionKey,
     ) -> Option<FunctionKey> {
-        let (dispatch_parameters, _) = self.function_shape(dispatcher);
+        let target = self.dispatchers[dispatcher].target;
+        let (parameter_types, return_type) = self.function_shape(dispatcher);
+        let contract = self.contract_interface(dispatcher.symbol, &dispatcher.bindings);
+        self.implementation_on(
+            ty,
+            name,
+            &parameter_types,
+            &return_type,
+            target,
+            contract.as_ref(),
+        )
+    }
+
+    /// The member of `ty` (or the nearest base) implementing `name` with
+    /// this shape: a method for `Method`, a property/indexer accessor for
+    /// `Getter`/`Setter`. For an interface `contract`, an explicit
+    /// implementation of exactly that interface (`int IShape.Area()`) wins
+    /// over a public member of the same name (§18.6.5), though ordinary
+    /// lookup hides it; a bodiless (abstract, interface) member never
+    /// implements anything.
+    fn implementation_on(
+        &mut self,
+        ty: &Type,
+        name: &str,
+        parameter_types: &[Type],
+        return_type: &Type,
+        target: Role,
+        contract: Option<&Type>,
+    ) -> Option<FunctionKey> {
         let system = men_sharp_semantics::TypeSystem {
             declarations: self.declarations,
             signatures: self.signatures,
             external: self.external,
         };
-        for candidate in system.members_named(ty, name) {
+        let wanted_kind = match target {
+            Role::Method => &[SymbolKind::Method][..],
+            _ => &[SymbolKind::Property, SymbolKind::Indexer][..],
+        };
+        let mut candidates = Vec::new();
+        if let Some(contract) = contract {
+            candidates.extend(self.explicit_implementations(ty, name, contract));
+        }
+        candidates.extend(system.members_named(ty, name));
+        for candidate in candidates {
             let MemberOrigin::Source(symbol) = candidate.origin else {
                 continue;
             };
-            let Some(MemberSignature::Function(signature)) = candidate.signature else {
-                continue;
-            };
-            if signature.parameters.len() != dispatch_parameters.len() {
+            if !wanted_kind.contains(&candidate.kind) {
                 continue;
             }
-            let matches = signature
-                .parameters
-                .iter()
-                .zip(&dispatch_parameters)
-                .all(|(a, b)| a.parameter_type == *b);
-            if !matches {
+            let fits = match (target, &candidate.signature) {
+                (Role::Method, Some(MemberSignature::Function(signature))) => {
+                    signature.parameters.len() == parameter_types.len()
+                        && signature
+                            .parameters
+                            .iter()
+                            .zip(parameter_types)
+                            .all(|(a, b)| a.parameter_type == *b)
+                }
+                (Role::Getter, Some(MemberSignature::Property(property))) => {
+                    parameter_types.is_empty() && property == return_type
+                }
+                (Role::Setter, Some(MemberSignature::Property(property))) => {
+                    parameter_types.len() == 1 && parameter_types[0] == *property
+                }
+                // an indexer's getter takes the indices, its setter the
+                // indices plus the value
+                (Role::Getter, Some(MemberSignature::Function(signature))) => {
+                    signature.parameters.len() == parameter_types.len()
+                        && signature
+                            .parameters
+                            .iter()
+                            .zip(parameter_types)
+                            .all(|(a, b)| a.parameter_type == *b)
+                        && signature.return_type == *return_type
+                }
+                (Role::Setter, Some(MemberSignature::Function(signature))) => {
+                    signature.parameters.len() + 1 == parameter_types.len()
+                        && signature
+                            .parameters
+                            .iter()
+                            .zip(parameter_types)
+                            .all(|(a, b)| a.parameter_type == *b)
+                        && parameter_types.last() == Some(&signature.return_type)
+                }
+                _ => false,
+            };
+            if !fits {
                 continue;
+            }
+            if self.is_bodiless(symbol) {
+                // nothing to jump to: an abstract base's slot, or the
+                // interface member itself when a class does not implement it
+                // (the checker reports that)
+                return None;
             }
             let bindings = match &candidate.declaring_type {
                 Type::Named {
@@ -770,16 +1142,107 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             };
             return Some(FunctionKey {
                 symbol,
-                role: Role::Method,
+                role: target,
                 bindings,
             });
         }
         None
     }
 
+    /// `int IShape.Area()` members named `name` implementing `contract` on
+    /// `ty` and its base classes: excluded from ordinary lookup, so gathered
+    /// here for dispatch.
+    fn explicit_implementations(
+        &self,
+        ty: &Type,
+        name: &str,
+        contract: &Type,
+    ) -> Vec<men_sharp_semantics::MemberCandidate> {
+        let system = men_sharp_semantics::TypeSystem {
+            declarations: self.declarations,
+            signatures: self.signatures,
+            external: self.external,
+        };
+        let mut out = Vec::new();
+        let mut current = Some(ty.clone());
+        while let Some(class_type) = current {
+            let Type::Named {
+                target: TypeTarget::Source(class),
+                arguments,
+            } = &class_type
+            else {
+                break;
+            };
+            let entry = self.declarations.table.symbol(*class);
+            let bindings: Vec<(SymbolId, Type)> = entry
+                .type_parameters
+                .iter()
+                .copied()
+                .zip(arguments.iter().cloned())
+                .collect();
+            for &member in &entry.members {
+                let member_entry = self.declarations.table.symbol(member);
+                if !member_entry.is_explicit_implementation || member_entry.name != name {
+                    continue;
+                }
+                let implements_contract = self
+                    .signatures
+                    .explicit_interfaces
+                    .get(&member)
+                    .is_some_and(|interface| self.substitute(interface, &bindings) == *contract);
+                if !implements_contract {
+                    continue;
+                }
+                let signature = self
+                    .signatures
+                    .members
+                    .get(&member)
+                    .map(|signature| self.substitute_member(signature, &bindings));
+                out.push(men_sharp_semantics::MemberCandidate {
+                    origin: MemberOrigin::Source(member),
+                    kind: member_entry.kind,
+                    is_static: member_entry.is_static,
+                    accessibility: member_entry.accessibility,
+                    arity: member_entry.arity,
+                    signature,
+                    declaring_type: class_type.clone(),
+                });
+            }
+            current = system
+                .base_of(&class_type)
+                .filter(|base| self.is_source_class(base));
+        }
+        out
+    }
+
+    fn substitute_member(
+        &self,
+        signature: &MemberSignature,
+        bindings: &[(SymbolId, Type)],
+    ) -> MemberSignature {
+        match signature {
+            MemberSignature::Function(function) => {
+                MemberSignature::Function(self.substitute_signature(function, bindings))
+            }
+            MemberSignature::Property(ty) => {
+                MemberSignature::Property(self.substitute(ty, bindings))
+            }
+            MemberSignature::Field(ty) => MemberSignature::Field(self.substitute(ty, bindings)),
+            MemberSignature::Event(ty) => MemberSignature::Event(self.substitute(ty, bindings)),
+        }
+    }
+
     pub(super) fn is_subtype(&self, ty: &Type, of: &Type) -> bool {
         if ty == of {
             return true;
+        }
+        let system = men_sharp_semantics::TypeSystem {
+            declarations: self.declarations,
+            signatures: self.signatures,
+            external: self.external,
+        };
+        if system.is_interface(of) {
+            return self.implements(ty, of);
         }
         let Type::Named {
             target: TypeTarget::Source(symbol),
@@ -812,11 +1275,74 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    /// Emits every dispatcher body: read `this[0]`, compare against each
-    /// instantiated subtype's id, tail-jump into the chosen override.
-    pub(super) fn emit_dispatcher_bodies(&mut self) {
-        let keys: Vec<FunctionKey> = self.dispatchers.keys().cloned().collect();
+    /// Does `ty` implement `interface` — directly, through a base class, or
+    /// through an interface that extends it?
+    pub(super) fn implements(&self, ty: &Type, interface: &Type) -> bool {
+        let system = men_sharp_semantics::TypeSystem {
+            declarations: self.declarations,
+            signatures: self.signatures,
+            external: self.external,
+        };
+        let mut visited: HashSet<Type> = HashSet::new();
+        let mut queue = vec![ty.clone()];
+        while let Some(current) = queue.pop() {
+            if &current == interface {
+                return true;
+            }
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            queue.extend(system.interfaces_of(&current));
+            if let Some(base) = system.base_of(&current)
+                && (self.is_source_class(&base) || system.is_interface(&base))
+            {
+                queue.push(base);
+            }
+        }
+        false
+    }
+
+    /// A context for diagnostics raised while synthesizing a dispatcher.
+    pub(super) fn dispatcher_ctx(&self, key: &FunctionKey) -> Ctx<'ast> {
+        let function = &self.functions[key];
+        Ctx {
+            key: key.clone(),
+            file: FileId(0),
+            locals: Vec::new(),
+            this_slot: None,
+            this_type: None,
+            loop_stack: Vec::new(),
+            result: function.result,
+            return_slot: function.return_slot,
+        }
+    }
+
+    /// Emits every dispatcher body not emitted yet: read `this[0]`, compare
+    /// against each instantiated subtype's id, tail-jump into the chosen
+    /// override. Returns whether it emitted anything.
+    pub(super) fn emit_dispatcher_bodies(&mut self) -> bool {
+        let mut keys: Vec<FunctionKey> = self
+            .dispatchers
+            .keys()
+            .filter(|key| !self.emitted_dispatchers.contains(key))
+            .cloned()
+            .collect();
+        // deterministic output: the map's order is not
+        keys.sort_by_key(|key| self.functions[key].name.clone());
+        let emitted = !keys.is_empty();
         for key in keys {
+            self.emitted_dispatchers.insert(key.clone());
+            match key.role {
+                Role::TypeTest => {
+                    self.emit_type_test_body(&key);
+                    continue;
+                }
+                Role::ObjectDispatcher(_) => {
+                    self.emit_object_dispatcher_body(&key);
+                    continue;
+                }
+                _ => {}
+            }
             let function = &self.functions[&key];
             let label = function.label;
             let this_slot = function.parameters[0];
@@ -928,6 +1454,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.program.code.push(Op::JumpIndirect(return_slot));
             self.current_frame = None;
         }
+        emitted
     }
 
     // ------------------------------------------------------ object plumbing
