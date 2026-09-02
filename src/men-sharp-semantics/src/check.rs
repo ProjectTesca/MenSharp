@@ -1939,6 +1939,23 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         Some(Meaning::Value(ty))
     }
 
+    fn is_struct(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Named {
+                target: TypeTarget::External(id),
+                ..
+            } => self.resolver.external.type_info(*id).kind == ExternalTypeKind::Struct,
+            Type::Named {
+                target: TypeTarget::Source(symbol),
+                ..
+            } => matches!(
+                self.resolver.declarations.table.symbol(*symbol).kind,
+                SymbolKind::Struct | SymbolKind::RecordStruct
+            ),
+            _ => false,
+        }
+    }
+
     fn receiver_is_instance(&self, _receiver: &Option<Type>) -> bool {
         false // refined when expression shapes are tracked further
     }
@@ -3051,7 +3068,17 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             .map(|list| self.check_arguments(list.arguments))
             .unwrap_or_default();
 
-        if constructors.is_empty() {
+        // a struct always has a parameterless constructor (§16.4.9), whether
+        // or not one is declared next to the others
+        let implicit_struct_default = arguments.is_empty()
+            && self.is_struct(&ty)
+            && !constructors.iter().any(|candidate| {
+                matches!(
+                    &candidate.signature,
+                    Some(MemberSignature::Function(function)) if function.parameters.is_empty()
+                )
+            });
+        if constructors.is_empty() || implicit_struct_default {
             // the implicit parameterless constructor
             if !arguments.is_empty() {
                 self.error(
@@ -3093,22 +3120,39 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             Some(Initializer::Object { elements, .. }) => {
                 for element in *elements {
                     if let InitializerTarget::Member(name) = &element.target {
+                        // `new T { X = v }` is `t.X = v`: the member binds
+                        // like any other write, recorded on the element for
+                        // the code generator
                         let member = self
                             .system()
                             .members_named(ty, name.value)
                             .into_iter()
-                            .find_map(|candidate| match candidate.signature {
+                            .find_map(|candidate| match &candidate.signature {
                                 Some(MemberSignature::Field(member_type))
-                                | Some(MemberSignature::Property(member_type)) => Some(member_type),
+                                | Some(MemberSignature::Property(member_type))
+                                    if !candidate.is_static =>
+                                {
+                                    Some((member_type.clone(), candidate))
+                                }
                                 _ => None,
                             });
-                        let Some(member_type) = member else {
+                        let Some((member_type, candidate)) = member else {
                             let kind = SemanticErrorKind::UnknownMember {
                                 type_name: self.display(ty),
                             };
                             self.error(kind, name.span.clone());
                             continue;
                         };
+                        self.targets.insert(
+                            EntityID::from(element),
+                            ResolvedTarget::Member(ResolvedMember {
+                                origin: candidate.origin,
+                                kind: candidate.kind,
+                                is_static: candidate.is_static,
+                                declaring_type: candidate.declaring_type,
+                                member_type: member_type.clone(),
+                            }),
+                        );
                         if let Ok(InitializerValue::Expression(value)) = &element.value {
                             let literal = Self::is_integer_literal(value);
                             let value_type =

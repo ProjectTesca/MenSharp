@@ -1605,7 +1605,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let Some(value_name) = self.extern_type_name(&ty) else {
                     return;
                 };
-                let signature = format!("{owner}.__set_{name}__{value_name}__SystemVoid");
+                // a property setter is `__set_X__T__SystemVoid`; the SDK spells
+                // a struct *field* setter (`Vector3.x`) without the return part
+                let property = format!("{owner}.__set_{name}__{value_name}__SystemVoid");
+                let field = format!("{owner}.__set_{name}__{value_name}");
+                let signature =
+                    if !self.nodes.has_signature(&property) && self.nodes.has_signature(&field) {
+                        field
+                    } else {
+                        property
+                    };
                 let mut arguments = Vec::new();
                 arguments.extend(receiver);
                 arguments.push(value);
@@ -1910,6 +1919,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             Some("SystemSingle") => self.constant("SystemSingle", "0", HeapInit::Single(0.0)),
             Some("SystemDouble") => self.constant("SystemDouble", "0", HeapInit::Double(0.0)),
+            // any other value type (`Vector3`, `Color`, ...): a slot declared
+            // with the struct's own type and no value — the Udon heap
+            // initialises such a slot to `default(T)`, whereas a null
+            // *object* copied into it would be a null, not a zeroed struct
+            Some(udon_type) if !self.is_reference_type(ty) && udon_type != "SystemObject" => {
+                let udon_type = udon_type.to_string();
+                self.constant(&udon_type, "default", HeapInit::Null)
+            }
             _ => self.constant("SystemObject", "null", HeapInit::Null),
         }
     }
@@ -2689,6 +2706,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.apply_initializer(ctx, out, &created, new_expression, span);
                 Piece::Value(out, created)
             }
+            // `new Vector3()`: the parameterless struct constructor is
+            // `default` — copied into a slot of its own, since the initializer
+            // (or later writes) mutate it in place
+            _ if !self.is_reference_type(&created)
+                && new_expression
+                    .arguments
+                    .as_ref()
+                    .is_none_or(|list| list.arguments.is_empty()) =>
+            {
+                let default = self.default_value(&created);
+                let out = self.temp_for(&created);
+                self.copy(default, out);
+                self.apply_initializer(ctx, out, &created, new_expression, span);
+                Piece::Value(out, created)
+            }
             _ => {
                 self.error(
                     ctx,
@@ -2804,6 +2836,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// `new T { X = v, ... }`: each element is the write `t.X = v` — fields,
+    /// properties with setters, external properties (`__set_X` externs, which
+    /// for a struct like `Vector3` write the heap value back in place) all go
+    /// through the same place machinery an assignment uses.
     fn apply_object_initializer(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -2813,23 +2849,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) {
         use men_sharp_parser::ast::InitializerTarget;
-        let Type::Named {
-            target: TypeTarget::Source(class),
-            ..
-        } = created
-        else {
-            self.error(
-                ctx,
-                "object initializers on external types are not supported yet",
-                span,
-            );
-            return;
-        };
-        let Some(layout) = self.layout_of(created) else {
-            return;
-        };
         for element in elements {
-            let InitializerTarget::Member(name) = &element.target else {
+            if let InitializerTarget::Index { .. } = &element.target {
                 self.error(
                     ctx,
                     "`[index] = value` in an object initializer is not supported by the \
@@ -2837,31 +2858,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     element.span.clone(),
                 );
                 continue;
-            };
-            let member = self
-                .declarations
-                .table
-                .symbol(*class)
-                .members_named(name.value)
-                .first()
-                .copied();
-            let Some(member) = member else {
-                continue;
-            };
-            let Some(&index) = layout.slots.get(&member) else {
-                self.error(
-                    ctx,
-                    "object initializers may only set fields and auto-properties for now",
-                    name.span.clone(),
-                );
+            }
+            let Some(ResolvedTarget::Member(member)) =
+                self.bodies.targets.get(&EntityID::from(element)).cloned()
+            else {
+                // the checker already said why
                 continue;
             };
             match &element.value {
                 Ok(InitializerValue::Expression(value)) => {
-                    if let Some(lowered) = self.lower_expression(ctx, value) {
-                        let index = self.int_constant(index as i32);
-                        self.set_element(ctx, object, index, lowered, span.clone());
-                    }
+                    let Some(lowered) = self.lower_expression(ctx, value) else {
+                        continue;
+                    };
+                    let place = self.member_place(
+                        ctx,
+                        &member,
+                        Some((object, created.clone())),
+                        span.clone(),
+                    );
+                    self.write_place(ctx, place, lowered, span.clone());
                 }
                 Ok(InitializerValue::Nested(nested)) => {
                     self.error(

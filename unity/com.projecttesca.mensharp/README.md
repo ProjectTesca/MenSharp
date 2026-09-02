@@ -166,6 +166,11 @@ if (Physics.Raycast(ray, out RaycastHit hit))   // `out`/`ref` arguments work
 }                                               // by heap address anyway
 ```
 
+Engine structs behave as in C#: `new Vector3 { x = 1f }`, `new Vector3()`,
+`default`, and writing a field (`v.x = 5f`) all work — the SDK spells a
+struct field setter differently from a property setter, and the compiler
+picks the right one.
+
 Udon has no generics, so `GetComponent<T>` is one extern that takes
 `typeof(T)` as an ordinary value; the same goes for `GetComponentInChildren<T>`
 and friends. `typeof(...)` works for any type Udon knows.

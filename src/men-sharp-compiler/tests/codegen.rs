@@ -3083,3 +3083,126 @@ fn a_collection_initializer_needs_a_matching_add() {
         "{kinds:#?}"
     );
 }
+
+#[test]
+fn object_initializers_set_fields_and_properties() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Box
+            {
+                public int width;
+                public int height = 1;
+                private int depth;
+                // a property with a real setter body, not just an auto-property
+                public int Depth
+                {
+                    get { return depth; }
+                    set { depth = value * 2; }
+                }
+                public int Volume => width * height * depth;
+            }
+
+            public class Program
+            {
+                public static int volume;
+                public static int untouched;
+
+                public static void Main()
+                {
+                    var box = new Box { width = 3, Depth = 5 };
+                    volume = box.Volume;          // 3 * 1 * 10
+                    untouched = new Box { width = 7 }.height;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "volume"), 30);
+    assert_eq!(int_of(&emulator, "untouched"), 1);
+}
+
+#[test]
+fn engine_structs_take_initializers_field_writes_and_default() {
+    // `new Vector3 { x = 1f }`, `new Vector3()`, `v.x = 5f`, `default`:
+    // all on an engine struct, which Udon spells differently from a class
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let Some(managed) = unity_managed_dir() else {
+        eprintln!("skipped: no Unity editor on this machine");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(managed.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Mover : MenSharpBehaviour
+            {
+                public float result;
+                public void Interact()
+                {
+                    var a = new Vector3 { x = 1f, y = 2f };
+                    var b = new Vector3(1f, 2f, 3f) { z = 9f };
+                    var c = new Vector3();
+                    Vector3 d = default;
+                    a.x = 5f;
+                    result = a.x + b.z + c.y + d.z;
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources_for(&references));
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
+    let program = &programs[0].output;
+    assert!(
+        program.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.errors
+    );
+
+    let text = program.program.to_uasm().unwrap();
+    // struct field setters carry no `__SystemVoid`
+    assert!(
+        text.contains("\"UnityEngineVector3.__set_x__SystemSingle\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"UnityEngineVector3.__set_z__SystemSingle\""),
+        "{text}"
+    );
+    assert!(
+        !text.contains("__set_x__SystemSingle__SystemVoid"),
+        "{text}"
+    );
+    // `new Vector3()` / `default` are a struct-typed slot, never a null object
+    assert!(
+        text.contains("__const_0_UnityEngineVector3: %UnityEngineVector3, null"),
+        "{text}"
+    );
+    // the default constant is only ever copied from; the writes land on a copy
+    let pushes_of_default = text.matches("PUSH, __const_0_UnityEngineVector3").count();
+    assert_eq!(pushes_of_default, 3, "{text}"); // a, c, d
+}
