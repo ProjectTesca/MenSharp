@@ -253,22 +253,34 @@ switch (state)
 `switch` takes constant case labels and `default`; pattern matching (`case > 0`,
 `case string s`, `when` guards) is a compile error for now.
 
-## foreach and List<T>
+## foreach, List<T> and Dictionary<K, V>
 
-`foreach` walks arrays, strings (by `char`), `List<T>`, and anything with a
-`GetEnumerator()` whose result has `MoveNext()`/`Current` — the same pattern
-C# itself binds to, so a class of your own is enumerable without implementing
-any interface:
+`foreach` walks arrays, strings (by `char`), `List<T>`, `Dictionary<K, V>`
+(and its `Keys`/`Values`), and anything with a `GetEnumerator()` whose result
+has `MoveNext()`/`Current` — the same pattern C# itself binds to, so a class
+of your own is enumerable without implementing any interface:
 
 ```csharp
 var names = new List<string> { "a", "b" };   // collection initializer = Add calls
 names.Add("c");
 foreach (var name in names) { ... }
 foreach (char c in "text") { ... }
+
+var ages = new Dictionary<string, int> { { "ann", 30 }, { "bob", 41 } };
+var seed = new Dictionary<string, int> { ["cy"] = 52 };   // index initializer
+ages["dee"] = 63;
+if (ages.TryGetValue("bob", out var age)) { ... }
+foreach (var pair in ages) { Debug.Log($"{pair.Key}: {pair.Value}"); }
+foreach (var key in ages.Keys) { ... }
 ```
 
-`List<T>` is a source port compiled with your code (Udon does not expose the
-real one), so it costs no externs beyond array access.
+Both collections are source ports compiled with your code (Udon exposes
+neither the real ones nor `KeyValuePair`), so they cost no externs beyond
+array access, `GetHashCode` and `Equals` — which dispatch on the boxed key,
+so strings, numbers, enums and engine structs hash by value and your own
+classes by identity, as in .NET. Since M# has no exceptions yet, the cases
+that would throw are defined instead: `dictionary[missingKey]` reads
+`default`, `Add` on a present key overwrites.
 
 ## Not supported yet
 

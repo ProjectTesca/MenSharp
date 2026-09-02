@@ -245,6 +245,10 @@ impl Compiler {
         };
         vec![
             SourceCode::new("corlib/List.cs", include_str!("../../../corlib/List.cs")),
+            SourceCode::new(
+                "corlib/Dictionary.cs",
+                include_str!("../../../corlib/Dictionary.cs"),
+            ),
             behaviour,
         ]
     }

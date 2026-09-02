@@ -3206,3 +3206,118 @@ fn engine_structs_take_initializers_field_writes_and_default() {
     let pushes_of_default = text.matches("PUSH, __const_0_UnityEngineVector3").count();
     assert_eq!(pushes_of_default, 3, "{text}"); // a, c, d
 }
+
+#[test]
+fn the_corlib_dictionary_works_end_to_end() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int count;
+                public static int found;
+                public static int missing;
+                public static int removed;
+                public static int reAdded;
+                public static int pairSum;
+                public static string keysJoined;
+                public static int valueSum;
+                public static int grown;
+                public static int intKeyed;
+                public static bool hasValue;
+
+                public static void Main()
+                {
+                    var ages = new Dictionary<string, int>
+                    {
+                        { "ann", 30 },      // Add(k, v)
+                        { "bob", 41 },
+                    };
+                    // the index form is an object initializer (C# does not
+                    // let the two mix in one pair of braces)
+                    var seed = new Dictionary<string, int> { ["cy"] = 52 };
+                    ages.Add("cy", seed["cy"]);
+                    ages["dee"] = 63;
+                    ages["ann"] = 31;       // overwrite, not a new entry
+                    count = ages.Count;     // 4
+
+                    found = ages["cy"];     // 52
+                    missing = ages.ContainsKey("zed") ? 1 : 0;   // 0
+                    int age;
+                    if (ages.TryGetValue("bob", out age)) { found += age; }   // 93
+                    hasValue = ages.ContainsValue(63);
+
+                    removed = ages.Remove("bob") ? ages.Count : -1;   // 3
+                    ages["bob"] = 42;       // reuses the freed entry
+                    reAdded = ages["bob"] + ages.Count;   // 46
+
+                    foreach (var pair in ages) { pairSum += pair.Value; }   // 31+52+63+42 = 188
+                    keysJoined = "";
+                    foreach (var key in ages.Keys) { keysJoined = keysJoined + key; }
+                    foreach (var v in ages.Values) { valueSum += v; }   // 188
+
+                    // growth: far past the initial capacity, every key still found
+                    var squares = new Dictionary<int, int>();
+                    for (int i = 0; i < 100; i++) { squares[i] = i * i; }
+                    for (int i = 0; i < 100; i++) { grown += squares[i]; }   // 328350
+                    intKeyed = squares.Count;   // 100
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "count"), 4);
+    assert_eq!(int_of(&emulator, "found"), 93);
+    assert_eq!(int_of(&emulator, "missing"), 0);
+    assert!(matches!(
+        emulator.value_of("hasValue"),
+        Some(Value::Boolean(true))
+    ));
+    assert_eq!(int_of(&emulator, "removed"), 3);
+    assert_eq!(int_of(&emulator, "reAdded"), 46);
+    assert_eq!(int_of(&emulator, "pairSum"), 188);
+    // the re-added "bob" took the freed entry back, so it enumerates where it
+    // was — the same order the real Dictionary gives
+    assert_eq!(string_of(&emulator, "keysJoined"), "annbobcydee");
+    assert_eq!(int_of(&emulator, "valueSum"), 188);
+    assert_eq!(int_of(&emulator, "grown"), 328350);
+    assert_eq!(int_of(&emulator, "intKeyed"), 100);
+}
+
+#[test]
+fn index_initializers_write_through_the_indexer() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Grid
+            {
+                private int[] cells = new int[16];
+                public int this[int x, int y]
+                {
+                    get { return cells[y * 4 + x]; }
+                    set { cells[y * 4 + x] = value; }
+                }
+            }
+            public class Program
+            {
+                public static int result;
+                public static void Main()
+                {
+                    var grid = new Grid { [1, 2] = 7, [3, 3] = 5 };
+                    result = grid[1, 2] * 10 + grid[3, 3];
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 75);
+}

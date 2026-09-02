@@ -14,9 +14,16 @@
 
 #if UNITY_EDITOR
 using System;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using UnityEngine;
+using VRC.Udon.Common;
 using VRC.Udon.Common.Interfaces;
+using VRC.Udon.Editor;
 using VRC.Udon.Editor.ProgramSources;
+using VRC.Udon.EditorBindings;
+using VRC.Udon.UAssembly.Assembler;
+using VRC.Udon.UAssembly.Interfaces;
 
 /// An Udon assembly program plus the MenSharp heap-initialisation sidecar,
 /// re-applied on every (re)assembly.
@@ -27,8 +34,108 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
 
     protected override void RefreshProgramImpl()
     {
-        base.RefreshProgramImpl();
+        AssembleWithSizedHeap();
         ApplyMenSharpMeta();
+    }
+
+    // ----------------------------------------------------------- assembly
+
+    // The SDK's shared assembler (`UdonEditorManager.Assemble`) builds every
+    // program on a heap of 512 slots — enough for graphs, not for a compiled
+    // program whose every temporary and monomorphized corlib class is a
+    // slot. So the text is assembled here on a heap sized to its `.data`
+    // section, the way UdonSharp does: its own UAssemblyAssembler with a
+    // heap factory it controls, and the SDK's type resolvers borrowed from
+    // an UdonEditorInterface (they are not otherwise reachable).
+
+    private static UAssemblyAssembler assembler;
+    private static SizedHeapFactory heapFactory;
+
+    private sealed class SizedHeapFactory : IUdonHeapFactory
+    {
+        public uint HeapSize { get; set; }
+        public IUdonHeap ConstructUdonHeap() => new UdonHeap(HeapSize);
+        public IUdonHeap ConstructUdonHeap(uint heapSize) => new UdonHeap(HeapSize);
+    }
+
+    private static readonly Regex DataSymbol =
+        new Regex(@"^\s*[^\s:]+:\s*%", RegexOptions.Multiline);
+    private static readonly Regex ExternSignature =
+        new Regex(@"^\s*EXTERN,\s*""([^""]+)""", RegexOptions.Multiline);
+
+    /// How many heap slots the assembly needs: one per `name: %Type, value`
+    /// line of its `.data` section, plus one per distinct EXTERN signature —
+    /// the assembler interns each signature string as an anonymous heap
+    /// variable of its own (UdonSharp counts the same way).
+    public static uint HeapSlotsOf(string assembly)
+    {
+        if (string.IsNullOrEmpty(assembly))
+        {
+            return 0;
+        }
+        int start = assembly.IndexOf(".data_start", StringComparison.Ordinal);
+        int end = assembly.IndexOf(".data_end", StringComparison.Ordinal);
+        if (start < 0 || end < start)
+        {
+            return 0;
+        }
+        int symbols = DataSymbol.Matches(assembly.Substring(start, end - start)).Count;
+        var externs = new System.Collections.Generic.HashSet<string>();
+        foreach (Match match in ExternSignature.Matches(assembly.Substring(end)))
+        {
+            externs.Add(match.Groups[1].Value);
+        }
+        return (uint)(symbols + externs.Count);
+    }
+
+    private static UAssemblyAssembler SizedAssembler()
+    {
+        if (assembler != null)
+        {
+            return assembler;
+        }
+        var editorInterface = new UdonEditorInterface();
+        FieldInfo group = typeof(UdonEditorInterface).GetField(
+            "_typeResolverGroup",
+            BindingFlags.NonPublic | BindingFlags.Instance);
+        if (!(group?.GetValue(editorInterface) is IUAssemblyTypeResolver resolver))
+        {
+            return null;
+        }
+        heapFactory = new SizedHeapFactory();
+        assembler = new UAssemblyAssembler(heapFactory, resolver);
+        return assembler;
+    }
+
+    private void AssembleWithSizedHeap()
+    {
+        try
+        {
+            UAssemblyAssembler sized = SizedAssembler();
+            if (sized == null)
+            {
+                // the SDK moved its resolver group: fall back to the shared
+                // assembler, which works up to 512 slots, and say so
+                Debug.LogWarning(
+                    "MenSharp: cannot size the Udon heap on this SDK (UdonEditorInterface has no "
+                    + "_typeResolverGroup); programs over 512 heap slots will fail to assemble",
+                    this);
+                program = UdonEditorManager.Instance.Assemble(udonAssembly);
+            }
+            else
+            {
+                // a few spare slots: the assembler itself may declare some
+                heapFactory.HeapSize = HeapSlotsOf(udonAssembly) + 8;
+                program = sized.Assemble(udonAssembly);
+            }
+            assemblyError = null;
+        }
+        catch (Exception e)
+        {
+            program = null;
+            assemblyError = e.Message;
+            Debug.LogException(e);
+        }
     }
 
     /// The .cs file this program came from, or null when unknown (an asset

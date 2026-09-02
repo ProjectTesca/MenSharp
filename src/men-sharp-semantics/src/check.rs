@@ -3119,6 +3119,35 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         match initializer {
             Some(Initializer::Object { elements, .. }) => {
                 for element in *elements {
+                    // `new D { [k] = v }` is `d[k] = v`: the indexer binds like
+                    // any element access, recorded on the element
+                    if let InitializerTarget::Index { arguments, span } = &element.target {
+                        let call_arguments: Vec<CallArgument<'ast>> = arguments
+                            .iter()
+                            .map(|argument| self.plain_argument(argument))
+                            .collect();
+                        let element_type = match self.index_with(
+                            ty.clone(),
+                            call_arguments,
+                            span,
+                            Some(EntityID::from(element)),
+                        ) {
+                            Meaning::Value(element_type) => element_type,
+                            _ => Type::Error,
+                        };
+                        if let Ok(InitializerValue::Expression(value)) = &element.value {
+                            let literal = Self::is_integer_literal(value);
+                            let value_type =
+                                self.check_expression_expecting(value, Some(&element_type));
+                            self.require_convertible(
+                                &value_type,
+                                &element_type,
+                                literal,
+                                value.span(),
+                            );
+                        }
+                        continue;
+                    }
                     if let InitializerTarget::Member(name) = &element.target {
                         // `new T { X = v }` is `t.X = v`: the member binds
                         // like any other write, recorded on the element for
@@ -3278,7 +3307,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         node: Option<EntityID>,
     ) -> Meaning<'ast> {
         let call_arguments = self.check_arguments(arguments);
+        self.index_with(receiver, call_arguments, span, node)
+    }
 
+    fn index_with(
+        &mut self,
+        receiver: Type,
+        call_arguments: Vec<CallArgument<'ast>>,
+        span: &Range<usize>,
+        node: Option<EntityID>,
+    ) -> Meaning<'ast> {
         match &receiver {
             Type::Array { element, .. } => {
                 let int32 = self.corlib("Int32");

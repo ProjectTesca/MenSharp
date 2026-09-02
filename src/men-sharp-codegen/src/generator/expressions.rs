@@ -2840,6 +2840,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// properties with setters, external properties (`__set_X` externs, which
     /// for a struct like `Vector3` write the heap value back in place) all go
     /// through the same place machinery an assignment uses.
+    /// `new T { X = v, [k] = v, ... }`: each element is the write `t.X = v`
+    /// or `t[k] = v` — fields, properties with setters, external properties
+    /// (`__set_X` externs, which for a struct like `Vector3` write the heap
+    /// value back in place) and indexers all go through the same place
+    /// machinery an assignment uses.
     fn apply_object_initializer(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -2850,32 +2855,59 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) {
         use men_sharp_parser::ast::InitializerTarget;
         for element in elements {
-            if let InitializerTarget::Index { .. } = &element.target {
-                self.error(
-                    ctx,
-                    "`[index] = value` in an object initializer is not supported by the \
-                     Udon backend yet",
-                    element.span.clone(),
-                );
-                continue;
-            }
-            let Some(ResolvedTarget::Member(member)) =
-                self.bodies.targets.get(&EntityID::from(element)).cloned()
-            else {
-                // the checker already said why
-                continue;
-            };
+            let target = self.bodies.targets.get(&EntityID::from(element)).cloned();
             match &element.value {
                 Ok(InitializerValue::Expression(value)) => {
+                    let place = match (&element.target, target) {
+                        (InitializerTarget::Member(_), Some(ResolvedTarget::Member(member))) => {
+                            self.member_place(
+                                ctx,
+                                &member,
+                                Some((object, created.clone())),
+                                span.clone(),
+                            )
+                        }
+                        (
+                            InitializerTarget::Index { arguments, .. },
+                            Some(ResolvedTarget::Call(call)),
+                        ) => {
+                            let MemberOrigin::Source(symbol) = call.origin else {
+                                self.error(
+                                    ctx,
+                                    "external indexers are not supported by the Udon backend yet",
+                                    element.span.clone(),
+                                );
+                                continue;
+                            };
+                            let mut indices = Vec::with_capacity(arguments.len());
+                            for argument in arguments.iter() {
+                                let Some(index) = self.lower_expression(ctx, argument) else {
+                                    continue;
+                                };
+                                indices.push(index);
+                            }
+                            let bindings = self.bindings_for(
+                                ctx,
+                                symbol,
+                                &call.declaring_type,
+                                &call.type_arguments,
+                            );
+                            let ty =
+                                self.substitute(&call.signature.return_type, &ctx.key.bindings);
+                            Place::Accessor {
+                                receiver: Some(object),
+                                symbol,
+                                bindings,
+                                indices,
+                                ty,
+                            }
+                        }
+                        // the checker already said why
+                        _ => continue,
+                    };
                     let Some(lowered) = self.lower_expression(ctx, value) else {
                         continue;
                     };
-                    let place = self.member_place(
-                        ctx,
-                        &member,
-                        Some((object, created.clone())),
-                        span.clone(),
-                    );
                     self.write_place(ctx, place, lowered, span.clone());
                 }
                 Ok(InitializerValue::Nested(nested)) => {

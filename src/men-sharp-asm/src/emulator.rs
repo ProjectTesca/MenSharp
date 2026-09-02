@@ -367,6 +367,15 @@ impl Emulator {
             "SystemInt32.__op_GreaterThanOrEqual__SystemInt32_SystemInt32__SystemBoolean" => {
                 binary_i32!(|a, b| Value::Boolean(a >= b))
             }
+            "SystemInt32.__op_LogicalAnd__SystemInt32_SystemInt32__SystemInt32" => {
+                binary_i32!(|a, b| Value::Int32(a & b))
+            }
+            "SystemInt32.__op_LogicalOr__SystemInt32_SystemInt32__SystemInt32" => {
+                binary_i32!(|a, b| Value::Int32(a | b))
+            }
+            "SystemInt32.__op_LogicalXor__SystemInt32_SystemInt32__SystemInt32" => {
+                binary_i32!(|a, b| Value::Int32(a ^ b))
+            }
             "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean" => {
                 binary_i32!(|a, b| Value::Boolean(a == b))
             }
@@ -474,7 +483,31 @@ impl Emulator {
                 Ok(())
             }
             // ---- Object identity / equality ----
-            "SystemObject.__Equals__SystemObject_SystemObject__SystemBoolean"
+            "SystemObject.__GetHashCode__SystemInt32" => {
+                let args = self.pop_arguments(2)?;
+                let hash = match &self.heap[args[0]] {
+                    Value::Null => 0,
+                    Value::Boolean(value) => i32::from(*value),
+                    Value::Int32(value) => *value,
+                    Value::Int64(value) => (*value as i32) ^ ((*value >> 32) as i32),
+                    Value::UInt32(value) => *value as i32,
+                    Value::Char(value) => *value as i32,
+                    Value::Str(text) => text.bytes().fold(17i32, |hash, byte| {
+                        hash.wrapping_mul(31).wrapping_add(byte as i32)
+                    }),
+                    Value::Array(array) => Rc::as_ptr(array) as usize as i32,
+                    other => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "GetHashCode on {other:?}"
+                        )));
+                    }
+                };
+                self.heap[args[1]] = Value::Int32(hash);
+                Ok(())
+            }
+            // the instance form has the same shape: receiver, other, out
+            "SystemObject.__Equals__SystemObject__SystemBoolean"
+            | "SystemObject.__Equals__SystemObject_SystemObject__SystemBoolean"
             | "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean"
             | "SystemObject.__op_Equality__SystemObject_SystemObject__SystemBoolean" => {
                 let args = self.pop_arguments(3)?;
@@ -493,7 +526,19 @@ impl Emulator {
             sig if is_array_signature(sig, "__ctor__SystemInt32__") => {
                 let args = self.pop_arguments(2)?;
                 let length = self.heap[args[0]].as_i32()?;
-                let elements = vec![Value::Null; length.max(0) as usize];
+                // a typed array starts out holding default(T), as on Udon:
+                // `new int[4]` is four zeros, not four nulls
+                let default = match sig.split('.').next().unwrap_or_default() {
+                    "SystemInt32Array" => Value::Int32(0),
+                    "SystemInt64Array" => Value::Int64(0),
+                    "SystemUInt32Array" => Value::UInt32(0),
+                    "SystemSingleArray" => Value::Single(0.0),
+                    "SystemDoubleArray" => Value::Double(0.0),
+                    "SystemBooleanArray" => Value::Boolean(false),
+                    "SystemCharArray" => Value::Char('\0'),
+                    _ => Value::Null,
+                };
+                let elements = vec![default; length.max(0) as usize];
                 self.heap[args[1]] = Value::Array(Rc::new(RefCell::new(elements)));
                 Ok(())
             }

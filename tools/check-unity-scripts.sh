@@ -39,10 +39,13 @@ for assembly in \
     "$unity_data/Managed/UnityEditor.dll" \
     "$unity_data"/Managed/UnityEngine/*.dll \
     "$unity_data/NetStandard/ref/2.1.0/netstandard.dll" \
+    "$unity_data/NetStandard/compat/2.1.0/shims/netfx/mscorlib.dll" \
     "$scripts/VRC.Udon.dll" \
     "$scripts/VRC.Udon.Editor.dll" \
     "$scripts/VRC.SDKBase.dll" \
     "$worlds/Runtime/Udon/External/VRC.Udon.Common.dll" \
+    "$worlds/Editor/Udon/External/VRC.Udon.EditorBindings.dll" \
+    "$worlds/Editor/Udon/External/VRC.Udon.UAssembly.dll" \
     "$worlds/Runtime/VRCSDK/Plugins/VRCSDK3.dll" \
     "$base/Runtime/VRCSDK/Plugins/VRCSDKBase.dll" \
     "$base/Runtime/VRCSDK/Dependencies/Managed/System.Collections.Immutable.dll"
