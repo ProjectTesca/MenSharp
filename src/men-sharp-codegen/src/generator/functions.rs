@@ -829,7 +829,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// Declared without a body: an abstract or interface member. Never a
     /// dispatch target — only a stub may stand in front of it.
     pub(super) fn is_bodiless(&self, symbol: SymbolId) -> bool {
-        self.is_interface_member(symbol)
+        let without_body = !self
+            .declarations
+            .table
+            .symbol(symbol)
+            .declarations
+            .iter()
+            .any(|site| site.syntax.has_body());
+        (self.is_interface_member(symbol) && without_body)
             || self
                 .declared_modifiers(symbol)
                 .iter()
@@ -955,7 +962,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             &parameter_types,
             &return_type,
             target,
-            contract.as_ref(),
+            contract.as_ref().map(|contract| (member, contract)),
         )
     }
 
@@ -1062,7 +1069,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             &parameter_types,
             &return_type,
             target,
-            contract.as_ref(),
+            contract
+                .as_ref()
+                .map(|contract| (dispatcher.symbol, contract)),
         )
     }
 
@@ -1080,7 +1089,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         parameter_types: &[Type],
         return_type: &Type,
         target: Role,
-        contract: Option<&Type>,
+        contract: Option<(SymbolId, &Type)>,
     ) -> Option<FunctionKey> {
         let system = men_sharp_semantics::TypeSystem {
             declarations: self.declarations,
@@ -1092,7 +1101,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             _ => &[SymbolKind::Property, SymbolKind::Indexer][..],
         };
         let mut candidates = Vec::new();
-        if let Some(contract) = contract {
+        if let Some((_, contract)) = contract {
             candidates.extend(self.explicit_implementations(ty, name, contract));
         }
         candidates.extend(system.members_named(ty, name));
@@ -1103,44 +1112,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if !wanted_kind.contains(&candidate.kind) {
                 continue;
             }
-            let fits = match (target, &candidate.signature) {
-                (Role::Method, Some(MemberSignature::Function(signature))) => {
-                    signature.parameters.len() == parameter_types.len()
-                        && signature
-                            .parameters
-                            .iter()
-                            .zip(parameter_types)
-                            .all(|(a, b)| a.parameter_type == *b)
-                }
-                (Role::Getter, Some(MemberSignature::Property(property))) => {
-                    parameter_types.is_empty() && property == return_type
-                }
-                (Role::Setter, Some(MemberSignature::Property(property))) => {
-                    parameter_types.len() == 1 && parameter_types[0] == *property
-                }
-                // an indexer's getter takes the indices, its setter the
-                // indices plus the value
-                (Role::Getter, Some(MemberSignature::Function(signature))) => {
-                    signature.parameters.len() == parameter_types.len()
-                        && signature
-                            .parameters
-                            .iter()
-                            .zip(parameter_types)
-                            .all(|(a, b)| a.parameter_type == *b)
-                        && signature.return_type == *return_type
-                }
-                (Role::Setter, Some(MemberSignature::Function(signature))) => {
-                    signature.parameters.len() + 1 == parameter_types.len()
-                        && signature
-                            .parameters
-                            .iter()
-                            .zip(parameter_types)
-                            .all(|(a, b)| a.parameter_type == *b)
-                        && parameter_types.last() == Some(&signature.return_type)
-                }
-                _ => false,
-            };
-            if !fits {
+            if !Self::shape_fits(
+                target,
+                candidate.signature.as_ref(),
+                parameter_types,
+                return_type,
+            ) {
                 continue;
             }
             if self.is_bodiless(symbol) {
@@ -1169,7 +1146,218 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 bindings,
             });
         }
-        None
+        // nothing on the class: the interface's own default implementation
+        let (member, contract) = contract?;
+        self.default_implementation(
+            ty,
+            member,
+            contract,
+            name,
+            parameter_types,
+            return_type,
+            target,
+        )
+    }
+
+    /// Whether a candidate's signature is the dispatched shape: a method
+    /// for `Method`, a property/indexer accessor for `Getter`/`Setter`
+    /// (an indexer's getter takes the indices, its setter the indices plus
+    /// the value).
+    fn shape_fits(
+        target: Role,
+        signature: Option<&MemberSignature>,
+        parameter_types: &[Type],
+        return_type: &Type,
+    ) -> bool {
+        match (target, signature) {
+            (Role::Method, Some(MemberSignature::Function(signature))) => {
+                signature.parameters.len() == parameter_types.len()
+                    && signature
+                        .parameters
+                        .iter()
+                        .zip(parameter_types)
+                        .all(|(a, b)| a.parameter_type == *b)
+            }
+            (Role::Getter, Some(MemberSignature::Property(property))) => {
+                parameter_types.is_empty() && property == return_type
+            }
+            (Role::Setter, Some(MemberSignature::Property(property))) => {
+                parameter_types.len() == 1 && parameter_types[0] == *property
+            }
+            (Role::Getter, Some(MemberSignature::Function(signature))) => {
+                signature.parameters.len() == parameter_types.len()
+                    && signature
+                        .parameters
+                        .iter()
+                        .zip(parameter_types)
+                        .all(|(a, b)| a.parameter_type == *b)
+                    && signature.return_type == *return_type
+            }
+            (Role::Setter, Some(MemberSignature::Function(signature))) => {
+                signature.parameters.len() + 1 == parameter_types.len()
+                    && signature
+                        .parameters
+                        .iter()
+                        .zip(parameter_types)
+                        .all(|(a, b)| a.parameter_type == *b)
+                    && parameter_types.last() == Some(&signature.return_type)
+            }
+            _ => false,
+        }
+    }
+
+    /// The default implementation (C# 8) `ty` inherits for `member` of
+    /// `contract`: the most specific re-implementation (`void IA.G() { }`
+    /// in an interface deriving from `IA`) among the interfaces `ty`
+    /// implements, else the member's own body. Two unrelated interfaces
+    /// re-implementing it is the C# ambiguity error (CS8705).
+    #[allow(clippy::too_many_arguments)]
+    fn default_implementation(
+        &mut self,
+        ty: &Type,
+        member: SymbolId,
+        contract: &Type,
+        name: &str,
+        parameter_types: &[Type],
+        return_type: &Type,
+        target: Role,
+    ) -> Option<FunctionKey> {
+        let bindings_of = |generator: &Self, interface: &Type| -> Vec<(SymbolId, Type)> {
+            match interface {
+                Type::Named {
+                    target: TypeTarget::Source(symbol),
+                    arguments,
+                } => generator
+                    .declarations
+                    .table
+                    .symbol(*symbol)
+                    .type_parameters
+                    .iter()
+                    .copied()
+                    .zip(arguments.iter().cloned())
+                    .collect(),
+                _ => Vec::new(),
+            }
+        };
+
+        // re-implementations in derived interfaces
+        let mut found: Vec<(Type, SymbolId)> = Vec::new();
+        for interface in self.interface_closure(ty) {
+            let Type::Named {
+                target: TypeTarget::Source(symbol),
+                ..
+            } = &interface
+            else {
+                continue;
+            };
+            let bindings = bindings_of(self, &interface);
+            let members: Vec<SymbolId> = self.declarations.table.symbol(*symbol).members.to_vec();
+            for candidate in members {
+                let entry = self.declarations.table.symbol(candidate);
+                if !entry.is_explicit_implementation
+                    || entry.name != name
+                    || self.is_bodiless(candidate)
+                {
+                    continue;
+                }
+                let names_contract = self
+                    .signatures
+                    .explicit_interfaces
+                    .get(&candidate)
+                    .is_some_and(|named| self.substitute(named, &bindings) == *contract);
+                if !names_contract {
+                    continue;
+                }
+                let signature = self
+                    .signatures
+                    .members
+                    .get(&candidate)
+                    .map(|signature| self.substitute_member(signature, &bindings));
+                if Self::shape_fits(target, signature.as_ref(), parameter_types, return_type) {
+                    found.push((interface.clone(), candidate));
+                }
+            }
+        }
+        let competing = found.clone();
+        if found.len() > 1 {
+            // the most derived one, when there is one that derives from all
+            found.retain(|(interface, _)| {
+                competing
+                    .iter()
+                    .all(|(other, _)| other == interface || self.implements(interface, other))
+            });
+        }
+        match found.len() {
+            1 => {
+                let (interface, candidate) = found.remove(0);
+                let bindings = bindings_of(self, &interface);
+                return Some(FunctionKey {
+                    symbol: candidate,
+                    role: target,
+                    bindings,
+                });
+            }
+            0 if competing.is_empty() => {}
+            _ => {
+                let found = competing;
+                let (file, span) = self.declaration_site(member);
+                let interfaces: Vec<String> = found
+                    .iter()
+                    .map(|(interface, _)| self.display_type(interface))
+                    .collect();
+                self.errors.push(CodegenError {
+                    message: format!(
+                        "`{}` inherits conflicting default implementations of `{}.{}` from {} \
+                         — implement it on the type (CS8705)",
+                        self.display_type(ty),
+                        self.display_type(contract),
+                        name,
+                        interfaces.join(" and ")
+                    ),
+                    file,
+                    span,
+                });
+                return None;
+            }
+        }
+
+        // the member's own body
+        if self.is_bodiless(member) {
+            return None;
+        }
+        Some(FunctionKey {
+            symbol: member,
+            role: target,
+            bindings: bindings_of(self, contract),
+        })
+    }
+
+    /// Every interface `ty` implements, instantiated, directly or through
+    /// a base class or another interface.
+    fn interface_closure(&self, ty: &Type) -> Vec<Type> {
+        let system = men_sharp_semantics::TypeSystem {
+            declarations: self.declarations,
+            signatures: self.signatures,
+            external: self.external,
+        };
+        let mut out: Vec<Type> = Vec::new();
+        let mut visited: HashSet<Type> = HashSet::new();
+        let mut queue = vec![ty.clone()];
+        while let Some(current) = queue.pop() {
+            if !visited.insert(current.clone()) {
+                continue;
+            }
+            if system.is_interface(&current) && &current != ty {
+                out.push(current.clone());
+            }
+            queue.extend(system.interfaces_of(&current));
+            if let Some(base) = system.base_of(&current)
+                && (self.is_source_class(&base) || system.is_interface(&base))
+            {
+                queue.push(base);
+            }
+        }
+        out
     }
 
     /// `int IShape.Area()` members named `name` implementing `contract` on

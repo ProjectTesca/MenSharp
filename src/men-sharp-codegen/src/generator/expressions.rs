@@ -2672,7 +2672,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     self.no_instance_error(ctx, symbol, span);
                     return Piece::Error;
                 }
-                let this = if call.is_static || call.is_extension {
+                let mut this = if call.is_static || call.is_extension {
                     None
                 } else {
                     receiver.as_ref().map(|(slot, _)| *slot).or(ctx.this_slot)
@@ -2706,7 +2706,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         self.direct_implementation(receiver_type, symbol, &bindings, Role::Method)
                     });
                     match direct {
-                        Some(key) => key,
+                        Some(key) => {
+                            // a default interface body runs on a *boxed* copy
+                            // of a struct (§18.6.9): its writes stay in the box
+                            if self.is_interface_member(key.symbol)
+                                && let (Some(slot), Some(struct_type)) = (this, &receiver_type)
+                                && self.is_source_struct(struct_type)
+                            {
+                                this =
+                                    Some(self.clone_struct(ctx, slot, struct_type, span.clone()));
+                            }
+                            key
+                        }
                         None => self.dispatcher_for(
                             ctx,
                             symbol,

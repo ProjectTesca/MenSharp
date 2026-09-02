@@ -211,6 +211,14 @@ the C# error it is (CS0534/CS0535/CS0144). When a class has both a public
 member and an explicit implementation of the same name, a call through the
 interface reaches the explicit one, as in C#.
 
+An interface member with a body is a default implementation (C# 8): a type
+that does not implement it gets the interface's version, reached through the
+interface type only (as in C#, `plain.Greet()` on the class is an error when
+the class never declared it). A derived interface may re-implement it
+(`string IGreeter.Greet() => ...`), and the most derived one wins; two
+unrelated interfaces doing so is the C# error (CS8705). On a struct the
+default body runs on a boxed copy, exactly as .NET does.
+
 Constructors chain as in C#: field initializers, then `: base(...)` /
 `: this(...)` (or the implicit `base()`), then the body — so a base class's
 fields are initialized whichever subclass is constructed, and a virtual call
@@ -383,6 +391,7 @@ wrong thing:
 - pattern matching in `switch` beyond constant labels, and `is` patterns other
   than a type (`is Circle c`);
 - conversion operators (`implicit operator` / `explicit operator`);
+- static abstract/virtual interface members (C# 11 generic math);
 - static constructors of generic classes;
 - the bare declaration shorthand `int[] x = { 1, 2 };` — write
   `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.

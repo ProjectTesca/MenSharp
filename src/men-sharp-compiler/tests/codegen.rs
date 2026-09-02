@@ -4776,3 +4776,145 @@ fn comparison_operators_must_come_in_pairs() {
         .collect();
     assert_eq!(pairs, vec!["== needs !="], "{:#?}", bodies.errors);
 }
+
+#[test]
+fn default_interface_methods_run_unless_the_type_implements_them() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public interface IGreeter
+            {
+                string Name { get; }
+                string Greet() { return "Hi " + Name; }         // default
+                int Twice(int x) { return Helper(x) * 2; }      // calls through `this`
+                int Helper(int x) { return x + 1; }
+                string Title => "Mx";                           // default property
+            }
+            public interface IPolite : IGreeter
+            {
+                string IGreeter.Greet() { return "Good day " + Name; }   // re-implementation
+            }
+            public class Plain : IGreeter { public string Name => "plain"; }
+            public class Custom : IGreeter
+            {
+                public string Name => "custom";
+                public string Greet() { return "Yo " + Name; }
+                public int Helper(int x) { return x + 10; }
+            }
+            public class Polite : IPolite { public string Name => "polite"; }
+            public struct Unit : IGreeter { public int n; public string Name => "unit" + n; }
+            public class Program
+            {
+                public static string greetings;
+                public static int twice;
+                public static string statically;
+                public static void Main()
+                {
+                    IGreeter a = new Plain();
+                    IGreeter b = new Custom();
+                    IGreeter c = new Polite();
+                    IGreeter d = new Unit { n = 3 };
+                    greetings = a.Greet() + "|" + b.Greet() + "|" + c.Greet() + "|" + d.Greet() + "|" + a.Title;
+                    twice = a.Twice(1) * 100 + b.Twice(1);      // 4*100 + 22
+                    statically = Via(new Unit { n = 7 }) + Via(new Plain());
+                }
+                static string Via<T>(T g) where T : IGreeter { return g.Greet(); }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "greetings"),
+        "Hi plain|Yo custom|Good day polite|Hi unit3|Mx"
+    );
+    assert_eq!(int_of(&emulator, "twice"), 422);
+    assert_eq!(string_of(&emulator, "statically"), "Hi unit7Hi plain");
+}
+
+#[test]
+fn a_default_method_is_not_a_member_of_the_class() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public interface IA { void G() { } }
+            public class C : IA { }
+            public class Program
+            {
+                public static void Main() { var c = new C(); c.G(); }   // CS1061: only through IA
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::UnknownMember { .. }
+        )),
+        "{:#?}",
+        bodies.errors
+    );
+}
+
+#[test]
+fn conflicting_default_implementations_are_an_error() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public interface IA { int G() { return 1; } }
+            public interface IB : IA { int IA.G() { return 2; } }
+            public interface IC : IA { int IA.G() { return 3; } }
+            public class Both : IB, IC { }                            // CS8705
+            public interface ID : IB { int IA.G() { return 4; } }
+            public class MostDerived : ID, IB { }                     // fine: ID re-implements IB's
+            public class Program
+            {
+                public static int result;
+                public static void Main() { IA a = new MostDerived(); result = a.G(); IA b = new Both(); result += b.G(); }
+            }
+        }
+        "#,
+    )];
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output
+            .errors
+            .iter()
+            .any(|error| error.message.contains("CS8705") && error.message.contains("Game.Both")),
+        "{:#?}",
+        output.errors
+    );
+}

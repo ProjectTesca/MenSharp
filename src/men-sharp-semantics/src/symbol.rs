@@ -17,7 +17,7 @@ use std::{collections::HashMap, ops::Range};
 use men_sharp_parser::ast::{
     ClassDeclaration, ClassKind, ConstructorDeclaration, ConversionKind, DelegateDeclaration,
     DestructorDeclaration, EntityID, EnumDeclaration, EnumMember, EventDeclaration,
-    FieldDeclaration, GenericsParameter, IndexerDeclaration, MethodDeclaration,
+    FieldDeclaration, FunctionBody, GenericsParameter, IndexerDeclaration, MethodDeclaration,
     NamespaceDeclaration, OperatorDeclaration, OperatorSymbol, PropertyDeclaration,
     VariableDeclarator,
 };
@@ -138,6 +138,29 @@ pub enum SyntaxRef<'ast> {
 }
 
 impl SyntaxRef<'_> {
+    /// Whether the member declares a body: a block or expression body on a
+    /// method, or at least one accessor with one on a property or indexer.
+    /// In an interface that makes a default implementation; in a class,
+    /// `abstract`/`extern` is what leaves the body out.
+    pub fn has_body(&self) -> bool {
+        fn body_present(body: &FunctionBody<'_, '_>) -> bool {
+            match body {
+                FunctionBody::Block(_) | FunctionBody::Expression { .. } => true,
+                FunctionBody::Accessors(accessors) => accessors
+                    .accessors
+                    .iter()
+                    .any(|accessor| body_present(&accessor.body)),
+                FunctionBody::None { .. } | FunctionBody::Missing => false,
+            }
+        }
+        match self {
+            SyntaxRef::Method(node) => body_present(&node.body),
+            SyntaxRef::Property(node) => body_present(&node.body),
+            SyntaxRef::Indexer(node) => body_present(&node.body),
+            _ => false,
+        }
+    }
+
     /// The identity of the declaring node, for keying phase side-tables.
     ///
     /// For multi-declarator declarations this is the declarator's identity, so each

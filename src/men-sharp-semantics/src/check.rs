@@ -826,7 +826,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let in_interface = entry.parent.is_some_and(|parent| {
             self.resolver.declarations.table.symbol(parent).kind == SymbolKind::Interface
         });
-        in_interface
+        // an interface member with a body is a default implementation (C# 8):
+        // no contract for the implementing type to satisfy
+        let without_body = !entry.declarations.iter().any(|site| site.syntax.has_body());
+        (in_interface && without_body)
             || entry.declarations.iter().any(|site| {
                 let modifiers: &[men_sharp_parser::ast::Spanned<
                     men_sharp_parser::ast::Modifier,
@@ -879,7 +882,6 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 continue;
             };
             let current_entry = self.resolver.declarations.table.symbol(*current_symbol);
-            let is_interface = current_entry.kind == SymbolKind::Interface;
             if current != self_type {
                 for &member in &current_entry.members {
                     let member_entry = self.resolver.declarations.table.symbol(member);
@@ -887,7 +889,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         member_entry.kind,
                         SymbolKind::Method | SymbolKind::Property | SymbolKind::Indexer
                     ) && !member_entry.is_static
-                        && (is_interface || self.is_bodiless_member(member));
+                        && !member_entry.is_explicit_implementation
+                        && self.is_bodiless_member(member);
                     if contract_member {
                         required.push((current.clone(), member));
                     }
