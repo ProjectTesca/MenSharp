@@ -9,7 +9,7 @@
 //! complete once the whole program is compiled, so the test is a synthesized
 //! function emitted after the fixpoint, like a dispatcher.
 
-use men_sharp_parser::ast::{AsExpression, IsExpression, Pattern};
+use men_sharp_parser::ast::{AsExpression, IsExpression};
 
 use super::*;
 
@@ -216,7 +216,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     /// `if condition goto label` — Udon only has jump-if-false.
-    fn jump_if(&mut self, condition: DataId, label: LabelId) {
+    pub(super) fn jump_if(&mut self, condition: DataId, label: LabelId) {
         let fall_through = self.fresh_label("not");
         self.program.code.push(Op::Push(condition));
         self.program
@@ -277,7 +277,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// `value is T` as a bool slot: a type with a type id through its
     /// synthesized test, an engine or .NET type through
     /// `Type.IsInstanceOfType`. `None` after reporting otherwise.
-    fn lower_runtime_type_test(
+    pub(super) fn lower_runtime_type_test(
         &mut self,
         ctx: &mut Ctx<'ast>,
         value: DataId,
@@ -338,48 +338,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         constant
     }
 
-    /// `x is T` / `x is T t`: the test, and on success the value bound to
-    /// the pattern variable in the enclosing scope (where the checker
-    /// declared it).
+    /// `x is <pattern>`: see [`Generator::lower_pattern`].
     pub(super) fn lower_is(
         &mut self,
         ctx: &mut Ctx<'ast>,
         is: &'ast IsExpression<'ast, 'ast>,
     ) -> Option<DataId> {
-        let Ok(Pattern::Declaration {
-            pattern_type,
-            designation,
-            ..
-        }) = &is.pattern
-        else {
-            self.error(
-                ctx,
-                "only type patterns (`x is T`, `x is T t`) are supported by the Udon backend yet",
-                is.span.clone(),
-            );
-            return None;
-        };
-        let to = self
-            .bodies
-            .resolved_types
-            .get(&EntityID::from(pattern_type))
-            .cloned()
-            .map(|ty| self.substitute(&ty, &ctx.key.bindings))?;
+        let pattern = is.pattern.as_ref().ok()?;
+        let value_type = self.type_of(ctx, &is.value);
         let value = self.lower_expression(ctx, &is.value)?;
-        let result = self.lower_runtime_type_test(ctx, value, &to, is.span.clone())?;
-        if let Some(name) = designation {
-            let local = self.temp_for(&to);
-            let skip = self.fresh_label("is_bind_skip");
-            self.program.code.push(Op::Push(result));
-            self.program.code.push(Op::JumpIfFalse(Target::Label(skip)));
-            self.copy(value, local);
-            self.program.code.push(Op::Label(skip));
-            ctx.locals
-                .last_mut()
-                .expect("a scope is open")
-                .insert(name.value, (local, to));
-        }
-        Some(result)
+        self.lower_pattern(ctx, value, &value_type, pattern)
     }
 
     /// `x as T`: the value when it is a `T`, null otherwise.

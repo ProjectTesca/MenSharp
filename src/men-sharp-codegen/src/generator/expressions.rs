@@ -1,8 +1,8 @@
 //! Statement and expression lowering.
 
 use men_sharp_parser::ast::{
-    ExpressionStatement, IfStatement, LocalVariableDeclaration, NewExpression, Pattern,
-    PostfixOperator, ReturnStatement, SwitchLabel, SwitchStatement, WhileStatement,
+    ExpressionStatement, IfStatement, LocalVariableDeclaration, NewExpression, PostfixOperator,
+    ReturnStatement, SwitchLabel, SwitchStatement, WhileStatement,
 };
 
 use super::*;
@@ -459,6 +459,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// `switch` over constants: compare the value against every case label in
     /// order, jump to the matching section, `default` (or the end) otherwise.
+    /// `switch` statement: sections are tried in order, each label a
+    /// pattern (constants included) plus its `when` guard; the first match
+    /// runs its section, `default` runs when none matched wherever it was
+    /// written. A section's pattern variables live in the section's scope,
+    /// so its labels and body are lowered together.
     fn lower_switch(&mut self, ctx: &mut Ctx<'ast>, statement: &'ast SwitchStatement<'ast, 'ast>) {
         let Ok(value_expression) = &statement.value else {
             return;
@@ -470,73 +475,53 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Ok(sections) = statement.sections else {
             return;
         };
-        let Some(equality) = self.switch_equality(&value_type) else {
-            self.error(
-                ctx,
-                "`switch` over this type is not supported by the Udon backend yet",
-                statement.span.clone(),
-            );
-            return;
-        };
 
         let end = self.fresh_label("switch_end");
-        let section_labels: Vec<LabelId> = (0..sections.len())
-            .map(|index| self.fresh_label(&format!("switch_section_{index}")))
-            .collect();
-        let mut default_target: Option<LabelId> = None;
+        let no_match = self.fresh_label("switch_no_match");
+        let mut default_body: Option<LabelId> = None;
 
-        let condition = self.temp("SystemBoolean");
-        for (section, &target) in sections.iter().zip(&section_labels) {
+        for (index, section) in sections.iter().enumerate() {
+            let body = self.fresh_label(&format!("switch_body_{index}"));
+            let next = self.fresh_label(&format!("switch_try_{}", index + 1));
+            ctx.locals.push(HashMap::new());
             for label in section.labels {
                 match label {
-                    SwitchLabel::Default { .. } => default_target = Some(target),
-                    SwitchLabel::Case {
-                        guard: Some(guard), ..
-                    } => {
-                        self.error(
-                            ctx,
-                            "`when` guards on case labels are not supported by the Udon \
-                             backend yet",
-                            guard.span(),
-                        );
-                    }
-                    SwitchLabel::Case {
-                        pattern: Ok(Pattern::Discard(_)),
-                        ..
-                    } => default_target = Some(target),
+                    SwitchLabel::Default { .. } => default_body = Some(body),
                     SwitchLabel::Case {
                         pattern: Ok(pattern),
+                        guard,
                         span,
                         ..
                     } => {
-                        let Some(constant) = self.case_constant(ctx, pattern, span.clone()) else {
+                        let next_label = self.fresh_label("case_next");
+                        let Some(matched) = self.lower_pattern(ctx, value, &value_type, pattern)
+                        else {
                             continue;
                         };
-                        let skip = self.fresh_label("case_skip");
-                        self.call_extern(
-                            ctx,
-                            &equality,
-                            &[value, constant, condition],
-                            span.clone(),
-                        );
-                        self.program.code.push(Op::Push(condition));
-                        self.program.code.push(Op::JumpIfFalse(Target::Label(skip)));
-                        self.program.code.push(Op::Jump(Target::Label(target)));
-                        self.program.code.push(Op::Label(skip));
+                        self.program.code.push(Op::Push(matched));
+                        self.program
+                            .code
+                            .push(Op::JumpIfFalse(Target::Label(next_label)));
+                        if let Some(guard) = guard
+                            && let Some(condition) = self.lower_expression(ctx, guard)
+                        {
+                            self.program.code.push(Op::Push(condition));
+                            self.program
+                                .code
+                                .push(Op::JumpIfFalse(Target::Label(next_label)));
+                        }
+                        let _ = span;
+                        self.program.code.push(Op::Jump(Target::Label(body)));
+                        self.program.code.push(Op::Label(next_label));
                     }
                     SwitchLabel::Case {
                         pattern: Err(()), ..
                     } => {}
                 }
             }
-        }
-        self.program
-            .code
-            .push(Op::Jump(Target::Label(default_target.unwrap_or(end))));
+            self.program.code.push(Op::Jump(Target::Label(next)));
 
-        for (section, &target) in sections.iter().zip(&section_labels) {
-            self.program.code.push(Op::Label(target));
-            ctx.locals.push(HashMap::new());
+            self.program.code.push(Op::Label(body));
             ctx.loop_stack
                 .push(BreakFrame::Switch { break_target: end });
             for statement in section.statements {
@@ -547,73 +532,64 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // C# forbids falling through, so this jump is what Roslyn already
             // guaranteed the section ends with
             self.program.code.push(Op::Jump(Target::Label(end)));
+            self.program.code.push(Op::Label(next));
         }
+
+        self.program.code.push(Op::Label(no_match));
+        self.program
+            .code
+            .push(Op::Jump(Target::Label(default_body.unwrap_or(end))));
         self.program.code.push(Op::Label(end));
     }
 
-    /// The equality extern a `switch` dispatches through, per value type.
-    fn switch_equality(&mut self, value_type: &Type) -> Option<String> {
-        // a source enum is its underlying Int32
-        if self.source_enum(value_type).is_some() {
-            return Some(
-                "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean".into(),
-            );
-        }
-        // an external enum is a boxed value; Object.Equals is value equality
-        // for same-type enums
-        if self.external_enum(value_type).is_some() {
-            return Some("SystemObject.__Equals__SystemObject_SystemObject__SystemBoolean".into());
-        }
-        let name = self.extern_type_name(value_type)?;
-        let signature = format!("{name}.__op_Equality__{name}_{name}__SystemBoolean");
-        self.nodes.has_signature(&signature).then_some(signature)
-    }
-
-    /// The constant a `case` label compares against.
-    fn case_constant(
+    /// `value switch { pattern when guard => result, ... }`: the first arm
+    /// whose pattern (and guard) matches yields the value; none matching is
+    /// C#'s SwitchExpressionException, so the program halts there.
+    fn lower_switch_expression(
         &mut self,
         ctx: &mut Ctx<'ast>,
-        pattern: &'ast Pattern<'ast, 'ast>,
-        span: Range<usize>,
+        switch: &'ast men_sharp_parser::ast::SwitchExpression<'ast, 'ast>,
+        whole: &'ast Expression<'ast, 'ast>,
     ) -> Option<DataId> {
-        match pattern {
-            Pattern::Constant(expression) => self.lower_expression(ctx, expression),
-            // `case Color.Red:` parses as a bare name; the checker resolved
-            // what it names and left the member on the type node
-            Pattern::Declaration {
-                pattern_type,
-                designation: None,
-                ..
-            } => match self.bodies.targets.get(&EntityID::from(pattern_type)) {
-                Some(ResolvedTarget::Member(member)) => {
-                    let member = member.clone();
-                    match self.member_constant(&member) {
-                        Some((slot, _)) => Some(slot),
-                        None => {
-                            self.error(ctx, "this case label is not a constant", span);
-                            None
-                        }
-                    }
+        let value_type = self.type_of(ctx, &switch.value);
+        let value = self.lower_expression(ctx, &switch.value)?;
+        let result_type = self.type_of(ctx, whole);
+        let result = self.temp_for(&result_type);
+        let end = self.fresh_label("switch_expression_end");
+        let arms = switch.arms.ok()?;
+
+        for arm in arms {
+            let next = self.fresh_label("arm_next");
+            ctx.locals.push(HashMap::new());
+            let matched = self.lower_pattern(ctx, value, &value_type, &arm.pattern);
+            if let Some(matched) = matched {
+                self.program.code.push(Op::Push(matched));
+                self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
+                if let Some(guard) = &arm.guard
+                    && let Some(condition) = self.lower_expression(ctx, guard)
+                {
+                    self.program.code.push(Op::Push(condition));
+                    self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
                 }
-                _ => {
-                    self.error(
-                        ctx,
-                        "this case label could not be resolved to a constant",
-                        span,
-                    );
-                    None
+                if let Ok(arm_value) = &arm.value
+                    && let Some(produced) = self.owned_value(ctx, arm_value)
+                {
+                    let arm_type = self.type_of(ctx, arm_value);
+                    let converted =
+                        self.convert(ctx, produced, &arm_type, &result_type, arm.span.clone());
+                    self.copy(converted, result);
                 }
-            },
-            _ => {
-                self.error(
-                    ctx,
-                    "only constant `case` labels (and `default`) are supported by the Udon \
-                     backend yet",
-                    span,
-                );
-                None
+                self.program.code.push(Op::Jump(Target::Label(end)));
             }
+            ctx.locals.pop();
+            self.program.code.push(Op::Label(next));
         }
+
+        let message =
+            self.string_constant("SwitchExpressionException: the switch expression matched no arm");
+        self.emit_halt(ctx, message, switch.span.clone());
+        self.program.code.push(Op::Label(end));
+        Some(result)
     }
 
     pub(super) fn fresh_label(&mut self, prefix: &str) -> LabelId {
@@ -680,6 +656,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 Some(self.checked_cast(ctx, converted, &from, &to, expression.span()))
             }
             Expression::Is(is) => self.lower_is(ctx, is),
+            Expression::Switch(switch) => self.lower_switch_expression(ctx, switch, expression),
             Expression::As(as_expression) => self.lower_as(ctx, as_expression, expression),
             other => {
                 self.error(
@@ -695,7 +672,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// A best-effort conversion between representable types. Same Udon type:
     /// plain copy semantics (no code at all — the caller uses the source
     /// slot). Numeric changes go through `SystemConvert`.
-    fn convert(
+    pub(super) fn convert(
         &mut self,
         ctx: &mut Ctx<'ast>,
         source: DataId,
@@ -1443,7 +1420,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    fn member_place(
+    pub(super) fn member_place(
         &mut self,
         ctx: &mut Ctx<'ast>,
         member: &ResolvedMember,
@@ -1684,7 +1661,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    fn read_place(
+    pub(super) fn read_place(
         &mut self,
         ctx: &mut Ctx<'ast>,
         place: Place,

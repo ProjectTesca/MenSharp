@@ -1784,11 +1784,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.declare_local(name.value, ty);
                 }
             }
-            Pattern::Var { designation, .. } => {
-                if let Ok(VariableDesignation::Single(name)) = designation {
+            Pattern::Var { designation, .. } => match designation {
+                Ok(VariableDesignation::Single(name)) => {
                     self.declare_local(name.value, matched.clone());
                 }
-            }
+                Ok(VariableDesignation::Discard(_)) | Err(()) => {}
+                Ok(_) => {
+                    self.error(SemanticErrorKind::UnsupportedExpression, pattern.span());
+                }
+            },
             Pattern::Constant(expression) => {
                 self.check_expression(expression);
             }
@@ -1819,16 +1823,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     None => matched.clone(),
                 };
                 for subpattern in *subpatterns {
-                    let member_type = self
-                        .system()
-                        .members_named(&target, subpattern.name.value)
-                        .into_iter()
-                        .find_map(|candidate| match candidate.signature {
-                            Some(MemberSignature::Field(ty))
-                            | Some(MemberSignature::Property(ty)) => Some(ty),
-                            _ => None,
-                        })
-                        .unwrap_or(Type::Error);
+                    // `{ Radius: > 3 }` reads the member like `value.Radius`
+                    // would; the binding is recorded on the subpattern node
+                    let meaning = self.access_member(
+                        Meaning::Value(target.clone()),
+                        subpattern.name.value,
+                        Vec::new(),
+                        &subpattern.name.span,
+                        Some(EntityID::from(subpattern)),
+                    );
+                    let member_type = self.value_of(meaning, subpattern.name.span.clone(), None);
                     if let Ok(pattern) = &subpattern.pattern {
                         self.check_pattern(pattern, &member_type);
                     }
@@ -1978,8 +1982,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             Expression::Is(is) => {
                 let value = self.check_expression(&is.value);
-                if let Ok(pattern) = &is.pattern {
-                    self.check_pattern(pattern, &value);
+                match &is.pattern {
+                    Ok(Pattern::Discard(span)) => {
+                        self.error(SemanticErrorKind::DiscardIsNotAPattern, span.clone());
+                    }
+                    Ok(pattern) => self.check_pattern(pattern, &value),
+                    Err(()) => {}
                 }
                 self.corlib("Boolean")
             }

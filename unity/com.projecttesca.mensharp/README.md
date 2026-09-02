@@ -240,13 +240,36 @@ included, as C# does; a comparison operator without its partner is the C#
 error (CS0216). Conversion operators (`implicit operator`) are not supported
 yet.
 
-Casts, `is` and `as` test the runtime type:
+Casts, `is` and `as` test the runtime type, and `is` takes the C# patterns:
 
 ```csharp
-if (shape is Circle c) { ... }        // binds on success
-var square = shape as Square;         // null when it is not one
-var circle = (Circle)shape;           // InvalidCastException when it is not one
+if (shape is Circle c) { ... }                    // type pattern, binds on success
+if (shape is Circle { Radius: > 3 } big) { ... }  // property pattern with a relational one
+if (n is >= 0 and < 10 || o is not null) { ... }  // relational, and/or/not, constants
+if (mood is Mood.Happy or Mood.Locked) { ... }
+var square = shape as Square;                     // null when it is not one
+var circle = (Circle)shape;                       // InvalidCastException when it is not one
 ```
+
+Constant, relational, `and`/`or`/`not`, `var`, `_` and property patterns
+(nested, with or without a type) all work, on values and on `object`
+(`o is > 3` is false for a string, as in C#). The same patterns work as
+`case` labels, with `when` guards, and in switch expressions:
+
+```csharp
+switch (shape)
+{
+    case Circle { Radius: > 5 } big: ...; break;
+    case Circle c when c.Radius == 2: ...; break;
+    case null: ...; break;
+    default: ...; break;
+}
+string size = n switch { < 3 => "small", < 10 => "medium", _ => "large" };
+```
+
+A switch expression no arm matches halts the program (C#'s
+SwitchExpressionException). Positional (`is (0, var y)`) and list patterns
+are not supported yet.
 
 A failed cast stops the program the way an unhandled exception does on Udon:
 the error is logged (`InvalidCastException: the object is not a `Game.Circle``)
@@ -388,8 +411,7 @@ wrong thing:
 
 - exceptions (`try`/`catch`/`throw`) — a failed cast already halts the way an
   unhandled exception would, see above;
-- pattern matching in `switch` beyond constant labels, and `is` patterns other
-  than a type (`is Circle c`);
+- positional (`is (0, var y)`, `Deconstruct`) and list patterns;
 - conversion operators (`implicit operator` / `explicit operator`);
 - static abstract/virtual interface members (C# 11 generic math);
 - static constructors of generic classes;

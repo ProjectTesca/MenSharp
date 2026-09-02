@@ -74,6 +74,9 @@ pub enum SemanticErrorKind {
         type_name: String,
         member: String,
     },
+    /// `x is _`: a discard is not a pattern on its own (C# reads `_` as a
+    /// type name there and fails to find it).
+    DiscardIsNotAPattern,
     /// `==` without `!=`, `<` without `>`, `<=` without `>=` (CS0216).
     OperatorRequiresPair {
         operator: String,

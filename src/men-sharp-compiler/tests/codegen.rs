@@ -4918,3 +4918,156 @@ fn conflicting_default_implementations_are_an_error() {
         output.errors
     );
 }
+
+#[test]
+fn is_patterns_beyond_types_match_as_in_csharp() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public enum Color { Red, Green, Blue }
+            public abstract class Shape { public int Id; public abstract int Area(); }
+            public class Circle : Shape
+            {
+                public int Radius; public Color Tint; public Circle Inner;
+                public override int Area() { return 3 * Radius * Radius; }
+            }
+            public class Square : Shape { public int Side; public override int Area() { return Side * Side; } }
+            public struct P { public int x; public int y; }
+            public class Program
+            {
+                public static int constants;
+                public static int relational;
+                public static int properties;
+                static int B(bool b, int bit) { return b ? bit : 0; }
+                public static void Main()
+                {
+                    int n = 7; string s = "abc"; object o = 5; object nothing = null; Color c = Color.Green;
+                    constants = B(n is 7, 1) + B(n is not 8, 2) + B(s is "abc", 4) + B(nothing is null, 8)
+                        + B(o is not null, 16) + B(c is Color.Green, 32) + B(o is 5, 64)
+                        + B(o is "5", 128) + B(nothing is 5, 256);                       // 127
+                    relational = B(n is > 5, 1) + B(n is >= 7 and < 10, 2) + B(n is < 3 or > 6, 4)
+                        + B(n is not (> 0 and < 5), 8) + B(o is > 3, 16) + B(s is > 3, 32)
+                        + B(n is var anything && anything == 7, 64) + B(n is (7), 256);   // 351
+                    Shape sh = new Circle { Id = 1, Radius = 2, Tint = Color.Blue, Inner = new Circle { Radius = 1 } };
+                    Shape none = null;
+                    P p = new P { x = 3, y = -1 };
+                    properties = B(sh is Circle { Radius: 2 }, 1) + B(sh is Circle { Radius: > 5 }, 2)
+                        + B(sh is { Id: 1 }, 4)
+                        + B(sh is Circle { Tint: Color.Blue, Inner: { Radius: 1 } } found && found.Radius == 2, 8)
+                        + B(none is { }, 16) + B(sh is not Square, 32) + B(p is { x: > 0, y: < 0 }, 64)
+                        + B(sh is Circle { Inner: not null } c2 && c2.Area() == 12, 128)
+                        + B(sh is Square { Side: 2 } or Circle { Radius: 2 }, 256)
+                        + B(o is int i && i == 5, 512) + B(sh is Circle { Inner: { Inner: null } }, 1024);   // 2029
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "constants"), 127);
+    assert_eq!(int_of(&emulator, "relational"), 351);
+    assert_eq!(int_of(&emulator, "properties"), 2029);
+}
+
+#[test]
+fn switch_statements_and_expressions_take_patterns() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public enum Color { Red, Green, Blue }
+            public abstract class Shape { public abstract int Area(); }
+            public class Circle : Shape { public int Radius; public override int Area() { return 3 * Radius * Radius; } }
+            public class Square : Shape { public int Side; public override int Area() { return Side * Side; } }
+            public class Program
+            {
+                public static int statements;
+                public static int constants;
+                public static string expressions;
+                static int Classify(Shape s)
+                {
+                    switch (s)
+                    {
+                        case null: return -1;
+                        case Circle { Radius: > 5 } big: return 100 + big.Radius;
+                        case Circle c when c.Radius == 2: return 20;
+                        case Circle c: return 10 + c.Radius;
+                        case Square { Side: 0 }: return 0;
+                        default: return 1;
+                    }
+                }
+                static string Describe(object o) => o switch
+                {
+                    null => "null",
+                    int i when i < 0 => "negative",
+                    int i => "int" + i,
+                    string s => "str:" + s,
+                    Circle { Radius: var rad } => "circle" + rad,
+                    _ => "other",
+                };
+                static int Old(Color c) { switch (c) { case Color.Red: return 1; case Color.Blue: return 3; default: return 2; } }
+                static int Str(string s) { switch (s) { case "a": return 1; case "b": return 2; } return 0; }
+                public static void Main()
+                {
+                    statements = Classify(null) * 10000 + Classify(new Circle { Radius = 7 }) * 100
+                        + Classify(new Circle { Radius = 2 }) + Classify(new Circle { Radius = 3 });   // 733
+                    constants = Old(Color.Red) * 100 + Old(Color.Green) * 10 + Old(Color.Blue) + Str("b") * 1000
+                        + Classify(new Square { Side = 0 }) * 10000 + Classify(new Square { Side = 4 }) * 100000;   // 102123
+                    int n = 5;
+                    string size = n switch { < 3 => "small", >= 3 and < 10 => "medium", _ => "large" };
+                    expressions = Describe(null) + Describe(-3) + Describe(4) + Describe("x")
+                        + Describe(new Circle { Radius = 9 }) + Describe(1.5f) + "|" + size;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "statements"), 733);
+    assert_eq!(int_of(&emulator, "constants"), 102123);
+    assert_eq!(
+        string_of(&emulator, "expressions"),
+        "nullnegativeint4str:xcircle9other|medium"
+    );
+}
+
+#[test]
+fn a_switch_expression_with_no_matching_arm_halts() {
+    let Some((program, result)) = run_sources_result(
+        vec![SourceCode::new(
+            "test.cs",
+            r#"
+            namespace Game
+            {
+                public class Program
+                {
+                    public static int after;
+                    public static void Main()
+                    {
+                        int n = 5;
+                        after = n switch { 1 => 10, 2 => 20 };
+                    }
+                }
+            }
+            "#,
+        )],
+        "Main",
+    ) else {
+        return;
+    };
+    match result {
+        Err(men_sharp_asm::EmulatorError::Exception(message)) => {
+            assert!(message.contains("SwitchExpressionException"), "{message}");
+        }
+        Err(other) => panic!("expected a halt, got {other:?}\n{program}"),
+        Ok(emulator) => panic!(
+            "no halt: after = {:?}\n{program}",
+            emulator.value_of("after")
+        ),
+    }
+}

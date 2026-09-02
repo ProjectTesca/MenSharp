@@ -492,6 +492,7 @@ impl Emulator {
                 Ok(())
             }
             "SystemObject.__ToString__SystemString"
+            | "SystemBoolean.__ToString__SystemString"
             | "SystemConvert.__ToString__SystemObject__SystemString" => {
                 let args = self.pop_arguments(2)?;
                 let value = self.heap[args[0]].display();
