@@ -305,6 +305,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 );
                 self.emit_function_body(&mut ctx, &declaration.body);
             }
+            // a user-declared operator is a static method with a symbol for a name
+            (Role::Method, Some(SyntaxRef::Operator(declaration))) => {
+                if declaration.conversion.is_some() {
+                    self.error(
+                        &ctx,
+                        "conversion operators (`implicit operator` / `explicit operator`) are \
+                         not supported by the Udon backend yet",
+                        declaration.span.clone(),
+                    );
+                    return;
+                }
+                self.bind_parameters(
+                    &mut ctx,
+                    declaration
+                        .parameters
+                        .as_ref()
+                        .ok()
+                        .map(|list| list.parameters),
+                    value_parameters,
+                    &parameter_types,
+                );
+                self.emit_function_body(&mut ctx, &declaration.body);
+            }
             (Role::Getter | Role::Setter, Some(SyntaxRef::Property(declaration))) => {
                 if key.role == Role::Setter
                     && let (Some(&slot), Some(ty)) =

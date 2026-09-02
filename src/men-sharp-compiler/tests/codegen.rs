@@ -4660,3 +4660,119 @@ fn a_failed_cast_to_an_external_type_halts_too() {
         ),
     }
 }
+
+#[test]
+fn user_defined_operators_are_called() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public struct V
+            {
+                public int x; public int y;
+                public V(int x, int y) { this.x = x; this.y = y; }
+                public static V operator +(V a, V b) { return new V(a.x + b.x, a.y + b.y); }
+                public static V operator -(V a, V b) { return new V(a.x - b.x, a.y - b.y); }
+                public static V operator -(V a) { return new V(-a.x, -a.y); }
+                public static V operator *(V a, int k) { return new V(a.x * k, a.y * k); }
+                public static V operator *(int k, V a) { return new V(a.x * k, a.y * k); }
+                public static bool operator ==(V a, V b) { return a.x == b.x && a.y == b.y; }
+                public static bool operator !=(V a, V b) { return !(a == b); }
+                public static bool operator <(V a, V b) { return a.x < b.x; }
+                public static bool operator >(V a, V b) { return a.x > b.x; }
+                public static V operator ++(V a) { return new V(a.x + 1, a.y + 1); }
+                public static bool operator !(V a) { return a.x == 0 && a.y == 0; }
+                public override bool Equals(object o) { return o is V v && v == this; }
+                public override int GetHashCode() { return x * 31 + y; }
+            }
+            public class Money
+            {
+                public int cents;
+                public Money(int c) { cents = c; }
+                public static Money operator +(Money a, Money b) { return new Money(a.cents + b.cents); }
+                public static bool operator ==(Money a, Money b)
+                {
+                    if ((object)a == null) { return (object)b == null; }
+                    if ((object)b == null) { return false; }
+                    return a.cents == b.cents;
+                }
+                public static bool operator !=(Money a, Money b) { return !(a == b); }
+                public override bool Equals(object o) { return o is Money m && m == this; }
+                public override int GetHashCode() { return cents; }
+            }
+            public class Program
+            {
+                public static int arithmetic;
+                public static int comparisons;
+                public static int mutation;
+                public static int classes;
+                public static void Main()
+                {
+                    var a = new V(1, 2);
+                    var b = new V(10, 20);
+                    var c = a + b; var d = b - a; var e = -a; var f = a * 3; var g = 2 * a;
+                    arithmetic = c.x * 1000 + d.y * 10 + e.x + f.y + g.x;              // 11187
+                    comparisons = (a == new V(1, 2) ? 1 : 0) + (a != b ? 10 : 0)
+                        + (a < b ? 100 : 0) + (a > b ? 1000 : 0) + (!new V(0, 0) ? 10000 : 0);   // 10111
+                    var h = a; h += b;                       // (11, 22)
+                    var i = a; i++; ++i;                     // (3, 4)
+                    var j = a; var k = j++;                  // j = (2, 3), k = (1, 2): the old value
+                    mutation = h.x * 1000 + i.y * 100 + j.x * 10 + k.y;   // 11422
+                    Money m = null;
+                    Money n = new Money(5);
+                    classes = (m == null ? 1 : 0) + (n == null ? 0 : 10) + (n != m ? 100 : 0)
+                        + (n + new Money(1) == new Money(6) ? 1000 : 0)
+                        + (n.Equals(new Money(5)) ? 10000 : 0);   // 11111
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "arithmetic"), 11187);
+    assert_eq!(int_of(&emulator, "comparisons"), 10111);
+    assert_eq!(int_of(&emulator, "mutation"), 11422);
+    assert_eq!(int_of(&emulator, "classes"), 11111);
+}
+
+#[test]
+fn comparison_operators_must_come_in_pairs() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public struct V
+            {
+                public int x;
+                public static bool operator ==(V a, V b) { return a.x == b.x; }   // CS0216: no !=
+                public static bool operator <(V a, V b) { return a.x < b.x; }
+                public static bool operator >(V a, V b) { return a.x > b.x; }
+            }
+            public class Program { public static void Main() { } }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let pairs: Vec<String> = bodies
+        .errors
+        .iter()
+        .filter_map(|error| match &error.kind {
+            men_sharp_semantics::SemanticErrorKind::OperatorRequiresPair { operator, missing } => {
+                Some(format!("{operator} needs {missing}"))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(pairs, vec!["== needs !="], "{:#?}", bodies.errors);
+}

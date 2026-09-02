@@ -74,6 +74,11 @@ pub enum SemanticErrorKind {
         type_name: String,
         member: String,
     },
+    /// `==` without `!=`, `<` without `>`, `<=` without `>=` (CS0216).
+    OperatorRequiresPair {
+        operator: String,
+        missing: String,
+    },
     /// A constructor (written or implicit) has to call a base constructor,
     /// and none takes the arguments given — for the implicit `base()`, none
     /// takes zero (CS7036 / CS1729).

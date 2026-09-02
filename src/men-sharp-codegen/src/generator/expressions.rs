@@ -805,9 +805,50 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             (right, &right_type),
             &result_type,
             binary.span.clone(),
+            Some(EntityID::from(binary)),
         )
     }
 
+    /// A user-declared operator the checker bound this node to (a struct's
+    /// own `+`, a class's `==`): a call to it, with struct operands copied
+    /// as by-value parameters are. `None` when the node has none — the
+    /// built-in or extern operator applies.
+    fn user_operator_call(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        node: Option<EntityID>,
+        operands: &[(DataId, &Type)],
+        span: Range<usize>,
+    ) -> Option<Option<DataId>> {
+        let call = match self.bodies.targets.get(&node?) {
+            Some(ResolvedTarget::Call(call)) => call.clone(),
+            _ => return None,
+        };
+        let MemberOrigin::Source(symbol) = call.origin else {
+            return None;
+        };
+        if self.declarations.table.symbol(symbol).kind != SymbolKind::Operator {
+            return None;
+        }
+        let key = FunctionKey {
+            symbol,
+            role: Role::Method,
+            bindings: self.bindings_for(ctx, symbol, &call.declaring_type, &[]),
+        };
+        let count = call.signature.parameters.len().min(operands.len());
+        let mut values = Vec::with_capacity(count);
+        for (slot, ty) in &operands[..count] {
+            let ty = self.substitute(ty, &ctx.key.bindings);
+            values.push(if self.is_source_struct(&ty) {
+                self.clone_struct(ctx, *slot, &ty, span.clone())
+            } else {
+                *slot
+            });
+        }
+        Some(self.call_function(ctx, &key, None, &values, &[], span))
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn emit_binary_operator(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -816,8 +857,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         right: (DataId, &Type),
         result_type: &Type,
         span: Range<usize>,
+        node: Option<EntityID>,
     ) -> Option<DataId> {
         use BinaryOperator::*;
+
+        if let Some(result) = self.user_operator_call(ctx, node, &[left, right], span.clone()) {
+            return result;
+        }
 
         let system_is = |ty: &Type, name: &str| {
             self.extern_type_name(ty)
@@ -955,14 +1001,50 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             result_name = "SystemInt32".into();
         }
 
+        // Udon names a primitive's operators its own way (`op_Multiplication`,
+        // `op_Remainder`); an engine type's keep their .NET metadata names
+        // (`Vector3.op_Multiply`) — so both spellings are tried
+        let dotnet_name = match operator {
+            Multiply => "op_Multiply",
+            Modulo => "op_Modulus",
+            _ => name,
+        };
+        let names: Vec<&str> = if dotnet_name == name {
+            vec![name]
+        } else {
+            vec![name, dotnet_name]
+        };
+        let mut candidates: Vec<String> = Vec::new();
+        // the operands as written (`Vector3 * float`), declared on either
+        // side's type or a base of it
+        if let (Some(left_name), Some(right_name)) = (
+            self.extern_type_name(left.1),
+            self.extern_type_name(right.1),
+        ) {
+            let mut owners = self.external_chain(left.1);
+            for owner in self.external_chain(right.1) {
+                if !owners.contains(&owner) {
+                    owners.push(owner);
+                }
+            }
+            for owner in &owners {
+                for spelled in &names {
+                    candidates.push(format!(
+                        "{owner}.__{spelled}__{left_name}_{right_name}__{result_name}"
+                    ));
+                }
+            }
+        }
         // an operator can be declared on a base type — `Rigidbody == null`
         // binds to UnityEngine.Object's — so the whole chain is a candidate,
         // nearest first, exactly as C# overload resolution would look
-        let mut candidates: Vec<String> = self
-            .external_chain(&operand_type)
-            .iter()
-            .map(|owner| format!("{owner}.__{name}__{owner}_{owner}__{result_name}"))
-            .collect();
+        for owner in self.external_chain(&operand_type) {
+            for spelled in &names {
+                candidates.push(format!(
+                    "{owner}.__{spelled}__{owner}_{owner}__{result_name}"
+                ));
+            }
+        }
         // and reference types with no operator at all still compare by
         // identity, which is what `x == null` needs. Value types must not fall
         // through to this: two equal structs are different objects once boxed
@@ -1047,6 +1129,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         whole: &'ast Expression<'ast, 'ast>,
     ) -> Option<DataId> {
         let operand_expression = unary.operand.as_ref().ok()?;
+        if matches!(
+            unary.operator.value,
+            UnaryOperator::Not
+                | UnaryOperator::Minus
+                | UnaryOperator::Plus
+                | UnaryOperator::BitwiseNot
+        ) && self.bodies.targets.contains_key(&EntityID::from(unary))
+        {
+            let operand = self.lower_expression(ctx, operand_expression)?;
+            let operand_type = self.type_of(ctx, operand_expression);
+            if let Some(result) = self.user_operator_call(
+                ctx,
+                Some(EntityID::from(unary)),
+                &[(operand, &operand_type)],
+                unary.span.clone(),
+            ) {
+                return result;
+            }
+        }
         match unary.operator.value {
             UnaryOperator::Not => {
                 let operand = self.lower_expression(ctx, operand_expression)?;
@@ -1064,8 +1165,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let ty = self.type_of(ctx, whole);
                 let name = self.extern_type_name(&ty)?;
                 let out = self.temp_for(&ty);
-                let signature = format!("{name}.__op_UnaryMinus__{name}__{name}");
-                self.call_extern(ctx, &signature, &[operand, out], unary.span.clone());
+                // Udon's spelling for primitives, .NET's for engine types
+                let candidates = [
+                    format!("{name}.__op_UnaryMinus__{name}__{name}"),
+                    format!("{name}.__op_UnaryNegation__{name}__{name}"),
+                ];
+                let Some(signature) = candidates
+                    .iter()
+                    .find(|signature| self.nodes.has_signature(signature))
+                else {
+                    self.error(
+                        ctx,
+                        "unary `-` is not available on Udon for this operand type",
+                        unary.span.clone(),
+                    );
+                    return None;
+                };
+                self.call_extern(ctx, signature, &[operand, out], unary.span.clone());
                 Some(out)
             }
             UnaryOperator::Plus => self.lower_expression(ctx, operand_expression),
@@ -1085,6 +1201,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     (one, &ty),
                     &ty,
                     unary.span.clone(),
+                    Some(EntityID::from(unary)),
                 )?;
                 let place = self.lower_place(ctx, operand_expression);
                 self.write_place(ctx, place, updated, unary.span.clone());
@@ -1142,6 +1259,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 (value, &value_type),
                 &target_type,
                 assignment.span.clone(),
+                Some(EntityID::from(assignment)),
             )?
         };
 
@@ -1794,7 +1912,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Piece {
         // `x++` / `obj.field--`: read–modify–write through the *place*, not
         // the value copy the ordinary walk would produce
-        if let Some(PrimaryRight::Postfix { operator, span }) = primary.chain.last()
+        if let Some(last) = primary.chain.last()
+            && let PrimaryRight::Postfix { operator, span } = last
             && matches!(
                 operator.value,
                 PostfixOperator::Increment | PostfixOperator::Decrement
@@ -1812,9 +1931,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             } else {
                 BinaryOperator::Subtract
             };
-            if let Some(updated) =
-                self.emit_binary_operator(ctx, op, (value, &ty), (one, &ty), &ty, span.clone())
-            {
+            if let Some(updated) = self.emit_binary_operator(
+                ctx,
+                op,
+                (value, &ty),
+                (one, &ty),
+                &ty,
+                span.clone(),
+                Some(EntityID::from(last)),
+            ) {
                 let place = self.place_upto(ctx, primary, primary.chain.len() - 1);
                 self.write_place(ctx, place, updated, span.clone());
             }
@@ -2144,6 +2269,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         (one, &ty),
                         &ty,
                         span.clone(),
+                        Some(EntityID::from(right)),
                     ) {
                         self.copy(updated, slot);
                     }

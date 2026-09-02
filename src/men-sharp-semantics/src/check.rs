@@ -583,12 +583,93 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 .unwrap_or_else(|| declaration.span.clone());
             self.check_contracts(symbol, span.clone());
             self.check_implicit_constructor(symbol, span);
+            self.check_operator_pairs(symbol);
         }
         for nested in &node.nested {
             self.check_type_declaration(nested);
         }
 
         self.type_stack.pop();
+    }
+
+    // ------------------------------------------------- operator pairs
+
+    /// `==`/`!=`, `<`/`>` and `<=`/`>=` come in pairs with the same
+    /// parameter types (CS0216).
+    fn check_operator_pairs(&mut self, symbol: SymbolId) {
+        const PAIRS: [(&str, &str); 6] = [
+            ("op_Equality", "op_Inequality"),
+            ("op_Inequality", "op_Equality"),
+            ("op_LessThan", "op_GreaterThan"),
+            ("op_GreaterThan", "op_LessThan"),
+            ("op_LessThanOrEqual", "op_GreaterThanOrEqual"),
+            ("op_GreaterThanOrEqual", "op_LessThanOrEqual"),
+        ];
+        let entry = self.resolver.declarations.table.symbol(symbol);
+        let operators: Vec<(SymbolId, &'ast str)> = entry
+            .members
+            .iter()
+            .map(|&member| (member, self.resolver.declarations.table.symbol(member)))
+            .filter(|(_, member)| member.kind == SymbolKind::Operator)
+            .map(|(id, member)| (id, member.name))
+            .collect();
+        for (member, name) in &operators {
+            let Some((_, partner)) = PAIRS.iter().find(|(own, _)| own == name) else {
+                continue;
+            };
+            let Some(MemberSignature::Function(signature)) = self.signatures.members.get(member)
+            else {
+                continue;
+            };
+            let parameters: Vec<Type> = signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.parameter_type.clone())
+                .collect();
+            let paired = operators.iter().any(|(other, other_name)| {
+                other_name == partner
+                    && matches!(
+                        self.signatures.members.get(other),
+                        Some(MemberSignature::Function(other_signature))
+                            if other_signature
+                                .parameters
+                                .iter()
+                                .map(|parameter| parameter.parameter_type.clone())
+                                .collect::<Vec<_>>()
+                                == parameters
+                    )
+            });
+            if !paired {
+                let span = self
+                    .resolver
+                    .declarations
+                    .table
+                    .symbol(*member)
+                    .declarations
+                    .first()
+                    .map(|site| match &site.syntax {
+                        SyntaxRef::Operator(operator) => operator.operator_keyword.clone(),
+                        _ => 0..0,
+                    })
+                    .unwrap_or(0..0);
+                let kind = SemanticErrorKind::OperatorRequiresPair {
+                    operator: Self::operator_token(name).to_string(),
+                    missing: Self::operator_token(partner).to_string(),
+                };
+                self.error(kind, span);
+            }
+        }
+    }
+
+    fn operator_token(name: &str) -> &'static str {
+        match name {
+            "op_Equality" => "==",
+            "op_Inequality" => "!=",
+            "op_LessThan" => "<",
+            "op_GreaterThan" => ">",
+            "op_LessThanOrEqual" => "<=",
+            _ => ">=",
+        }
     }
 
     // ------------------------------------------------- constructor chains
@@ -1816,6 +1897,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             value_type,
                             literal,
                             assignment.span.clone(),
+                            Some(EntityID::from(*assignment)),
                         );
                         // compound assignment narrows back implicitly (int += byte)
                         if !matches!(result, Type::Error) {
@@ -1876,6 +1958,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     right,
                     literal,
                     binary.span.clone(),
+                    Some(EntityID::from(*binary)),
                 )
             }
             Expression::Unary(unary) => {
@@ -1883,7 +1966,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     Ok(operand) => self.check_expression(operand),
                     Err(()) => Type::Error,
                 };
-                self.unary_type(unary.operator.value, operand, unary.span.clone())
+                self.unary_type(
+                    unary.operator.value,
+                    operand,
+                    unary.span.clone(),
+                    Some(EntityID::from(*unary)),
+                )
             }
             Expression::Is(is) => {
                 let value = self.check_expression(&is.value);
@@ -2508,7 +2596,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let ty = self.value_of(meaning, span.clone(), None);
                 use men_sharp_parser::ast::PostfixOperator;
                 match operator.value {
-                    PostfixOperator::Increment | PostfixOperator::Decrement => Meaning::Value(ty),
+                    PostfixOperator::Increment | PostfixOperator::Decrement => {
+                        let increment = operator.value == PostfixOperator::Increment;
+                        Meaning::Value(self.postfix_step_type(
+                            increment,
+                            ty,
+                            span,
+                            EntityID::from(right),
+                        ))
+                    }
                     PostfixOperator::NullForgiving => Meaning::Value(match ty {
                         Type::Nullable(inner) => *inner,
                         other => other,
@@ -4078,7 +4174,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
     // ------------------------------------------------------------ operators
 
-    fn unary_type(&mut self, operator: UnaryOperator, operand: Type, span: Range<usize>) -> Type {
+    fn unary_type(
+        &mut self,
+        operator: UnaryOperator,
+        operand: Type,
+        span: Range<usize>,
+        node: Option<EntityID>,
+    ) -> Type {
         if matches!(operand, Type::Error | Type::Dynamic) {
             return operand;
         }
@@ -4088,6 +4190,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             UnaryOperator::Not => {
                 if system.is_bool(&operand) {
                     self.corlib("Boolean")
+                } else if let Some(result) =
+                    self.user_defined_unary(operator, &operand, &span, node)
+                {
+                    result
                 } else {
                     let kind = SemanticErrorKind::InvalidOperator {
                         left: self.display(&operand),
@@ -4109,7 +4215,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         other => other,
                     };
                     self.corlib(promoted.corlib_name())
-                } else if let Some(result) = self.user_defined_unary(operator, &operand) {
+                } else if let Some(result) =
+                    self.user_defined_unary(operator, &operand, &span, node)
+                {
                     result
                 } else {
                     let kind = SemanticErrorKind::InvalidOperator {
@@ -4128,6 +4236,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     || system.is_enum_type(&operand)
                 {
                     operand
+                } else if let Some(result) =
+                    self.user_defined_unary(operator, &operand, &span, node)
+                {
+                    result
                 } else {
                     let kind = SemanticErrorKind::InvalidOperator {
                         left: self.display(&operand),
@@ -4137,31 +4249,27 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     Type::Error
                 }
             }
-            UnaryOperator::PreIncrement | UnaryOperator::PreDecrement => operand,
+            UnaryOperator::PreIncrement | UnaryOperator::PreDecrement => {
+                if system.numeric_kind(&operand).is_some() || system.is_enum_type(&operand) {
+                    operand
+                } else if let Some(result) =
+                    self.user_defined_unary(operator, &operand, &span, node)
+                {
+                    result
+                } else {
+                    let kind = SemanticErrorKind::InvalidOperator {
+                        left: self.display(&operand),
+                        right: None,
+                    };
+                    self.error(kind, span);
+                    Type::Error
+                }
+            }
             UnaryOperator::IndexFromEnd | UnaryOperator::AddressOf | UnaryOperator::Dereference => {
                 self.error(SemanticErrorKind::UnsupportedExpression, span);
                 Type::Error
             }
         }
-    }
-
-    fn user_defined_unary(&mut self, operator: UnaryOperator, operand: &Type) -> Option<Type> {
-        let name = match operator {
-            UnaryOperator::Plus => "op_UnaryPlus",
-            UnaryOperator::Minus => "op_UnaryNegation",
-            UnaryOperator::Not => "op_LogicalNot",
-            UnaryOperator::BitwiseNot => "op_OnesComplement",
-            _ => return None,
-        };
-        self.system()
-            .members_named(operand, name)
-            .into_iter()
-            .find_map(|candidate| match candidate.signature {
-                Some(MemberSignature::Function(function)) if function.parameters.len() == 1 => {
-                    Some(function.return_type)
-                }
-                _ => None,
-            })
     }
 
     fn binary_type(
@@ -4171,6 +4279,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         right: Type,
         literal: bool,
         span: Range<usize>,
+        node: Option<EntityID>,
     ) -> Type {
         if matches!(left, Type::Error) || matches!(right, Type::Error) {
             return Type::Error;
@@ -4204,10 +4313,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     || left == right
                     || system.is_implicitly_convertible(&left, &right)
                     || system.is_implicitly_convertible(&right, &left);
-                if comparable {
+                if comparable && !self.has_user_operator(operator, &left, &right) {
                     return self.corlib("Boolean");
                 }
-                if self.user_defined_binary(operator, &left, &right).is_some() {
+                if let Some(result) = self.user_defined_binary(operator, &left, &right, &span, node)
+                {
+                    return result;
+                }
+                if comparable {
                     return self.corlib("Boolean");
                 }
             }
@@ -4249,8 +4362,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
         }
 
-        // user-defined operators (Vector3 + Vector3, ...)
-        if let Some(result) = self.user_defined_binary(operator, &left, &right) {
+        // user-defined operators (Vector3 + Vector3, a struct's own `+`, ...)
+        if let Some(result) = self.user_defined_binary(operator, &left, &right, &span, node) {
             return result;
         }
 
@@ -4321,14 +4434,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
-    fn user_defined_binary(
-        &mut self,
-        operator: BinaryOperator,
-        left: &Type,
-        right: &Type,
-    ) -> Option<Type> {
+    fn binary_operator_name(operator: BinaryOperator) -> Option<&'static str> {
         use BinaryOperator::*;
-        let name = match operator {
+        Some(match operator {
             Add => "op_Addition",
             Subtract => "op_Subtraction",
             Multiply => "op_Multiply",
@@ -4347,26 +4455,181 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             LessThanEqual => "op_LessThanOrEqual",
             GreaterThanEqual => "op_GreaterThanOrEqual",
             LogicalAnd | LogicalOr | Coalesce => return None,
-        };
-
-        let system = self.system();
-        let mut candidates = system.members_named(left, name);
-        if left != right {
-            candidates.extend(system.members_named(right, name));
-        }
-
-        candidates.into_iter().find_map(|candidate| {
-            let Some(MemberSignature::Function(function)) = candidate.signature else {
-                return None;
-            };
-            if function.parameters.len() != 2 {
-                return None;
-            }
-            let fits = system
-                .is_implicitly_convertible(left, &function.parameters[0].parameter_type)
-                && system.is_implicitly_convertible(right, &function.parameters[1].parameter_type);
-            fits.then_some(function.return_type)
         })
+    }
+
+    /// Whether either operand's type declares this operator at all — when
+    /// it does, `==` on two references is the declared one, not identity.
+    fn has_user_operator(&self, operator: BinaryOperator, left: &Type, right: &Type) -> bool {
+        let Some(name) = Self::binary_operator_name(operator) else {
+            return false;
+        };
+        !self
+            .operator_candidates(name, &[left.clone(), right.clone()], 2)
+            .is_empty()
+    }
+
+    /// The declared operators named `name` on the operand types (and their
+    /// bases), with this many parameters.
+    fn operator_candidates(
+        &self,
+        name: &str,
+        operands: &[Type],
+        parameter_count: usize,
+    ) -> Vec<MemberCandidate> {
+        let system = self.system();
+        let mut out: Vec<MemberCandidate> = Vec::new();
+        let mut seen: Vec<Type> = Vec::new();
+        for operand in operands {
+            let ty = match operand {
+                Type::Nullable(inner) => (**inner).clone(),
+                other => other.clone(),
+            };
+            if seen.contains(&ty) {
+                continue;
+            }
+            seen.push(ty.clone());
+            for candidate in system.members_named(&ty, name) {
+                let takes = matches!(
+                    &candidate.signature,
+                    Some(MemberSignature::Function(function))
+                        if function.parameters.len() == parameter_count
+                );
+                let duplicate = out.iter().any(|existing| {
+                    matches!(
+                        (&existing.origin, &candidate.origin),
+                        (MemberOrigin::Source(a), MemberOrigin::Source(b)) if a == b
+                    ) || (existing.declaring_type == candidate.declaring_type
+                        && existing.signature == candidate.signature
+                        && !matches!(candidate.origin, MemberOrigin::Source(_)))
+                });
+                // metadata spells an operator as a static `op_*` method
+                if matches!(candidate.kind, SymbolKind::Operator | SymbolKind::Method)
+                    && candidate.is_static
+                    && takes
+                    && !duplicate
+                {
+                    out.push(candidate);
+                }
+            }
+        }
+        out
+    }
+
+    /// Overload resolution among the declared operators named `name` for
+    /// these operand types (§12.4.5); the chosen one is recorded on `node`
+    /// for the code generator. `None` when none applies.
+    fn resolve_user_operator(
+        &mut self,
+        name: &'static str,
+        operands: &[Type],
+        span: &Range<usize>,
+        node: Option<EntityID>,
+    ) -> Option<Type> {
+        let candidates = self.operator_candidates(name, operands, operands.len());
+        if candidates.is_empty() {
+            return None;
+        }
+        let arguments: Vec<CallArgument<'ast>> = operands
+            .iter()
+            .map(|ty| CallArgument {
+                shape: ArgumentShape::Value(ty.clone()),
+                name: None,
+                expression: None,
+                modifier: None,
+                is_integer_literal: false,
+                out_declaration: None,
+                span: span.clone(),
+            })
+            .collect();
+        let receiver_display = self.display(&operands[0]);
+        let group = MethodGroup {
+            candidates,
+            explicit_arguments: Vec::new(),
+            via_type: true,
+            name,
+            receiver: None,
+            allow_extensions: false,
+            receiver_display,
+            span: span.clone(),
+        };
+        match self.attempt_call(&group, &arguments) {
+            AttemptOutcome::Selected(selected) => {
+                self.record_call(node, &group, &selected, false);
+                Some(selected.signature.return_type.clone())
+            }
+            AttemptOutcome::Ambiguous => {
+                self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
+                Some(Type::Error)
+            }
+            AttemptOutcome::NoMatch { .. } => None,
+        }
+    }
+
+    fn user_defined_binary(
+        &mut self,
+        operator: BinaryOperator,
+        left: &Type,
+        right: &Type,
+        span: &Range<usize>,
+        node: Option<EntityID>,
+    ) -> Option<Type> {
+        let name = Self::binary_operator_name(operator)?;
+        self.resolve_user_operator(name, &[left.clone(), right.clone()], span, node)
+    }
+
+    fn user_defined_unary(
+        &mut self,
+        operator: UnaryOperator,
+        operand: &Type,
+        span: &Range<usize>,
+        node: Option<EntityID>,
+    ) -> Option<Type> {
+        let name = match operator {
+            UnaryOperator::Plus => "op_UnaryPlus",
+            UnaryOperator::Minus => "op_UnaryNegation",
+            UnaryOperator::Not => "op_LogicalNot",
+            UnaryOperator::BitwiseNot => "op_OnesComplement",
+            UnaryOperator::PreIncrement => "op_Increment",
+            UnaryOperator::PreDecrement => "op_Decrement",
+            _ => return None,
+        };
+        self.resolve_user_operator(name, std::slice::from_ref(operand), span, node)
+    }
+
+    /// `x++` / `x--` on a type of the user's: its `op_Increment` /
+    /// `op_Decrement`, recorded on the postfix node. Numeric and enum
+    /// operands keep the built-in meaning.
+    fn postfix_step_type(
+        &mut self,
+        increment: bool,
+        operand: Type,
+        span: &Range<usize>,
+        node: EntityID,
+    ) -> Type {
+        let system = self.system();
+        if matches!(operand, Type::Error | Type::Dynamic)
+            || system.numeric_kind(&operand).is_some()
+            || system.is_enum_type(&operand)
+        {
+            return operand;
+        }
+        let name = if increment {
+            "op_Increment"
+        } else {
+            "op_Decrement"
+        };
+        match self.resolve_user_operator(name, std::slice::from_ref(&operand), span, Some(node)) {
+            Some(result) => result,
+            None => {
+                let kind = SemanticErrorKind::InvalidOperator {
+                    left: self.display(&operand),
+                    right: None,
+                };
+                self.error(kind, span.clone());
+                Type::Error
+            }
+        }
     }
 
     // -------------------------------------------------------------- foreach

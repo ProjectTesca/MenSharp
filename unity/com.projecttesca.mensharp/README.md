@@ -224,6 +224,14 @@ type of the receiver — `object`, a base class, an interface — and so does
 string concatenation (`"got " + shape`). A struct without them gets field-wise
 equality and its type name, as in .NET.
 
+Operators you declare (`public static V operator +(V a, V b)`, unary `-` and
+`!`, `==`/`!=`, `<`/`>`, `++`/`--`) are chosen by the usual overload rules and
+used by the plain operator syntax, by compound assignment (`v += w`) and by
+`x++`. `==` on a class with its own operator calls that operator, `null`
+included, as C# does; a comparison operator without its partner is the C#
+error (CS0216). Conversion operators (`implicit operator`) are not supported
+yet.
+
 Casts, `is` and `as` test the runtime type:
 
 ```csharp
@@ -374,7 +382,7 @@ wrong thing:
   unhandled exception would, see above;
 - pattern matching in `switch` beyond constant labels, and `is` patterns other
   than a type (`is Circle c`);
-- operator overloading (`public static V operator +(V a, V b)`);
+- conversion operators (`implicit operator` / `explicit operator`);
 - static constructors of generic classes;
 - the bare declaration shorthand `int[] x = { 1, 2 };` — write
   `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.
