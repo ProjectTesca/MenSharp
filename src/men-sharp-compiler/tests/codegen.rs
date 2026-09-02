@@ -3589,3 +3589,28 @@ fn writing_a_member_of_a_struct_copy_is_an_error() {
         output.errors
     );
 }
+
+#[test]
+fn a_call_with_arguments_inside_a_parenthesized_conditional_is_not_a_declaration() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int result;
+                static bool F(int a, int b) => a == b;
+                static bool H(int a) => a > 0;
+                public static void Main()
+                {
+                    result = 1 + (F(1, 1) ? 1 : 0) + (H(1) ? 10 : 0) + (F(1, 2) ? 100 : 0);
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 12);
+}

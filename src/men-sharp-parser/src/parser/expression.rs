@@ -907,10 +907,21 @@ fn parse_declaration_expression<'input, 'allocator>(
         return None;
     };
 
+    // This is a trial parse: a designation that only got through by error
+    // recovery is not a designation. `(F(1, 1) ? a : b)` otherwise reads as
+    // the type `F` declaring the broken `(1` — recovery stops right at the
+    // `)`, which is exactly what a declaration may be followed by
+    let errors_before = errors.len();
     let Some(designation) = parse_variable_designation(lexer, errors, allocator) else {
+        errors.truncate(errors_before);
         lexer.back_to_anchor(anchor);
         return None;
     };
+    if errors.len() > errors_before {
+        errors.truncate(errors_before);
+        lexer.back_to_anchor(anchor);
+        return None;
+    }
 
     if !matches!(
         lexer.kind(),
