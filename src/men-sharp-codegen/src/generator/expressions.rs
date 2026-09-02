@@ -238,7 +238,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::Label(break_label));
     }
 
-    /// `foreach` over an array lowers to an index loop.
+    /// `foreach`: arrays are walked by index, strings as their character
+    /// array, everything else through the enumerator pattern the checker
+    /// bound (`GetEnumerator()` once, `MoveNext()`/`Current` per iteration).
     fn lower_foreach(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -248,24 +250,60 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return;
         };
         let collection_type = self.type_of(ctx, collection);
-        let Type::Array { element, rank: 1 } = &collection_type else {
+        let Some(value) = self.lower_expression(ctx, collection) else {
+            return;
+        };
+        let span = statement.span.clone();
+        if let Type::Array { element, rank: 1 } = &collection_type {
+            let element = (**element).clone();
+            self.lower_foreach_over_array(ctx, statement, value, collection_type, element);
+        } else if self.heap_type(&collection_type) == "SystemString" {
+            // Udon exposes no indexer on `string`; its character array is
+            // one extern away and the loop is an ordinary array walk
+            let chars = self.temp("SystemCharArray");
+            self.call_extern(
+                ctx,
+                "SystemString.__ToCharArray__SystemCharArray",
+                &[value, chars],
+                span,
+            );
+            let char_type = self.corlib_type("Char");
+            let array_type = Type::Array {
+                element: Box::new(char_type.clone()),
+                rank: 1,
+            };
+            self.lower_foreach_over_array(ctx, statement, chars, array_type, char_type);
+        } else if let Some(enumeration) = self
+            .bodies
+            .enumerations
+            .get(&EntityID::from(statement))
+            .cloned()
+        {
+            self.lower_foreach_by_enumerator(ctx, statement, value, collection_type, &enumeration);
+        } else {
             self.error(
                 ctx,
-                "`foreach` over anything but an array is not supported by the Udon backend yet",
-                statement.span.clone(),
+                "`foreach` over this type is not supported by the Udon backend: it has no \
+                 `GetEnumerator()` the compiler can call",
+                span,
             );
-            return;
-        };
-        let element_type = (**element).clone();
-        let Some(array) = self.lower_expression(ctx, collection) else {
-            return;
-        };
+        }
+    }
+
+    fn lower_foreach_over_array(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        statement: &'ast men_sharp_parser::ast::ForeachStatement<'ast, 'ast>,
+        array: DataId,
+        array_type: Type,
+        element_type: Type,
+    ) {
         let Ok(name) = &statement.name else {
             return;
         };
 
         ctx.locals.push(HashMap::new());
-        let length = self.array_length(ctx, array, &collection_type, statement.span.clone());
+        let length = self.array_length(ctx, array, &array_type, statement.span.clone());
         let index = self.temp("SystemInt32");
         let zero = self.int_constant(0);
         let one = self.int_constant(1);
@@ -291,7 +329,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             ctx,
             array,
             index,
-            &collection_type,
+            &array_type,
             &element_type,
             statement.span.clone(),
         );
@@ -315,6 +353,87 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             &[index, one, index],
             statement.span.clone(),
         );
+        self.program.code.push(Op::Jump(Target::Label(head)));
+        self.program.code.push(Op::Label(break_label));
+        ctx.locals.pop();
+    }
+
+    /// The written-out form of the pattern:
+    /// `var e = c.GetEnumerator(); while (e.MoveNext()) { var x = e.Current; ... }`
+    /// — every member call goes through the same paths a hand-written one
+    /// would, so source enumerators, generic ones and externs all work alike.
+    fn lower_foreach_by_enumerator(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        statement: &'ast men_sharp_parser::ast::ForeachStatement<'ast, 'ast>,
+        collection: DataId,
+        collection_type: Type,
+        enumeration: &ForeachEnumeration,
+    ) {
+        let Ok(name) = &statement.name else {
+            return;
+        };
+        let span = statement.span.clone();
+
+        let Piece::Value(enumerator, enumerator_type) = self.emit_call(
+            ctx,
+            &enumeration.get_enumerator,
+            Some((collection, collection_type)),
+            &[],
+            span.clone(),
+            false,
+        ) else {
+            return;
+        };
+
+        ctx.locals.push(HashMap::new());
+        let head = self.fresh_label("foreach_head");
+        let break_label = self.fresh_label("foreach_break");
+        self.program.code.push(Op::Label(head));
+        let Piece::Value(condition, _) = self.emit_call(
+            ctx,
+            &enumeration.move_next,
+            Some((enumerator, enumerator_type.clone())),
+            &[],
+            span.clone(),
+            false,
+        ) else {
+            ctx.locals.pop();
+            return;
+        };
+        self.program.code.push(Op::Push(condition));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(break_label)));
+
+        let place = self.member_place(
+            ctx,
+            &enumeration.current,
+            Some((enumerator, enumerator_type)),
+            span.clone(),
+        );
+        let Some((current, element_type)) = self.read_place(ctx, place, span.clone()) else {
+            ctx.locals.pop();
+            return;
+        };
+        // the iteration variable is a fresh local each time round: a copy,
+        // so the body cannot reach into the enumerator's own slot
+        let variable = self.temp_for(&element_type);
+        self.copy(current, variable);
+        ctx.locals
+            .last_mut()
+            .expect("scope")
+            .insert(name.value, (variable, element_type));
+
+        // `continue` goes straight back to `MoveNext()`
+        ctx.loop_stack.push(BreakFrame::Loop {
+            continue_target: head,
+            break_target: break_label,
+        });
+        if let Ok(body) = &statement.body {
+            self.lower_statement(ctx, body);
+        }
+        ctx.loop_stack.pop();
         self.program.code.push(Op::Jump(Target::Label(head)));
         self.program.code.push(Op::Label(break_label));
         ctx.locals.pop();

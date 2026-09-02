@@ -248,6 +248,23 @@ switch (state)
 `switch` takes constant case labels and `default`; pattern matching (`case > 0`,
 `case string s`, `when` guards) is a compile error for now.
 
+## foreach and List<T>
+
+`foreach` walks arrays, strings (by `char`), `List<T>`, and anything with a
+`GetEnumerator()` whose result has `MoveNext()`/`Current` — the same pattern
+C# itself binds to, so a class of your own is enumerable without implementing
+any interface:
+
+```csharp
+var names = new List<string>();
+names.Add("a");
+foreach (var name in names) { ... }
+foreach (char c in "text") { ... }
+```
+
+`List<T>` is a source port compiled with your code (Udon does not expose the
+real one), so it costs no externs beyond array access.
+
 ## Not supported yet
 
 Each of these is a compile error rather than a program that runs and does the

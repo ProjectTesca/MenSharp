@@ -373,6 +373,21 @@ impl Emulator {
             "SystemInt32.__op_Inequality__SystemInt32_SystemInt32__SystemBoolean" => {
                 binary_i32!(|a, b| Value::Boolean(a != b))
             }
+            // ---- Char ----
+            "SystemChar.__op_Equality__SystemChar_SystemChar__SystemBoolean"
+            | "SystemChar.__op_Inequality__SystemChar_SystemChar__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let equal = match (&self.heap[args[0]], &self.heap[args[1]]) {
+                    (Value::Char(a), Value::Char(b)) => a == b,
+                    (a, b) => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "{signature}: {a:?} vs {b:?}"
+                        )));
+                    }
+                };
+                self.heap[args[2]] = Value::Boolean(equal == signature.contains("op_Equality"));
+                Ok(())
+            }
             // ---- Single arithmetic (subset) ----
             "SystemSingle.__op_Addition__SystemSingle_SystemSingle__SystemSingle" => {
                 binary_f32!(|a: f32, b: f32| Value::Single(a + b))
@@ -424,6 +439,16 @@ impl Emulator {
                 let args = self.pop_arguments(2)?;
                 let s = self.heap[args[0]].as_str()?;
                 self.heap[args[1]] = Value::Int32(s.chars().count() as i32);
+                Ok(())
+            }
+            "SystemString.__ToCharArray__SystemCharArray" => {
+                let args = self.pop_arguments(2)?;
+                let chars: Vec<Value> = self.heap[args[0]]
+                    .as_str()?
+                    .chars()
+                    .map(Value::Char)
+                    .collect();
+                self.heap[args[1]] = Value::Array(Rc::new(RefCell::new(chars)));
                 Ok(())
             }
             "SystemInt32.__ToString__SystemString" => {

@@ -6,9 +6,11 @@
 // storage is a plain T[] that grows by doubling, and every operation below
 // bottoms out in whitelisted externs (array ctor/Get/Set, Array.Copy).
 //
-// Deliberately minimal for now: no IEnumerable, no exceptions (bounds are the
-// underlying array's problem until M# exceptions land), no Sort/Contains
-// (both need comparers, which need interfaces on the object model).
+// Deliberately minimal for now: no IEnumerable (foreach binds to the
+// enumerator pattern below, which needs no interface), no exceptions (bounds
+// are the underlying array's problem until M# exceptions land), no
+// Sort/Contains (both need comparers, which need interfaces on the object
+// model).
 
 namespace System.Collections.Generic
 {
@@ -58,5 +60,43 @@ namespace System.Collections.Generic
             }
             size--;
         }
+
+        // What `foreach` calls. The real one is a nested struct,
+        // `List<T>.Enumerator`; until M# has value types (and nested types
+        // that see the outer `T`) it is a class beside the list, so a
+        // `foreach` costs one small allocation — the semantics (one pass over
+        // the elements present when the loop started) are the same.
+        public ListEnumerator<T> GetEnumerator()
+        {
+            return new ListEnumerator<T>(items, size);
+        }
+    }
+
+    public class ListEnumerator<T>
+    {
+        private T[] items;
+        private int count;
+        private int index;
+        private T current;
+
+        public ListEnumerator(T[] items, int count)
+        {
+            this.items = items;
+            this.count = count;
+            index = 0;
+        }
+
+        public bool MoveNext()
+        {
+            if (index < count)
+            {
+                current = items[index];
+                index++;
+                return true;
+            }
+            return false;
+        }
+
+        public T Current => current;
     }
 }

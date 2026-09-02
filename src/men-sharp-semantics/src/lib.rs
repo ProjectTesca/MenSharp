@@ -37,7 +37,9 @@ pub mod resolve;
 pub mod symbol;
 pub mod types;
 
-pub use check::{BodyCheck, ResolvedCall, ResolvedMember, ResolvedTarget, check_file};
+pub use check::{
+    BodyCheck, ForeachEnumeration, ResolvedCall, ResolvedMember, ResolvedTarget, check_file,
+};
 pub use collect::{
     DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode, collect_file,
 };

@@ -42,9 +42,9 @@ use men_sharp_parser::ast::{
     UnaryOperator,
 };
 use men_sharp_semantics::{
-    Accessibility, BodyCheck, Declarations, ExternalTypes, FileId, MemberOrigin, MemberSignature,
-    ResolvedCall, ResolvedMember, ResolvedTarget, Signatures, SymbolId, SymbolKind, SyntaxRef,
-    Type, TypeTarget,
+    Accessibility, BodyCheck, Declarations, ExternalTypes, FileId, ForeachEnumeration,
+    MemberOrigin, MemberSignature, ResolvedCall, ResolvedMember, ResolvedTarget, Signatures,
+    SymbolId, SymbolKind, SyntaxRef, Type, TypeTarget,
 };
 
 use crate::externs::{UdonNodes, mangle_dotnet_name};

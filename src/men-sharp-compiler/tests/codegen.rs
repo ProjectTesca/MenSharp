@@ -21,12 +21,23 @@ fn dotnet_shared_dir() -> Option<std::path::PathBuf> {
 
 /// Compile `source`, run entry `event`, and return the finished emulator.
 fn run(source: &str, event: &str) -> Option<Emulator> {
+    run_sources(vec![SourceCode::new("test.cs", source)], event)
+}
+
+/// [`run`] with the mini-corlib (`List<T>`, ...) compiled in.
+fn run_with_corlib(source: &str, event: &str) -> Option<Emulator> {
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    run_sources(sources, event)
+}
+
+fn run_sources(sources: Vec<SourceCode>, event: &str) -> Option<Emulator> {
     let dir = dotnet_shared_dir()?;
     let compiler = Compiler::new(CompilerSettings::default()).unwrap();
     let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
     let references = compiler.load_references(&bytes).unwrap();
 
-    let files = compiler.parse(vec![SourceCode::new("test.cs", source)]);
+    let files = compiler.parse(sources);
     let declarations = compiler.collect_declarations(&files);
     let signatures = compiler.resolve_signatures(&declarations, &references);
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
@@ -2796,5 +2807,171 @@ fn the_array_initializer_shorthand_is_an_error_not_a_silent_null() {
             .any(|error| error.message.contains("array-initializer shorthand")),
         "{:#?}",
         output.errors
+    );
+}
+
+#[test]
+fn foreach_walks_a_list_a_string_and_a_user_enumerator() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            // the enumerator pattern on a class of your own: no interface,
+            // no List — foreach binds to GetEnumerator/MoveNext/Current
+            public class Countdown
+            {
+                private int from;
+                public Countdown(int from) { this.from = from; }
+                public Ticker GetEnumerator() { return new Ticker(from); }
+            }
+            public class Ticker
+            {
+                private int next;
+                public Ticker(int from) { next = from + 1; }
+                public bool MoveNext() { next--; return next > 0; }
+                public int Current { get { return next; } }
+            }
+
+            public class Program
+            {
+                public static int sum;
+                public static int vowels;
+                public static int countdown;
+                public static int nested;
+                public static int skipped;
+                public static string joined;
+
+                public static void Main()
+                {
+                    var numbers = new List<int>();
+                    for (int i = 1; i <= 5; i++) { numbers.Add(i); }
+
+                    // 1+2+3+4+5
+                    foreach (var n in numbers) { sum += n; }
+
+                    // continue skips 3, break stops at 5: 1+2+4 = 7
+                    foreach (int n in numbers)
+                    {
+                        if (n == 3) { continue; }
+                        if (n == 5) { break; }
+                        skipped += n;
+                    }
+
+                    // strings iterate by char
+                    foreach (char c in "education")
+                    {
+                        if (c == 'a' || c == 'e' || c == 'i' || c == 'o' || c == 'u') { vowels++; }
+                    }
+
+                    // 3+2+1
+                    foreach (var t in new Countdown(3)) { countdown += t; }
+
+                    // nested foreach over the same list: 5 * 15 = 75
+                    foreach (var a in numbers)
+                    {
+                        foreach (var b in numbers) { nested += b; }
+                    }
+
+                    var words = new List<string>();
+                    words.Add("for");
+                    words.Add("each");
+                    joined = "";
+                    foreach (var w in words) { joined = joined + w; }
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "sum"), 15);
+    assert_eq!(int_of(&emulator, "skipped"), 7);
+    assert_eq!(int_of(&emulator, "vowels"), 5);
+    assert_eq!(int_of(&emulator, "countdown"), 6);
+    assert_eq!(int_of(&emulator, "nested"), 75);
+    assert_eq!(string_of(&emulator, "joined"), "foreach");
+}
+
+#[test]
+fn foreach_survives_recursion() {
+    // the enumerator lives in a temp of the recursing function's frame, so an
+    // inner activation walking the same list must not disturb the outer walk
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int result;
+                static List<int> items;
+
+                // depth 0: 1+2+3 = 6; depth 1: three times that = 18; depth 2: 54
+                static int Walk(int depth)
+                {
+                    int total = 0;
+                    foreach (var x in items)
+                    {
+                        if (depth == 0) { total += x; }
+                        else { total += Walk(depth - 1); }
+                    }
+                    return total;
+                }
+
+                public static void Main()
+                {
+                    items = new List<int>();
+                    items.Add(1);
+                    items.Add(2);
+                    items.Add(3);
+                    result = Walk(2);
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 54);
+}
+
+#[test]
+fn foreach_over_something_without_an_enumerator_is_an_error() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Bag { public int Count; }
+            public class Program
+            {
+                public static int result;
+                public static void Main()
+                {
+                    foreach (var x in new Bag()) { result += 1; }
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::NotEnumerable { .. }
+        )),
+        "{:#?}",
+        bodies.errors
     );
 }

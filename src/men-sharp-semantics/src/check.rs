@@ -61,6 +61,10 @@ pub struct BodyCheck {
     /// What each name/call/member node *bound to* — the code generator's map
     /// from syntax to program elements.
     pub targets: HashMap<EntityID, ResolvedTarget>,
+    /// For every `foreach` that walks a collection by the enumerator pattern
+    /// (anything but an array or a string), the three members it bound to.
+    /// Keyed by the statement node.
+    pub enumerations: HashMap<EntityID, ForeachEnumeration>,
     pub errors: Vec<SemanticError>,
 }
 
@@ -69,8 +73,21 @@ impl BodyCheck {
         self.expression_types.extend(other.expression_types);
         self.resolved_types.extend(other.resolved_types);
         self.targets.extend(other.targets);
+        self.enumerations.extend(other.enumerations);
         self.errors.extend(other.errors);
     }
+}
+
+/// What a `foreach` over a non-array collection lowers to — the pattern the
+/// language defines (§13.9.5): `GetEnumerator()` once, then `MoveNext()` /
+/// `Current` per iteration. Each is resolved like the call it is, so the code
+/// generator emits them exactly as it would the written-out loop.
+#[derive(Debug, Clone)]
+pub struct ForeachEnumeration {
+    pub get_enumerator: ResolvedCall,
+    pub enumerator_type: Type,
+    pub move_next: ResolvedCall,
+    pub current: ResolvedMember,
 }
 
 /// What a checked node resolved to. Keyed by node identity in
@@ -139,6 +156,7 @@ pub fn check_file(
         lambda_probe_returns: None,
         expression_types: HashMap::new(),
         targets: HashMap::new(),
+        enumerations: HashMap::new(),
     };
 
     // rebuild the same file scope signature resolution used
@@ -171,6 +189,7 @@ pub fn check_file(
         expression_types: checker.expression_types,
         resolved_types: checker.resolver.out.type_of,
         targets: checker.targets,
+        enumerations: checker.enumerations,
         errors: checker.resolver.out.errors,
     }
 }
@@ -273,6 +292,7 @@ struct Checker<'a, 'ast> {
     lambda_probe_returns: Option<Vec<Type>>,
     expression_types: HashMap<EntityID, Type>,
     targets: HashMap<EntityID, ResolvedTarget>,
+    enumerations: HashMap<EntityID, ForeachEnumeration>,
 }
 
 impl<'a, 'ast> Checker<'a, 'ast> {
@@ -851,7 +871,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let element = match &statement.collection {
                     Ok(collection) => {
                         let collection_type = self.check_expression(collection);
-                        self.element_type_of(&collection_type, collection.span())
+                        self.element_type_of(
+                            &collection_type,
+                            collection.span(),
+                            EntityID::from(statement),
+                        )
                     }
                     Err(()) => Type::Error,
                 };
@@ -3475,7 +3499,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
     // -------------------------------------------------------------- foreach
 
-    fn element_type_of(&mut self, collection: &Type, span: Range<usize>) -> Type {
+    /// The element type a `foreach` over `collection` yields. Arrays and
+    /// strings are walked by index; everything else goes through the
+    /// enumerator pattern, which is resolved here and recorded under `node`
+    /// for the code generator.
+    fn element_type_of(&mut self, collection: &Type, span: Range<usize>, node: EntityID) -> Type {
         match collection {
             Type::Array { element, rank: 1 } => return (**element).clone(),
             Type::Error | Type::Dynamic => return Type::Error,
@@ -3483,32 +3511,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             _ => {}
         }
 
-        // the pattern-based protocol: GetEnumerator().Current
-        let system = self.system();
-        let enumerator = system
-            .members_named(collection, "GetEnumerator")
-            .into_iter()
-            .find_map(|candidate| match candidate.signature {
-                Some(MemberSignature::Function(function))
-                    if function.parameters.is_empty() && !candidate.is_static =>
-                {
-                    Some(function.return_type)
-                }
-                _ => None,
-            });
-        if let Some(enumerator) = enumerator
-            && let Some(current) = system
-                .members_named(&enumerator, "Current")
-                .into_iter()
-                .find_map(|candidate| match candidate.signature {
-                    Some(MemberSignature::Property(ty)) => Some(ty),
-                    _ => None,
-                })
-        {
-            return current;
+        // the pattern-based protocol: GetEnumerator(), then MoveNext()/Current
+        if let Some(enumeration) = self.resolve_enumeration(collection, &span) {
+            let element = enumeration.current.member_type.clone();
+            self.enumerations.insert(node, enumeration);
+            return element;
         }
 
-        // IEnumerable<T> somewhere in the closure
+        // IEnumerable<T> somewhere in the closure: typed, but with no members
+        // for the code generator to call — it reports that itself
         if let Some(ienumerable) = self.resolver.external.find_type(
             &["System", "Collections", "Generic"],
             "IEnumerable",
@@ -3541,6 +3552,89 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         };
         self.error(kind, span);
         Type::Error
+    }
+
+    /// Binds the enumerator pattern on `collection`: an accessible instance
+    /// `GetEnumerator()` taking nothing, whose result has an instance
+    /// `MoveNext()` returning `bool` and a readable `Current` property. Any
+    /// piece missing means the pattern does not apply (`None`), not an error —
+    /// the caller has the interface fallback and the diagnostic.
+    fn resolve_enumeration(
+        &mut self,
+        collection: &Type,
+        span: &Range<usize>,
+    ) -> Option<ForeachEnumeration> {
+        let (get_enumerator, enumerator_type) =
+            self.resolve_parameterless_call(collection, "GetEnumerator", span)?;
+        let (move_next, move_next_type) =
+            self.resolve_parameterless_call(&enumerator_type, "MoveNext", span)?;
+        if !self.system().is_system_type(&move_next_type, "Boolean") {
+            return None;
+        }
+        let current = self
+            .system()
+            .members_named(&enumerator_type, "Current")
+            .into_iter()
+            .find(|candidate| candidate.kind == SymbolKind::Property && !candidate.is_static)?;
+        let Some(MemberSignature::Property(member_type)) = current.signature.clone() else {
+            return None;
+        };
+        Some(ForeachEnumeration {
+            get_enumerator,
+            enumerator_type,
+            move_next,
+            current: ResolvedMember {
+                origin: current.origin,
+                kind: current.kind,
+                is_static: current.is_static,
+                declaring_type: current.declaring_type,
+                member_type,
+            },
+        })
+    }
+
+    /// Overload resolution for `receiver.name()` with no arguments and no
+    /// syntax to hang an error on: the selected overload and its return type,
+    /// or `None` when nothing fits.
+    fn resolve_parameterless_call(
+        &mut self,
+        receiver: &Type,
+        name: &'ast str,
+        span: &Range<usize>,
+    ) -> Option<(ResolvedCall, Type)> {
+        let candidates: Vec<MemberCandidate> = self
+            .system()
+            .members_named(receiver, name)
+            .into_iter()
+            .filter(|candidate| candidate.kind == SymbolKind::Method && !candidate.is_static)
+            .collect();
+        if candidates.is_empty() {
+            return None;
+        }
+        let group = MethodGroup {
+            candidates,
+            explicit_arguments: Vec::new(),
+            via_type: false,
+            name,
+            receiver: Some(receiver.clone()),
+            allow_extensions: false,
+            receiver_display: self.display(receiver),
+            span: span.clone(),
+        };
+        let AttemptOutcome::Selected(selected) = self.attempt_call(&group, &[]) else {
+            return None;
+        };
+        let candidate = &group.candidates[selected.candidate];
+        let call = ResolvedCall {
+            origin: candidate.origin.clone(),
+            is_static: candidate.is_static,
+            is_extension: false,
+            declaring_type: candidate.declaring_type.clone(),
+            signature: selected.signature.clone(),
+            type_arguments: selected.type_arguments.clone(),
+        };
+        let return_type = selected.signature.return_type.clone();
+        Some((call, return_type))
     }
 }
 
