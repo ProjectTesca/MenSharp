@@ -74,6 +74,87 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         })
     }
 
+    // ------------------------------------------------------ source sites
+
+    /// `File.cs:line:column` for a span, 1-based, the file named as the
+    /// driver saw it (from `Assets/` on when the path reaches that far).
+    fn source_position(&mut self, file: FileId, offset: usize) -> String {
+        let Some(source) = self.declarations.sources.get(file.0 as usize).cloned() else {
+            return "?".into();
+        };
+        let starts = self.line_starts.entry(file).or_insert_with(|| {
+            let mut starts = vec![0];
+            starts.extend(
+                source
+                    .text
+                    .bytes()
+                    .enumerate()
+                    .filter(|(_, byte)| *byte == b'\n')
+                    .map(|(index, _)| index + 1),
+            );
+            starts
+        });
+        let line = starts.partition_point(|&start| start <= offset);
+        let line_start = starts[line.saturating_sub(1)];
+        let column = source.text[line_start..offset.min(source.text.len())]
+            .chars()
+            .count()
+            + 1;
+        let name: &str = &source.name;
+        let name = name.find("Assets/").map_or(name, |at| &name[at..]);
+        format!("{name}:{line}:{column}")
+    }
+
+    /// `Game.Door.Open in Assets/MenSharp/Door.cs:42:13` — a frame line.
+    fn site_string(&mut self, ctx: &Ctx<'ast>, span: &Range<usize>) -> String {
+        let mut path = self.display_path(ctx.key.symbol);
+        if let Some(class) = path.strip_suffix("..ctor") {
+            // the constructor of `Game.Door` reads better as `Game.Door.Door`
+            let name = class.rsplit('.').next().unwrap_or(class).to_string();
+            path = format!("{class}.{name}");
+        }
+        let position = self.source_position(ctx.file, span.start);
+        format!("{path} in {position}")
+    }
+
+    /// The slot index of one of `System.Exception`'s compiler-written
+    /// fields (`__type`, `__site`, `__trace`).
+    fn exception_field(&mut self, name: &str) -> Option<DataId> {
+        let exception_type = self.exception_type()?;
+        let Type::Named {
+            target: TypeTarget::Source(symbol),
+            ..
+        } = &exception_type
+        else {
+            return None;
+        };
+        let field = *self
+            .declarations
+            .table
+            .symbol(*symbol)
+            .members_named(name)
+            .first()?;
+        let layout = self.layout_of(&exception_type)?;
+        let index = *layout.slots.get(&field)?;
+        Some(self.int_constant(index as i32))
+    }
+
+    /// A freshly constructed object of an exception class: its type name,
+    /// for `ToString()` and the unhandled-exception report.
+    pub(super) fn stamp_exception_type(&mut self, ctx: &Ctx<'ast>, object: DataId, ty: &Type) {
+        let Some(exception_type) = self.exception_type() else {
+            return;
+        };
+        if !self.is_subtype(ty, &exception_type) {
+            return;
+        }
+        let Some(index) = self.exception_field("__type") else {
+            return;
+        };
+        let name = self.string_constant(&self.display_type(ty));
+        self.set_element(ctx, object, index, name, 0..0);
+    }
+
     // ---------------------------------------------------------- unwinding
 
     /// Where an exception raised at the current position goes: the
@@ -93,12 +174,35 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     /// After a call: continue unwinding when the callee left an exception
-    /// pending.
-    pub(super) fn emit_pending_check(&mut self, ctx: &Ctx<'ast>) {
+    /// pending — after adding this call site to its stack trace, when the
+    /// caller is a function of the user's (a dispatch stub is no frame).
+    pub(super) fn emit_pending_check(&mut self, ctx: &Ctx<'ast>, span: &Range<usize>) {
         let state = self.exception_state();
         let ok = self.fresh_label("no_exception");
         self.program.code.push(Op::Push(state.pending));
         self.program.code.push(Op::JumpIfFalse(Target::Label(ok)));
+        let is_frame = matches!(
+            ctx.key.role,
+            Role::Method
+                | Role::Getter
+                | Role::Setter
+                | Role::Constructor
+                | Role::DefaultConstructor
+        ) && *span != (0..0);
+        if is_frame && let Some(index) = self.exception_field("__trace") {
+            let string = self.corlib_type("String");
+            let trace = self.get_element(ctx, state.exception, index, &string, 0..0);
+            let site = self.site_string(ctx, span);
+            let line = self.string_constant(&format!("\n   at {site}"));
+            let extended = self.temp("SystemString");
+            self.call_extern(
+                ctx,
+                "SystemString.__Concat__SystemString_SystemString__SystemString",
+                &[trace, line, extended],
+                0..0,
+            );
+            self.set_element(ctx, state.exception, index, extended, 0..0);
+        }
         self.emit_unwind(ctx);
         self.program.code.push(Op::Label(ok));
     }
@@ -122,9 +226,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::Label(ok));
     }
 
-    /// Raises `exception` from the current position.
-    pub(super) fn emit_throw(&mut self, ctx: &Ctx<'ast>, exception: DataId, span: Range<usize>) {
-        let _ = span;
+    /// Raises `exception` from the current position. A fresh throw
+    /// (`throw e`) records the site and starts the trace over, as .NET
+    /// does; a rethrow (`throw;`, or unwinding on through a `finally`)
+    /// keeps what the exception has.
+    pub(super) fn emit_throw(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        exception: DataId,
+        span: Range<usize>,
+        fresh: bool,
+    ) {
+        if fresh
+            && let (Some(site_index), Some(trace_index)) = (
+                self.exception_field("__site"),
+                self.exception_field("__trace"),
+            )
+        {
+            let site = self.site_string(ctx, &span);
+            let site = self.string_constant(&site);
+            self.set_element(ctx, exception, site_index, site, 0..0);
+            let none = self.constant("SystemString", "null", HeapInit::Null);
+            self.set_element(ctx, exception, trace_index, none, 0..0);
+        }
         let state = self.exception_state();
         self.copy(exception, state.exception);
         let raised = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
@@ -194,7 +318,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         let arguments: Vec<DataId> = message.into_iter().collect();
         self.call_function(ctx, &key, Some(object), &arguments, &[], span.clone());
-        self.emit_throw(ctx, object, span);
+        self.emit_throw(ctx, object, span, true);
     }
 
     /// A fresh object of class `ty`: the `object[]` with its type id in
@@ -217,6 +341,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let zero = self.int_constant(0);
         let type_id = self.int_constant(layout.type_id);
         self.set_element(ctx, object, zero, type_id, span);
+        self.stamp_exception_type(ctx, object, ty);
         Some(object)
     }
 
@@ -230,11 +355,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match &statement.value {
             Some(value) => {
                 if let Some(exception) = self.lower_expression(ctx, value) {
-                    self.emit_throw(ctx, exception, statement.span.clone());
+                    self.emit_throw(ctx, exception, statement.span.clone(), true);
                 }
             }
             None => match ctx.caught.last().copied() {
-                Some(exception) => self.emit_throw(ctx, exception, statement.span.clone()),
+                Some(exception) => self.emit_throw(ctx, exception, statement.span.clone(), false),
                 None => self.error(
                     ctx,
                     "`throw;` outside a `catch` block",
@@ -252,7 +377,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Option<DataId> {
         let value = throw.value.as_ref().ok()?;
         let exception = self.lower_expression(ctx, value)?;
-        self.emit_throw(ctx, exception, throw.span.clone());
+        self.emit_throw(ctx, exception, throw.span.clone(), true);
         Some(self.temp("SystemObject"))
     }
 
@@ -291,7 +416,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let cleared = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
         self.copy(cleared, state.pending);
         self.lower_block(ctx, finally);
-        self.emit_throw(ctx, saved, statement.span.clone());
+        self.emit_throw(ctx, saved, statement.span.clone(), false);
         self.program.code.push(Op::Label(end));
     }
 
@@ -373,7 +498,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
 
         // no clause took it
-        self.emit_throw(ctx, saved, statement.span.clone());
+        self.emit_throw(ctx, saved, statement.span.clone(), false);
         self.program.code.push(Op::Label(end));
     }
 
@@ -491,8 +616,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     // ----------------------------------------------------------- unhandled
 
-    /// Body of the unhandled-exception function: `<type or ToString>:
-    /// <Message>` to the error log, then the halt.
+    /// Body of the unhandled-exception function: the exception's
+    /// `ToString()` — type, message and stack trace — to the error log,
+    /// then the halt.
     pub(super) fn emit_unhandled_exception_body(&mut self, ctx: &mut Ctx<'ast>) {
         let state = self.exception_state();
         // the calls below check the flag themselves
@@ -502,42 +628,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.copy(state.exception, exception);
 
         let object = self.corlib_type("Object");
-        let name = self.object_to_string(ctx, exception, &object, 0..0);
-        let mut text = name;
-        if let Some(exception_type) = self.exception_type()
-            && let Type::Named {
-                target: TypeTarget::Source(symbol),
-                ..
-            } = &exception_type
-            && let Some(&message) = self
-                .declarations
-                .table
-                .symbol(*symbol)
-                .members_named("Message")
-                .first()
-        {
-            let getter = self.dispatcher_for(ctx, message, &exception_type, &[], Role::Getter);
-            if let Some(message_text) =
-                self.call_function(ctx, &getter, Some(exception), &[], &[], 0..0)
-            {
-                let separator = self.string_constant(": ");
-                let joined = self.temp("SystemString");
-                self.call_extern(
-                    ctx,
-                    "SystemString.__Concat__SystemString_SystemString__SystemString",
-                    &[text, separator, joined],
-                    0..0,
-                );
-                let full = self.temp("SystemString");
-                self.call_extern(
-                    ctx,
-                    "SystemString.__Concat__SystemString_SystemString__SystemString",
-                    &[joined, message_text, full],
-                    0..0,
-                );
-                text = full;
-            }
-        }
+        let text = self.object_to_string(ctx, exception, &object, 0..0);
         let prefix = self.string_constant("Unhandled exception: ");
         let report = self.temp("SystemString");
         self.call_extern(

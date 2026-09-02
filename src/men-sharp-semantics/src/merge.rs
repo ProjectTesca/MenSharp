@@ -38,6 +38,16 @@ pub struct Declarations<'ast> {
     pub files: Vec<FileDeclarations<'ast>>,
     /// Sorted by (file, position); deterministic across thread counts.
     pub errors: Vec<SemanticError>,
+    /// The files' names and text, indexed by [`FileId`] — what turns a span
+    /// into `File.cs:line:column` for stack traces. Filled by the driver.
+    pub sources: Vec<SourceText>,
+}
+
+/// One source file as the driver saw it.
+#[derive(Debug, Clone)]
+pub struct SourceText {
+    pub name: std::sync::Arc<str>,
+    pub text: std::sync::Arc<str>,
 }
 
 impl<'ast> Declarations<'ast> {
@@ -81,6 +91,7 @@ pub fn merge_declarations<'ast>(files: Vec<FileDeclarations<'ast>>) -> Declarati
         symbol_of: merger.symbol_of,
         files,
         errors,
+        sources: Vec::new(),
     }
 }
 

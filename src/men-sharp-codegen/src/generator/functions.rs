@@ -750,7 +750,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // the callee may have returned early with an exception pending: it
         // continues unwinding from here — to this function's handler, or on
         // out of it
-        self.emit_pending_check(ctx);
+        self.emit_pending_check(ctx, &span);
 
         result.map(|result| {
             let symbol = &self.program.data[result.0];

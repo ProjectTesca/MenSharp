@@ -5253,3 +5253,67 @@ fn throw_takes_an_exception_and_rethrow_needs_a_catch() {
         .collect();
     assert_eq!(kinds.len(), 2, "{:#?}", bodies.errors);
 }
+
+#[test]
+fn exceptions_carry_their_site_and_a_stack_trace() {
+    let Some(emulator) = run_sources(
+        vec![SourceCode::new(
+            "Assets/MenSharp/Door.cs",
+            r#"
+using System;
+namespace Game
+{
+    class DoorLocked : InvalidOperationException { public DoorLocked() : base("locked") { } }
+    class Door
+    {
+        public void Open(int n)
+        {
+            if (n == 0) { throw new DoorLocked(); }
+            Open(n - 1);
+        }
+    }
+    public class Program
+    {
+        public static string text;
+        public static string rethrown;
+        public static string generated;
+        static void Middle() { new Door().Open(1); }
+        public static void Main()
+        {
+            try { Middle(); }
+            catch (DoorLocked e) { text = e.ToString(); }
+            try { try { Middle(); } catch (Exception) { throw; } }
+            catch (Exception e) { rethrown = e.StackTrace; }
+            int[] a = new int[1];
+            try { a[3] = 1; } catch (Exception e) { generated = e.ToString(); }
+        }
+    }
+}
+"#,
+        )],
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "text"),
+        "Game.DoorLocked: locked\n\
+         \x20  at Game.Door.Open in Assets/MenSharp/Door.cs:10:27\n\
+         \x20  at Game.Door.Open in Assets/MenSharp/Door.cs:11:17\n\
+         \x20  at Game.Program.Middle in Assets/MenSharp/Door.cs:19:47\n\
+         \x20  at Game.Program.Main in Assets/MenSharp/Door.cs:22:25"
+    );
+    // `throw;` keeps the site and trace; the outer catch sees one more frame
+    assert_eq!(
+        string_of(&emulator, "rethrown"),
+        "   at Game.Door.Open in Assets/MenSharp/Door.cs:10:27\n\
+         \x20  at Game.Door.Open in Assets/MenSharp/Door.cs:11:17\n\
+         \x20  at Game.Program.Middle in Assets/MenSharp/Door.cs:19:47\n\
+         \x20  at Game.Program.Main in Assets/MenSharp/Door.cs:24:31"
+    );
+    assert_eq!(
+        string_of(&emulator, "generated"),
+        "System.IndexOutOfRangeException: Index was outside the bounds of the array.\n\
+         \x20  at Game.Program.Main in Assets/MenSharp/Door.cs:27:19"
+    );
+}

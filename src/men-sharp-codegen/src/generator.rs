@@ -99,6 +99,7 @@ pub fn generate(
         layouts: HashMap::new(),
         type_order: Vec::new(),
         exception_state: None,
+        line_starts: HashMap::new(),
         dispatchers: HashMap::new(),
         emitted_dispatchers: HashSet::new(),
         call_edges: HashMap::new(),
@@ -303,6 +304,9 @@ struct Generator<'a, 'ast> {
     /// "one is pending" flag every call checks after returning. Made on
     /// first use.
     exception_state: Option<ExceptionState>,
+    /// Byte offsets where each line starts, per file — built on first use,
+    /// for the `File.cs:line:column` in stack traces.
+    line_starts: HashMap<FileId, Vec<usize>>,
     dispatchers: HashMap<FunctionKey, Dispatcher>,
     /// Dispatchers (and type tests) whose body has been emitted: their
     /// subtype list is closed, so a type instantiated afterwards is an
@@ -1397,7 +1401,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn constant(&mut self, udon_type: &str, repr: &str, init: HeapInit) -> DataId {
-        let key = (udon_type.to_string(), repr.to_string());
+        // keyed by the value's kind too: the string literal "null" and a
+        // null string slot are both spelled `null` by their callers
+        let key = (
+            udon_type.to_string(),
+            format!("{:?}:{repr}", std::mem::discriminant(&init)),
+        );
         if let Some(&id) = self.constants.get(&key) {
             return id;
         }

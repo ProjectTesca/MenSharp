@@ -299,9 +299,21 @@ call on a null object of your own classes (`NullReferenceException`), integer
 `/` and `%` by zero (`DivideByZeroException`), a failed cast, a switch
 expression with no matching arm, `List` and `Dictionary` misuse
 (`ArgumentOutOfRangeException`, `KeyNotFoundException`, `ArgumentException`).
-An exception nothing catches is reported to the console as
-`Unhandled exception: <type>: <message>` and halts the behaviour, as an
-unhandled exception halts a program.
+Every exception knows where it was thrown and what it unwound through:
+`e.StackTrace` lists the frames from the throw to the `catch`, with file, line
+and column, and `e.ToString()` prints type, message and trace the way .NET
+does. An exception nothing catches is reported to the console the same way,
+prefixed `Unhandled exception:`, and halts the behaviour:
+
+```text
+Unhandled exception: Game.DoorLockedException: door 3 is locked
+   at Game.Door.Open in Assets/MenSharp/Door.cs:42:13
+   at Game.Verify.Interact in Assets/MenSharp/Verify.cs:310:9
+```
+
+The trace costs nothing until an exception actually unwinds: each frame line
+is a string constant, appended only on the exception path. `throw;` keeps the
+trace and goes on adding to it; `throw e;` starts it over, as in C#.
 
 What an engine or .NET call throws *inside itself* — `GetComponent` on a
 destroyed object, `int.Parse("x")`, a Unity API given null — cannot be

@@ -3097,6 +3097,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let zero = self.int_constant(0);
             let type_id = self.int_constant(layout.type_id);
             self.set_element(ctx, object, zero, type_id, span.clone());
+            self.stamp_exception_type(ctx, object, &created);
 
             // run the constructor
             let arguments = new_expression

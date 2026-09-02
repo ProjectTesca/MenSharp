@@ -51,7 +51,7 @@ pub use external::{
     ExternalTypes, NoExternalTypes,
 };
 pub use lookup::{MemberCandidate, MemberOrigin, TypeSystem};
-pub use merge::{Declarations, merge_declarations};
+pub use merge::{Declarations, SourceText, merge_declarations};
 pub use resolve::{Signatures, resolve_file, resolve_signatures};
 pub use symbol::{
     Accessibility, DeclarationSite, FileId, Symbol, SymbolId, SymbolKind, SymbolTable, SyntaxRef,

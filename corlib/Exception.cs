@@ -16,6 +16,12 @@ namespace System
     {
         private readonly string message;
         private readonly Exception inner;
+        // written by the compiler: the type name at `new`, the throw site
+        // at `throw`, and one `\n   at ...` line per call the exception
+        // unwound through
+        private string __type;
+        private string __site;
+        private string __trace;
 
         public Exception() { message = null; inner = null; }
         public Exception(string message) { this.message = message; inner = null; }
@@ -23,6 +29,28 @@ namespace System
 
         public virtual string Message => message == null ? "" : message;
         public Exception InnerException => inner;
+
+        /// Where it was thrown and what it unwound through, one frame per
+        /// line as .NET prints them; empty until thrown.
+        public string StackTrace
+        {
+            get
+            {
+                string trace = __site == null ? "" : "   at " + __site;
+                if (__trace != null) { trace = trace + __trace; }
+                return trace;
+            }
+        }
+
+        public override string ToString()
+        {
+            string text = __type == null ? "System.Exception" : __type;
+            string message = Message;
+            if (message != "") { text = text + ": " + message; }
+            string trace = StackTrace;
+            if (trace != "") { text = text + "\n" + trace; }
+            return text;
+        }
     }
 
     public class SystemException : Exception

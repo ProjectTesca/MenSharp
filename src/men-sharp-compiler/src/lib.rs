@@ -128,7 +128,15 @@ impl Compiler {
                 .collect()
         });
 
-        merge_declarations(collected)
+        let mut declarations = merge_declarations(collected);
+        declarations.sources = files
+            .iter()
+            .map(|file| men_sharp_semantics::SourceText {
+                name: file.name.clone(),
+                text: std::sync::Arc::from(file.ast.source()),
+            })
+            .collect();
+        declarations
     }
 
     /// Parses every referenced dll in parallel and indexes them as an external
