@@ -2194,8 +2194,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // dispatching, so an override calling its base does not re-enter itself
         non_virtual: bool,
     ) -> Piece {
-        // evaluate arguments left to right
-        let mut values: Vec<DataId> = Vec::new();
         // `ref`/`out` slots standing in for a field, element or property: the
         // extern writes the slot, and afterwards the slot is written home
         let mut write_backs: Vec<(Place, DataId)> = Vec::new();
@@ -2203,10 +2201,31 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // where each is copied back to (argument index, place)
         let mut source_by_ref: Vec<(usize, Place)> = Vec::new();
         let parameter_offset = usize::from(call.is_extension);
+        // named arguments may sit in any order: each is evaluated where it is
+        // written and lands in its parameter's position
+        let slot_of: Vec<usize> = (0..arguments.len())
+            .map(|index| {
+                call.parameter_of_argument
+                    .get(index + parameter_offset)
+                    .copied()
+                    .unwrap_or(index + parameter_offset)
+                    - parameter_offset
+            })
+            .collect();
+        // one slot per parameter: the ones no argument fills take defaults
+        let mut ordered: Vec<Option<DataId>> = vec![
+            None;
+            call.signature
+                .parameters
+                .len()
+                .saturating_sub(parameter_offset)
+                .max(arguments.len())
+        ];
         for (index, argument) in arguments.iter().enumerate() {
+            let slot = slot_of[index];
             match argument.modifier.as_ref().map(|modifier| modifier.value) {
                 Some(modifier @ (ArgumentModifier::Ref | ArgumentModifier::Out)) => {
-                    let Some(parameter) = call.signature.parameters.get(index + parameter_offset)
+                    let Some(parameter) = call.signature.parameters.get(slot + parameter_offset)
                     else {
                         self.error(
                             ctx,
@@ -2221,10 +2240,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         // an extern takes every parameter by heap address, so
                         // a variable's own slot *is* the reference
                         match self.by_ref_argument(ctx, argument, modifier, &parameter_type) {
-                            Some((slot, write_back)) => {
-                                values.push(slot);
+                            Some((reference, write_back)) => {
+                                ordered[slot] = Some(reference);
                                 if let Some(place) = write_back {
-                                    write_backs.push((place, slot));
+                                    write_backs.push((place, reference));
                                 }
                             }
                             None => return Piece::Error,
@@ -2235,8 +2254,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         match self.source_by_ref_argument(ctx, argument, modifier, &parameter_type)
                         {
                             Some((value, place)) => {
-                                values.push(value);
-                                source_by_ref.push((index, place));
+                                ordered[slot] = Some(value);
+                                source_by_ref.push((slot, place));
                             }
                             None => return Piece::Error,
                         }
@@ -2245,7 +2264,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 Some(ArgumentModifier::In) | None => match &argument.value {
                     ArgumentValue::Expression(expression) => {
                         match self.owned_value(ctx, expression) {
-                            Some(value) => values.push(value),
+                            Some(value) => ordered[slot] = Some(value),
                             None => return Piece::Error,
                         }
                     }
@@ -2260,6 +2279,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 },
             }
         }
+        // optional parameters the call left out take their declared default
+        let mut values = Vec::with_capacity(ordered.len());
+        for (slot, value) in ordered.into_iter().enumerate() {
+            let value = match value {
+                Some(value) => value,
+                None => match self.default_argument(ctx, call, slot + parameter_offset, &span) {
+                    Some(value) => value,
+                    None => return Piece::Error,
+                },
+            };
+            values.push(value);
+        }
         self.dispatch_call(
             ctx,
             call,
@@ -2270,6 +2301,113 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             span,
             non_virtual,
         )
+    }
+
+    /// By-value arguments of a constructor call, evaluated in written order
+    /// and returned in parameter order (named arguments may reorder them).
+    fn constructor_arguments(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        arguments: &'ast [Argument<'ast, 'ast>],
+    ) -> Option<Vec<DataId>> {
+        let mut ordered: Vec<Option<DataId>> = vec![None; call.signature.parameters.len()];
+        for (index, argument) in arguments.iter().enumerate() {
+            let ArgumentValue::Expression(expression) = &argument.value else {
+                continue;
+            };
+            let slot = call
+                .parameter_of_argument
+                .get(index)
+                .copied()
+                .unwrap_or(index);
+            let value = self.owned_value(ctx, expression)?;
+            if slot < ordered.len() {
+                ordered[slot] = Some(value);
+            }
+        }
+        let span = arguments
+            .first()
+            .map(|argument| argument.span.clone())
+            .unwrap_or(0..0);
+        let mut values = Vec::with_capacity(ordered.len());
+        for (slot, value) in ordered.into_iter().enumerate() {
+            values.push(match value {
+                Some(value) => value,
+                None => self.default_argument(ctx, call, slot, &span)?,
+            });
+        }
+        Some(values)
+    }
+
+    /// The value of an optional parameter the call did not supply: the
+    /// declaration's own `= expression` for a source method (a constant, so
+    /// it lowers the same at any call site), a metadata constant, `null` or
+    /// `default` for an extern.
+    fn default_argument(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        parameter_index: usize,
+        span: &Range<usize>,
+    ) -> Option<DataId> {
+        use men_sharp_semantics::DefaultArgument;
+        let Some(parameter) = call.signature.parameters.get(parameter_index) else {
+            self.error(ctx, "internal: an argument was left unbound", span.clone());
+            return None;
+        };
+        let parameter_type = self.substitute(&parameter.parameter_type, &ctx.key.bindings);
+        let default = parameter.default_value.clone();
+        match (default, &call.origin) {
+            (Some(DefaultArgument::Source), MemberOrigin::Source(symbol)) => {
+                let site = self
+                    .declarations
+                    .table
+                    .symbol(*symbol)
+                    .declarations
+                    .first()?;
+                let parameters = match &site.syntax {
+                    SyntaxRef::Method(declaration) => declaration.parameters.as_ref().ok(),
+                    SyntaxRef::Constructor(declaration) => declaration.parameters.as_ref().ok(),
+                    _ => None,
+                };
+                let Some(expression) = parameters
+                    .and_then(|list| list.parameters.get(parameter_index))
+                    .and_then(|parameter| parameter.default_value.as_ref())
+                else {
+                    self.error(
+                        ctx,
+                        "internal: optional parameter without a default",
+                        span.clone(),
+                    );
+                    return None;
+                };
+                let value = self.lower_expression(ctx, expression)?;
+                let written_type = self.type_of(ctx, expression);
+                Some(self.convert(ctx, value, &written_type, &parameter_type, span.clone()))
+            }
+            (Some(DefaultArgument::Constant(constant)), _) => {
+                let value = self.typed_constant(&constant, &parameter_type);
+                if value.is_none() {
+                    self.error(
+                        ctx,
+                        "this optional parameter's default has no Udon representation",
+                        span.clone(),
+                    );
+                }
+                value
+            }
+            (Some(DefaultArgument::Null), _) => {
+                Some(self.constant("SystemObject", "null", HeapInit::Null))
+            }
+            (Some(DefaultArgument::Default), _) => {
+                Some(self.default_value_in(ctx, &parameter_type, span.clone()))
+            }
+            _ => {
+                self.error(ctx, "internal: an argument was left unbound", span.clone());
+                None
+            }
+        }
     }
 
     /// The second half of a call: arguments already evaluated (`values`, one
@@ -2674,15 +2812,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .unwrap_or(&[]);
             match target {
                 Some(ResolvedTarget::Call(call)) => {
-                    let mut values = Vec::new();
-                    for argument in arguments {
-                        if let ArgumentValue::Expression(expression) = &argument.value {
-                            match self.owned_value(ctx, expression) {
-                                Some(value) => values.push(value),
-                                None => return Piece::Error,
-                            }
-                        }
-                    }
+                    let Some(values) = self.constructor_arguments(ctx, &call, arguments) else {
+                        return Piece::Error;
+                    };
                     if let MemberOrigin::Source(ctor) = call.origin {
                         let key = FunctionKey {
                             symbol: ctor,
@@ -2722,20 +2854,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // external type: extern constructor
         match target {
             Some(ResolvedTarget::Call(call)) => {
-                let mut values = Vec::new();
-                for argument in new_expression
+                let arguments = new_expression
                     .arguments
                     .as_ref()
                     .map(|list| list.arguments)
-                    .unwrap_or(&[])
-                {
-                    if let ArgumentValue::Expression(expression) = &argument.value {
-                        match self.owned_value(ctx, expression) {
-                            Some(value) => values.push(value),
-                            None => return Piece::Error,
-                        }
-                    }
-                }
+                    .unwrap_or(&[]);
+                let Some(values) = self.constructor_arguments(ctx, &call, arguments) else {
+                    return Piece::Error;
+                };
                 let Some(owner) = self.extern_type_name(&created) else {
                     self.error(ctx, "this type is not available on Udon", span);
                     return Piece::Error;

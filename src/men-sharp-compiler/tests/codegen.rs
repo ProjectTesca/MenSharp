@@ -3614,3 +3614,258 @@ fn a_call_with_arguments_inside_a_parenthesized_conditional_is_not_a_declaration
     };
     assert_eq!(int_of(&emulator, "result"), 12);
 }
+
+#[test]
+fn named_arguments_bind_by_name_and_evaluate_in_written_order() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Box
+            {
+                public int width;
+                public int height;
+                public Box(int width, int height) { this.width = width; this.height = height; }
+            }
+
+            public class Program
+            {
+                public static int reordered;
+                public static int mixed;
+                public static int order;
+                public static int constructed;
+                public static int parsed;
+                public static int trace;
+
+                static int Sub(int a, int b) => a - b;
+                static int Three(int a, int b, int c) => a * 100 + b * 10 + c;
+                static int Tick(int value) { trace = trace * 10 + value; return value; }
+
+                public static void Main()
+                {
+                    reordered = Sub(b: 1, a: 5);                 // 4, not -4
+                    mixed = Three(1, c: 3, b: 2);                // 123
+                    // written order is evaluation order, whatever the names say
+                    order = Three(c: Tick(3), a: Tick(1), b: Tick(2));   // 123, trace 312
+                    constructed = new Box(height: 2, width: 7).width * 10
+                        + new Box(height: 2, width: 7).height;   // 72
+                    int value;
+                    if (int.TryParse(result: out value, s: "41")) { parsed = value + 1; }   // 42
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "reordered"), 4);
+    assert_eq!(int_of(&emulator, "mixed"), 123);
+    assert_eq!(int_of(&emulator, "order"), 123);
+    assert_eq!(int_of(&emulator, "trace"), 312);
+    assert_eq!(int_of(&emulator, "constructed"), 72);
+    assert_eq!(int_of(&emulator, "parsed"), 42);
+}
+
+#[test]
+fn a_named_argument_must_name_a_parameter_once() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                static int Sub(int a, int b) => a - b;
+                public static void Main()
+                {
+                    int x = Sub(a: 1, c: 2);      // no parameter c
+                    int y = Sub(a: 1, a: 2);      // a twice
+                    int z = Sub(b: 1, 2);         // positional after a moved name
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let overload_errors = bodies
+        .errors
+        .iter()
+        .filter(|error| {
+            matches!(
+                error.kind,
+                men_sharp_semantics::SemanticErrorKind::NoMatchingOverload
+            )
+        })
+        .count();
+    assert_eq!(overload_errors, 3, "{:#?}", bodies.errors);
+}
+
+#[test]
+fn optional_parameters_take_their_defaults_at_the_call_site() {
+    let Some(emulator) = run(
+        r##"
+        namespace Game
+        {
+            public enum Mode { Fast, Safe = 7 }
+
+            public struct Point { public int x; }
+
+            public class Box
+            {
+                public int size;
+                public string label;
+                public Box(int size = 4, string label = "box") { this.size = size; this.label = label; }
+            }
+
+            public class Program
+            {
+                public static int sum;
+                public static int skipped;
+                public static int negative;
+                public static int enumDefault;
+                public static string text;
+                public static int structDefault;
+                public static int nullDefault;
+                public static int constructed;
+                public static string constructedLabel;
+                public static int preferred;
+
+                const int Base = 100;
+                static int Add(int a, int b = 2, int c = Base) => a + b + c;
+                static int Neg(int a, int b = -3) => a + b;
+                static int ModeOf(Mode mode = Mode.Safe) => (int)mode;
+                static string Tag(string t, string prefix = "#") => prefix + t;
+                static int PointX(Point p = default) => p.x + 1;
+                static int Len(string s = null) => s == null ? -1 : s.Length;
+                static int Pick(int a) => a * 10;
+                static int Pick(int a, int b = 1) => a + b;
+
+                public static void Main()
+                {
+                    sum = Add(1);                     // 1 + 2 + 100 = 103
+                    skipped = Add(1, c: 5);           // 1 + 2 + 5 = 8
+                    negative = Neg(1);                // -2
+                    enumDefault = ModeOf();           // 7
+                    text = Tag("x");                  // "#x"
+                    structDefault = PointX();         // 1
+                    nullDefault = Len();              // -1
+                    var box = new Box(label: "lid");
+                    constructed = box.size;           // 4
+                    constructedLabel = box.label;     // "lid"
+                    preferred = Pick(1);              // the overload without defaults: 10
+                }
+            }
+        }
+        "##,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "sum"), 103);
+    assert_eq!(int_of(&emulator, "skipped"), 8);
+    assert_eq!(int_of(&emulator, "negative"), -2);
+    assert_eq!(int_of(&emulator, "enumDefault"), 7);
+    assert_eq!(string_of(&emulator, "text"), "#x");
+    assert_eq!(int_of(&emulator, "structDefault"), 1);
+    assert_eq!(int_of(&emulator, "nullDefault"), -1);
+    assert_eq!(int_of(&emulator, "constructed"), 4);
+    assert_eq!(string_of(&emulator, "constructedLabel"), "lid");
+    assert_eq!(int_of(&emulator, "preferred"), 10);
+}
+
+#[test]
+fn an_extern_optional_parameter_is_baked_as_its_metadata_constant() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int count;
+                public static void Main()
+                {
+                    // Split(char separator, StringSplitOptions options = None)
+                    count = "a,b".Split(',').Length;
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        output.errors
+    );
+    let text = output.program.to_uasm().unwrap();
+    assert!(
+        text.contains(
+            "SystemString.__Split__SystemChar_SystemStringSplitOptions__SystemStringArray"
+        ),
+        "{text}"
+    );
+    // the omitted enum argument is the real boxed enum value, built by the importer
+    let meta = output.program.to_meta_json().unwrap();
+    assert!(meta.contains("System.StringSplitOptions#0"), "{meta}");
+}
+
+#[test]
+fn a_default_value_must_be_a_constant() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                static int Now() => 1;
+                static int F(int a = Now()) => a;
+                public static void Main() { int x = F(); }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::UnsupportedExpression
+        )),
+        "{:#?}",
+        bodies.errors
+    );
+}

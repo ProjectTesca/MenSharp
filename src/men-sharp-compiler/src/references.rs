@@ -25,9 +25,9 @@ use men_sharp_dotnet::{
     DotNetAssembly, MetadataError, MethodSig, TypeDefinition, TypeSig, TypeToken,
 };
 use men_sharp_semantics::{
-    Accessibility, ExternalConstant, ExternalMember, ExternalMemberKind, ExternalTypeId,
-    ExternalTypeInfo, ExternalTypeKind, ExternalTypes, FunctionSignature, MemberSignature,
-    ParameterPassing, ParameterSignature, Type, TypeTarget, TypeVariance,
+    Accessibility, DefaultArgument, ExternalConstant, ExternalMember, ExternalMemberKind,
+    ExternalTypeId, ExternalTypeInfo, ExternalTypeKind, ExternalTypes, FunctionSignature,
+    MemberSignature, ParameterPassing, ParameterSignature, Type, TypeTarget, TypeVariance,
 };
 
 pub struct ReferenceSet<'data> {
@@ -288,7 +288,7 @@ impl<'data> ReferenceSet<'data> {
         &self,
         owner: ExternalTypeId,
         signature: &MethodSig,
-        out_flags: &[bool],
+        definitions: &[men_sharp_dotnet::ParameterDefinition<'_>],
     ) -> FunctionSignature {
         FunctionSignature {
             return_type: self.convert(owner, &signature.return_type),
@@ -301,7 +301,10 @@ impl<'data> ReferenceSet<'data> {
                     // metadata spells `ref`/`out` as a byref type plus a flag
                     let (passing, parameter_type) = match converted {
                         Type::ByRef { element, .. } => (
-                            if out_flags.get(index).copied().unwrap_or(false) {
+                            if definitions
+                                .get(index)
+                                .is_some_and(|definition| definition.is_out())
+                            {
                                 ParameterPassing::Out
                             } else {
                                 ParameterPassing::Ref
@@ -310,10 +313,21 @@ impl<'data> ReferenceSet<'data> {
                         ),
                         other => (ParameterPassing::Value, other),
                     };
+                    let definition = definitions.get(index);
                     ParameterSignature {
                         passing,
                         is_params: false,
                         parameter_type,
+                        name: definition.map(|definition| definition.name.to_string()),
+                        default_value: definition
+                            .filter(|definition| definition.is_optional())
+                            .map(|definition| match &definition.constant {
+                                Some(men_sharp_dotnet::Constant::Null) => DefaultArgument::Null,
+                                Some(constant) => convert_constant(constant)
+                                    .map(DefaultArgument::Constant)
+                                    .unwrap_or(DefaultArgument::Default),
+                                None => DefaultArgument::Default,
+                            }),
                     }
                 })
                 .collect(),
@@ -458,11 +472,6 @@ impl ExternalTypes for ReferenceSet<'_> {
             if method.name != name {
                 continue;
             }
-            let out_flags: Vec<bool> = method
-                .parameters
-                .iter()
-                .map(|parameter| parameter.is_out())
-                .collect();
             members.push(ExternalMember {
                 name: method.name.to_string(),
                 kind: if method.name == ".ctor" || method.name == ".cctor" {
@@ -478,7 +487,7 @@ impl ExternalTypes for ReferenceSet<'_> {
                 signature: MemberSignature::Function(self.convert_function(
                     id,
                     &method.signature,
-                    &out_flags,
+                    &method.parameters,
                 )),
                 constant: None,
             });
@@ -508,6 +517,8 @@ impl ExternalTypes for ReferenceSet<'_> {
                             passing: ParameterPassing::Value,
                             is_params: false,
                             parameter_type: self.convert(id, parameter),
+                            name: None,
+                            default_value: None,
                         })
                         .collect(),
                 })

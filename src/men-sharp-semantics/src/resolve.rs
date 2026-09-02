@@ -459,6 +459,15 @@ impl<'ast> Resolver<'_, 'ast> {
                     passing,
                     is_params,
                     parameter_type,
+                    name: parameter
+                        .name
+                        .as_ref()
+                        .ok()
+                        .map(|name| name.value.to_string()),
+                    default_value: parameter
+                        .default_value
+                        .as_ref()
+                        .map(|_| crate::types::DefaultArgument::Source),
                 }
             })
             .collect()

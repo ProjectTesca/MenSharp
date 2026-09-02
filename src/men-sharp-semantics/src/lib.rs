@@ -56,8 +56,8 @@ pub use symbol::{
     Accessibility, DeclarationSite, FileId, Symbol, SymbolId, SymbolKind, SymbolTable, SyntaxRef,
 };
 pub use types::{
-    ExternalTypeId, FunctionSignature, MemberSignature, ParameterPassing, ParameterSignature,
-    TupleElement, Type, TypeTarget, TypeVariance,
+    DefaultArgument, ExternalTypeId, FunctionSignature, MemberSignature, ParameterPassing,
+    ParameterSignature, TupleElement, Type, TypeTarget, TypeVariance,
 };
 
 #[cfg(test)]

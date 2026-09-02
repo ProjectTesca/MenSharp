@@ -127,6 +127,11 @@ pub struct ResolvedCall {
     pub signature: FunctionSignature,
     /// The method's own generic arguments, explicit or inferred.
     pub type_arguments: Vec<Type>,
+    /// For each argument as written (the extension receiver first, when
+    /// there is one), the index of the parameter it binds to. Identity
+    /// unless named arguments reorder them; arguments are still evaluated
+    /// in written order.
+    pub parameter_of_argument: Vec<usize>,
 }
 
 /// Checks every member body in one file. Pure over shared state; the driver runs
@@ -247,6 +252,8 @@ struct SelectedOverload {
     candidate: usize,
     /// The method's own generic arguments, explicit or inferred.
     type_arguments: Vec<Type>,
+    /// Written argument index → parameter index (see [`ResolvedCall`]).
+    parameter_of_argument: Vec<usize>,
 }
 
 /// One call argument. Lambdas are *deferred*: their bodies are typed during
@@ -259,6 +266,8 @@ enum ArgumentShape<'ast> {
 
 struct CallArgument<'ast> {
     shape: ArgumentShape<'ast>,
+    /// `name: value` — binds to the parameter of that name.
+    name: Option<&'ast str>,
     /// The argument's expression node, for recording its final type.
     expression: Option<&'ast Expression<'ast, 'ast>>,
     modifier: Option<ArgumentModifier>,
@@ -526,6 +535,59 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         self.type_stack.pop();
     }
 
+    /// `int x = 5`: the default is typed against its parameter and must be
+    /// a constant — a literal, `default`, `null`, or a constant member —
+    /// because every call site bakes it in (CS1736 otherwise).
+    fn check_parameter_defaults(
+        &mut self,
+        parameters: &[&'ast men_sharp_parser::ast::Parameter<'ast, 'ast>],
+        function: &FunctionSignature,
+        is_static: bool,
+    ) {
+        for (parameter, signature) in parameters.iter().zip(&function.parameters) {
+            let Some(value) = &parameter.default_value else {
+                continue;
+            };
+            if !Self::is_constant_shaped(value) {
+                self.error(SemanticErrorKind::UnsupportedExpression, value.span());
+                continue;
+            }
+            let parameter_type = signature.parameter_type.clone();
+            let probe = FunctionSignature {
+                return_type: Type::Void,
+                parameters: Vec::new(),
+            };
+            self.enter_body(&probe, &[], is_static, |checker| {
+                let literal = Self::is_integer_literal(value);
+                let ty = checker.check_expression_expecting(value, Some(&parameter_type));
+                checker.require_convertible(&ty, &parameter_type, literal, value.span());
+            });
+        }
+    }
+
+    /// The shapes a constant expression can take here: literals (signed),
+    /// `default`, `null`, and dotted names (enum members, `const` fields).
+    fn is_constant_shaped(expression: &Expression<'ast, 'ast>) -> bool {
+        match expression {
+            Expression::Unary(unary) => unary.operand.as_ref().is_ok_and(Self::is_constant_shaped),
+            Expression::Primary(primary) => {
+                let chain_is_members = primary
+                    .chain
+                    .iter()
+                    .all(|right| matches!(right, PrimaryRight::Member { .. }));
+                chain_is_members
+                    && matches!(
+                        primary.left,
+                        PrimaryLeft::Literal(_)
+                            | PrimaryLeft::Default { .. }
+                            | PrimaryLeft::Identifier { .. }
+                            | PrimaryLeft::Predefined(_)
+                    )
+            }
+            _ => false,
+        }
+    }
+
     fn check_member(&mut self, node: &MemberNode<'ast>) {
         let Some(symbol) = self
             .resolver
@@ -548,6 +610,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     .as_ref()
                     .map(|list| list.parameters.iter().collect::<Vec<_>>())
                     .unwrap_or_default();
+                self.check_parameter_defaults(&names, &function, node.is_static);
                 self.check_function_body(&method.body, &function, &names, node.is_static);
                 self.type_stack.pop();
             }
@@ -560,6 +623,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     .as_ref()
                     .map(|list| list.parameters.iter().collect::<Vec<_>>())
                     .unwrap_or_default();
+                self.check_parameter_defaults(&names, &function, node.is_static);
                 self.enter_body(&function, &names, node.is_static, |checker| {
                     if let Some(initializer) = &constructor.initializer
                         && let Ok(arguments) = &initializer.arguments
@@ -2241,6 +2305,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if let Expression::Lambda(lambda) = expression {
                     return CallArgument {
                         shape: ArgumentShape::Lambda(lambda),
+                        name: argument.name.as_ref().map(|name| name.value),
                         expression: Some(expression),
                         modifier: argument.modifier.as_ref().map(|modifier| modifier.value),
                         is_integer_literal: false,
@@ -2250,6 +2315,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
                 CallArgument {
                     shape: ArgumentShape::Value(self.check_expression(expression)),
+                    name: argument.name.as_ref().map(|name| name.value),
                     expression: Some(expression),
                     modifier: argument.modifier.as_ref().map(|modifier| modifier.value),
                     is_integer_literal: Self::is_integer_literal(expression),
@@ -2269,6 +2335,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
                 CallArgument {
                     shape: ArgumentShape::Value(if infer { Type::Infer } else { declared }),
+                    name: argument.name.as_ref().map(|name| name.value),
                     expression: None,
                     modifier: Some(ArgumentModifier::Out),
                     is_integer_literal: false,
@@ -2278,6 +2345,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             ArgumentValue::Missing => CallArgument {
                 shape: ArgumentShape::Value(Type::Error),
+                name: None,
                 expression: None,
                 modifier: None,
                 is_integer_literal: false,
@@ -2300,7 +2368,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let instance_failure = match self.attempt_call(&group, &arguments) {
             AttemptOutcome::Selected(selected) => {
                 self.record_call(node, &group, &selected, false);
-                return self.finish_call(&selected.signature, &arguments);
+                return self.finish_call(&selected, &arguments);
             }
             AttemptOutcome::Ambiguous => {
                 self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
@@ -2316,6 +2384,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             let mut extension_arguments = Vec::with_capacity(arguments.len() + 1);
             extension_arguments.push(CallArgument {
                 shape: ArgumentShape::Value(receiver),
+                name: None,
                 expression: None,
                 modifier: None,
                 is_integer_literal: false,
@@ -2327,7 +2396,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             match self.attempt_call(&extension_group, &extension_arguments) {
                 AttemptOutcome::Selected(selected) => {
                     self.record_call(node, &extension_group, &selected, true);
-                    return self.finish_call(&selected.signature, &extension_arguments);
+                    return self.finish_call(&selected, &extension_arguments);
                 }
                 AttemptOutcome::Ambiguous => {
                     self.error(SemanticErrorKind::AmbiguousOverload, span.clone());
@@ -2370,6 +2439,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 declaring_type: candidate.declaring_type.clone(),
                 signature: selected.signature.clone(),
                 type_arguments: selected.type_arguments.clone(),
+                parameter_of_argument: selected.parameter_of_argument.clone(),
             }),
         );
     }
@@ -2404,12 +2474,54 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
     /// One pass of candidate filtering and betterness. Side-effect free apart from
     /// rolled-back lambda probes.
+    /// Which parameter each written argument binds to (§12.6.4.2): a
+    /// positional argument takes its own position, a named one the parameter
+    /// of that name. `None` when the shape does not fit this candidate — an
+    /// unknown name, a parameter given twice, or a positional argument after
+    /// a named one that moved out of place (C# 7.2 allows positional
+    /// arguments after named ones only while the named ones sit where they
+    /// would have anyway).
+    fn bind_argument_names(
+        arguments: &[CallArgument<'ast>],
+        parameters: &[crate::types::ParameterSignature],
+    ) -> Option<Vec<usize>> {
+        let mut used = vec![false; parameters.len()];
+        let mut bound = Vec::with_capacity(arguments.len());
+        let mut names_moved = false;
+        for (position, argument) in arguments.iter().enumerate() {
+            let index = match argument.name {
+                None => {
+                    if names_moved {
+                        return None;
+                    }
+                    position
+                }
+                Some(name) => {
+                    let index = parameters
+                        .iter()
+                        .position(|parameter| parameter.name.as_deref() == Some(name))?;
+                    if index != position {
+                        names_moved = true;
+                    }
+                    index
+                }
+            };
+            if index >= used.len() || used[index] {
+                return None;
+            }
+            used[index] = true;
+            bound.push(index);
+        }
+        Some(bound)
+    }
+
     fn attempt_call(
         &mut self,
         group: &MethodGroup<'ast>,
         arguments: &[CallArgument<'ast>],
     ) -> AttemptOutcome {
-        let mut viable: Vec<(SelectedOverload, usize)> = Vec::new();
+        // (overload, exact-type matches, omitted optional arguments)
+        let mut viable: Vec<(SelectedOverload, usize, usize)> = Vec::new();
         let mut inference_failed = false;
 
         'candidates: for (candidate_index, candidate) in group.candidates.iter().enumerate() {
@@ -2419,9 +2531,36 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             if group.via_type && !candidate.is_static {
                 continue;
             }
-            if signature.parameters.len() != arguments.len() {
+            if arguments.len() > signature.parameters.len() {
                 continue;
             }
+            // named arguments pick their parameter; the rest go by position
+            let Some(parameter_of_argument) =
+                Self::bind_argument_names(arguments, &signature.parameters)
+            else {
+                continue;
+            };
+            // whatever is left unbound must be optional (§12.6.4.2)
+            let omitted = signature
+                .parameters
+                .iter()
+                .enumerate()
+                .filter(|(index, _)| !parameter_of_argument.contains(index))
+                .count();
+            if signature
+                .parameters
+                .iter()
+                .enumerate()
+                .any(|(index, parameter)| {
+                    !parameter_of_argument.contains(&index) && parameter.default_value.is_none()
+                })
+            {
+                continue;
+            }
+            let pairs = |signature: &'_ FunctionSignature| -> Vec<(usize, usize)> {
+                let _ = signature;
+                parameter_of_argument.iter().copied().enumerate().collect()
+            };
 
             // the method's own generic parameters: explicit, inferred, or absent
             let (signature, type_arguments) = if candidate.arity > 0 {
@@ -2437,7 +2576,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                 } else {
                     // phase 1: ordinary arguments contribute bounds
-                    for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+                    for (argument_index, parameter_index) in pairs(signature) {
+                        let argument = &arguments[argument_index];
+                        let parameter = &signature.parameters[parameter_index];
                         if let ArgumentShape::Value(ty) = &argument.shape {
                             let system = self.system();
                             engine.lower_bound(&system, &parameter.parameter_type, ty);
@@ -2450,7 +2591,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
                     // phase 2: lambda bodies, typed against now-concrete inputs,
                     // feed their return types back
-                    for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+                    for (argument_index, parameter_index) in pairs(signature) {
+                        let argument = &arguments[argument_index];
+                        let parameter = &signature.parameters[parameter_index];
                         let ArgumentShape::Lambda(lambda) = &argument.shape else {
                             continue;
                         };
@@ -2512,7 +2655,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
             // applicability
             let mut exact = 0usize;
-            for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+            for (argument_index, parameter_index) in pairs(&signature) {
+                let argument = &arguments[argument_index];
+                let parameter = &signature.parameters[parameter_index];
                 use crate::types::ParameterPassing;
                 let modifier_ok = match parameter.passing {
                     ParameterPassing::Ref => argument.modifier == Some(ArgumentModifier::Ref),
@@ -2579,18 +2724,28 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     signature,
                     candidate: candidate_index,
                     type_arguments,
+                    parameter_of_argument,
                 },
                 exact,
+                omitted,
             ));
         }
 
-        let best = viable.iter().map(|(_, exact)| *exact).max();
+        // most exact matches wins; among those, the one that fills in the
+        // fewest defaults (§12.6.4.3: a candidate needing no optional
+        // parameters is better than one that does)
+        let best = viable
+            .iter()
+            .map(|(_, exact, omitted)| (*exact, usize::MAX - *omitted))
+            .max();
         let Some(best) = best else {
             return AttemptOutcome::NoMatch { inference_failed };
         };
 
-        let mut winners = viable.into_iter().filter(|(_, exact)| *exact == best);
-        let (selected, _) = winners.next().unwrap();
+        let mut winners = viable
+            .into_iter()
+            .filter(|(_, exact, omitted)| (*exact, usize::MAX - *omitted) == best);
+        let (selected, _, _) = winners.next().unwrap();
         if winners.next().is_some() {
             return AttemptOutcome::Ambiguous;
         }
@@ -2601,10 +2756,19 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     /// `out var` locals bound, argument expressions typed.
     fn finish_call(
         &mut self,
-        signature: &FunctionSignature,
+        selected: &SelectedOverload,
         arguments: &[CallArgument<'ast>],
     ) -> Type {
-        for (argument, parameter) in arguments.iter().zip(&signature.parameters) {
+        let signature = &selected.signature;
+        for (argument_index, argument) in arguments.iter().enumerate() {
+            let parameter_index = selected
+                .parameter_of_argument
+                .get(argument_index)
+                .copied()
+                .unwrap_or(argument_index);
+            let Some(parameter) = signature.parameters.get(parameter_index) else {
+                continue;
+            };
             match &argument.shape {
                 ArgumentShape::Lambda(lambda) => {
                     if let Some(delegate) = self.delegate_signature(&parameter.parameter_type) {
@@ -2915,6 +3079,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     passing: crate::types::ParameterPassing::Value,
                     is_params: false,
                     parameter_type: ty.clone(),
+                    name: None,
+                    default_value: None,
                 })
                 .collect(),
         };
@@ -3291,6 +3457,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     fn plain_argument(&mut self, expression: &'ast Expression<'ast, 'ast>) -> CallArgument<'ast> {
         CallArgument {
             shape: ArgumentShape::Value(self.check_expression(expression)),
+            name: None,
             expression: Some(expression),
             modifier: None,
             is_integer_literal: Self::is_integer_literal(expression),
@@ -3795,6 +3962,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             declaring_type: candidate.declaring_type.clone(),
             signature: selected.signature.clone(),
             type_arguments: selected.type_arguments.clone(),
+            parameter_of_argument: selected.parameter_of_argument.clone(),
         };
         let return_type = selected.signature.return_type.clone();
         Some((call, return_type))

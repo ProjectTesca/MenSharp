@@ -444,6 +444,17 @@ impl Emulator {
                 self.heap[args[3]] = Value::Str(Rc::from(joined));
                 Ok(())
             }
+            "SystemString.__op_Equality__SystemString_SystemString__SystemBoolean"
+            | "SystemString.__op_Inequality__SystemString_SystemString__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let equal = match (&self.heap[args[0]], &self.heap[args[1]]) {
+                    (Value::Str(a), Value::Str(b)) => a == b,
+                    (Value::Null, Value::Null) => true,
+                    _ => false,
+                };
+                self.heap[args[2]] = Value::Boolean(equal == signature.contains("op_Equality"));
+                Ok(())
+            }
             "SystemString.__get_Length__SystemInt32" => {
                 let args = self.pop_arguments(2)?;
                 let s = self.heap[args[0]].as_str()?;

@@ -315,7 +315,11 @@ wrong thing:
   `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.
 
 `ref`/`out` work everywhere: on engine methods (`Physics.Raycast(ray, out hit)`,
-`int.TryParse`) and on methods you define yourself.
+`int.TryParse`) and on methods you define yourself. Named arguments
+(`Mathf.Clamp(value: v, min: 0f, max: 1f)`) bind by name and are evaluated in
+the order written, and optional parameters (`void Log(string text, int level =
+1)`, engine methods' too) take their defaults at the call site — both as in
+C#. `params` is not supported yet.
 
 ## Links
 

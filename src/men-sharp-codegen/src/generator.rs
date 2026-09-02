@@ -1326,29 +1326,44 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             MemberOrigin::External {
                 member: external, ..
             } => {
-                use men_sharp_semantics::ExternalConstant;
                 let constant = external.constant.clone()?;
                 let ty = member.member_type.clone();
+                let slot = self.typed_constant(&constant, &ty)?;
+                Some((slot, ty))
+            }
+        }
+    }
+
+    /// A metadata constant as a heap slot of the given type: a const field's
+    /// value, or an optional parameter's default.
+    pub(super) fn typed_constant(
+        &mut self,
+        constant: &men_sharp_semantics::ExternalConstant,
+        ty: &Type,
+    ) -> Option<DataId> {
+        use men_sharp_semantics::ExternalConstant;
+        {
+            {
                 // an enum constant must be the real boxed value — an Int32 in
                 // an enum-typed slot throws when an extern unboxes it — and
                 // only the Unity importer can build one (HeapInit::EnumValue)
-                if let Some(id) = self.external_enum(&ty) {
+                if let Some(id) = self.external_enum(ty) {
                     let value = match constant {
-                        ExternalConstant::Int(value) => value,
-                        ExternalConstant::UInt(value) => value as i64,
+                        ExternalConstant::Int(value) => *value,
+                        ExternalConstant::UInt(value) => *value as i64,
                         _ => return None,
                     };
                     let dotnet_type = self.external.display_name(id);
-                    let udon_type = self.heap_type(&ty);
+                    let udon_type = self.heap_type(ty);
                     let slot = self.constant(
                         &udon_type,
                         &format!("{dotnet_type}#{value}"),
                         HeapInit::EnumValue { dotnet_type, value },
                     );
-                    return Some((slot, ty));
+                    return Some(slot);
                 }
-                let slot = match &constant {
-                    ExternalConstant::Int(value) => match self.heap_type(&ty).as_str() {
+                let slot = match constant {
+                    ExternalConstant::Int(value) => match self.heap_type(ty).as_str() {
                         "SystemInt64" => self.constant(
                             "SystemInt64",
                             &value.to_string(),
@@ -1356,7 +1371,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         ),
                         _ => self.int_constant(*value as i32),
                     },
-                    ExternalConstant::UInt(value) => match self.heap_type(&ty).as_str() {
+                    ExternalConstant::UInt(value) => match self.heap_type(ty).as_str() {
                         "SystemUInt32" => self.constant(
                             "SystemUInt32",
                             &value.to_string(),
@@ -1386,7 +1401,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     ),
                     ExternalConstant::String(value) => self.string_constant(value),
                 };
-                Some((slot, ty))
+                Some(slot)
             }
         }
     }

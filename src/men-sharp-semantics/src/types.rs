@@ -98,12 +98,44 @@ pub struct FunctionSignature {
     pub parameters: Vec<ParameterSignature>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct ParameterSignature {
     pub passing: ParameterPassing,
     /// `params` on the last parameter.
     pub is_params: bool,
     pub parameter_type: Type,
+    /// The declared name, for named arguments (`F(b: 1, a: 2)`). Not part
+    /// of signature identity: an override may rename its parameters.
+    pub name: Option<String>,
+    /// `= value`: the argument a call may leave out. Not part of signature
+    /// identity either.
+    pub default_value: Option<DefaultArgument>,
+}
+
+impl PartialEq for ParameterSignature {
+    fn eq(&self, other: &Self) -> bool {
+        self.passing == other.passing
+            && self.is_params == other.is_params
+            && self.parameter_type == other.parameter_type
+    }
+}
+
+impl Eq for ParameterSignature {}
+
+/// What an omitted optional argument is: baked into the call site, as C#
+/// does (§12.6.2.2).
+#[derive(Debug, Clone, PartialEq)]
+pub enum DefaultArgument {
+    /// A metadata constant (`int count = -1`, an enum's member as its
+    /// underlying value, ...).
+    Constant(crate::external::ExternalConstant),
+    /// `= null`.
+    Null,
+    /// `= default`, or `[Optional]` with no value.
+    Default,
+    /// Declared in source: the parameter's own `= expression`, evaluated
+    /// at each call site.
+    Source,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -176,6 +208,8 @@ impl MemberSignature {
                         passing: parameter.passing,
                         is_params: parameter.is_params,
                         parameter_type: parameter.parameter_type.map(replace),
+                        name: parameter.name.clone(),
+                        default_value: parameter.default_value.clone(),
                     })
                     .collect(),
             }),
