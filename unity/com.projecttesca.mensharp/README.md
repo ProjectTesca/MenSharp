@@ -317,9 +317,10 @@ wrong thing:
 `ref`/`out` work everywhere: on engine methods (`Physics.Raycast(ray, out hit)`,
 `int.TryParse`) and on methods you define yourself. Named arguments
 (`Mathf.Clamp(value: v, min: 0f, max: 1f)`) bind by name and are evaluated in
-the order written, and optional parameters (`void Log(string text, int level =
-1)`, engine methods' too) take their defaults at the call site — both as in
-C#. `params` is not supported yet.
+the order written, optional parameters (`void Log(string text, int level =
+1)`, engine methods' too) take their defaults at the call site, and `params`
+(`Sum(1, 2, 3)`, `string.Join(",", a, b)`) gathers the trailing arguments
+into one array — all as in C#.
 
 ## Links
 

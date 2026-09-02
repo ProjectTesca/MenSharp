@@ -2279,6 +2279,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 },
             }
         }
+        // the expanded form of `params`: the trailing arguments become one array
+        if !self.pack_params_arguments(ctx, call, &mut ordered, parameter_offset, &span) {
+            return Piece::Error;
+        }
         // optional parameters the call left out take their declared default
         let mut values = Vec::with_capacity(ordered.len());
         for (slot, value) in ordered.into_iter().enumerate() {
@@ -2330,6 +2334,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .first()
             .map(|argument| argument.span.clone())
             .unwrap_or(0..0);
+        if !self.pack_params_arguments(ctx, call, &mut ordered, 0, &span) {
+            return None;
+        }
         let mut values = Vec::with_capacity(ordered.len());
         for (slot, value) in ordered.into_iter().enumerate() {
             values.push(match value {
@@ -2338,6 +2345,49 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             });
         }
         Some(values)
+    }
+
+    /// When the call bound in the expanded form of a `params` parameter,
+    /// gathers the arguments beyond the ordinary parameters into a fresh
+    /// array — `new T[] { a, b, c }` — that takes the parameter's place, so
+    /// the callee sees exactly what a written-out array would give it.
+    fn pack_params_arguments(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        ordered: &mut Vec<Option<DataId>>,
+        parameter_offset: usize,
+        span: &Range<usize>,
+    ) -> bool {
+        let Some(fixed) = call.params_expansion else {
+            return true;
+        };
+        let Some(array_parameter) = call.signature.parameters.get(fixed) else {
+            self.error(
+                ctx,
+                "internal: params expansion without a params parameter",
+                span.clone(),
+            );
+            return false;
+        };
+        let array_type = self.substitute(&array_parameter.parameter_type, &ctx.key.bindings);
+        let first = fixed.saturating_sub(parameter_offset);
+        let elements: Vec<DataId> = ordered
+            .get(first..)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .copied()
+            .collect();
+        let size = self.int_constant(elements.len() as i32);
+        let array = self.allocate_array(ctx, &array_type, size, span.clone());
+        for (position, element) in elements.into_iter().enumerate() {
+            let index = self.int_constant(position as i32);
+            self.array_set(ctx, array, index, element, &array_type, span.clone());
+        }
+        ordered.truncate(first);
+        ordered.push(Some(array));
+        true
     }
 
     /// The value of an optional parameter the call did not supply: the

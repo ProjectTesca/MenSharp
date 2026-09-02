@@ -316,7 +316,7 @@ impl<'data> ReferenceSet<'data> {
                     let definition = definitions.get(index);
                     ParameterSignature {
                         passing,
-                        is_params: false,
+                        is_params: definition.is_some_and(|definition| definition.is_params),
                         parameter_type,
                         name: definition.map(|definition| definition.name.to_string()),
                         default_value: definition

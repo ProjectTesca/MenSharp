@@ -3869,3 +3869,113 @@ fn a_default_value_must_be_a_constant() {
         bodies.errors
     );
 }
+
+#[test]
+fn params_arguments_are_gathered_into_an_array() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public struct Point { public int x; }
+
+            public class Program
+            {
+                public static int none;
+                public static int several;
+                public static int passedArray;
+                public static int normalFormWins;
+                public static int withLeading;
+                public static int generic;
+                public static int structCopies;
+                public static int named;
+
+                static int Sum(params int[] values)
+                {
+                    int total = 0;
+                    foreach (var v in values) { total += v; }
+                    return total;
+                }
+                static int Sum(int single) => single * 100;
+                static int Weighted(int factor, params int[] values) => factor * Sum(values);
+                static int Count<T>(params T[] items) => items.Length;
+                static int FirstX(params Point[] points) { points[0].x = 99; return points.Length; }
+
+                public static void Main()
+                {
+                    none = Sum();                          // 0 (empty array)
+                    several = Sum(1, 2, 3);                // 6
+                    passedArray = Sum(new int[] { 4, 5 }); // 9: normal form, the array itself
+                    normalFormWins = Sum(7);               // 700: the non-params overload
+                    withLeading = Weighted(2, 1, 2, 3);    // 12
+                    generic = Count("a", "b", "c");        // 3
+                    Point p = new Point { x = 1 };
+                    structCopies = FirstX(p) * 10 + p.x;   // the callee got a copy: 11
+                    named = Weighted(factor: 3, 1, 1);     // 6
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "none"), 0);
+    assert_eq!(int_of(&emulator, "several"), 6);
+    assert_eq!(int_of(&emulator, "passedArray"), 9);
+    assert_eq!(int_of(&emulator, "normalFormWins"), 700);
+    assert_eq!(int_of(&emulator, "withLeading"), 12);
+    assert_eq!(int_of(&emulator, "generic"), 3);
+    assert_eq!(int_of(&emulator, "structCopies"), 11);
+    assert_eq!(int_of(&emulator, "named"), 6);
+}
+
+#[test]
+fn an_extern_params_call_passes_one_array() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static string joined;
+                public static void Main()
+                {
+                    joined = string.Join(",", "a", "b", "c");
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        output.errors
+    );
+    let text = output.program.to_uasm().unwrap();
+    assert!(
+        text.contains("\"SystemString.__Join__SystemString_SystemStringArray__SystemString\""),
+        "{text}"
+    );
+    assert!(
+        text.contains("\"SystemStringArray.__ctor__SystemInt32__SystemStringArray\""),
+        "{text}"
+    );
+}

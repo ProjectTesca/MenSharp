@@ -132,6 +132,12 @@ pub struct ResolvedCall {
     /// unless named arguments reorder them; arguments are still evaluated
     /// in written order.
     pub parameter_of_argument: Vec<usize>,
+    /// `Some(n)` when the call used the expanded form of a `params`
+    /// parameter: parameters `0..n` are the ordinary ones and every argument
+    /// bound at index `n` or beyond is an element of the array the callee
+    /// receives as parameter `n`. `parameter_of_argument` counts in that
+    /// expanded list; `signature` is the declared one.
+    pub params_expansion: Option<usize>,
 }
 
 /// Checks every member body in one file. Pure over shared state; the driver runs
@@ -254,6 +260,19 @@ struct SelectedOverload {
     type_arguments: Vec<Type>,
     /// Written argument index → parameter index (see [`ResolvedCall`]).
     parameter_of_argument: Vec<usize>,
+    /// See [`ResolvedCall::params_expansion`].
+    params_expansion: Option<usize>,
+}
+
+/// A candidate that fits the arguments, with what ranks it against the others.
+struct Applicable {
+    selected: SelectedOverload,
+    /// Arguments whose type is exactly the parameter's.
+    exact: usize,
+    /// Optional parameters the call left out.
+    omitted: usize,
+    /// Applicable only with its `params` parameter expanded.
+    expanded: bool,
 }
 
 /// One call argument. Lambdas are *deferred*: their bodies are typed during
@@ -2440,6 +2459,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 signature: selected.signature.clone(),
                 type_arguments: selected.type_arguments.clone(),
                 parameter_of_argument: selected.parameter_of_argument.clone(),
+                params_expansion: selected.params_expansion,
             }),
         );
     }
@@ -2520,236 +2540,297 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         group: &MethodGroup<'ast>,
         arguments: &[CallArgument<'ast>],
     ) -> AttemptOutcome {
-        // (overload, exact-type matches, omitted optional arguments)
-        let mut viable: Vec<(SelectedOverload, usize, usize)> = Vec::new();
+        let mut viable: Vec<Applicable> = Vec::new();
         let mut inference_failed = false;
 
-        'candidates: for (candidate_index, candidate) in group.candidates.iter().enumerate() {
-            let Some(MemberSignature::Function(signature)) = &candidate.signature else {
-                continue;
-            };
-            if group.via_type && !candidate.is_static {
-                continue;
-            }
-            if arguments.len() > signature.parameters.len() {
-                continue;
-            }
-            // named arguments pick their parameter; the rest go by position
-            let Some(parameter_of_argument) =
-                Self::bind_argument_names(arguments, &signature.parameters)
-            else {
-                continue;
-            };
-            // whatever is left unbound must be optional (§12.6.4.2)
-            let omitted = signature
-                .parameters
-                .iter()
-                .enumerate()
-                .filter(|(index, _)| !parameter_of_argument.contains(index))
-                .count();
-            if signature
-                .parameters
-                .iter()
-                .enumerate()
-                .any(|(index, parameter)| {
-                    !parameter_of_argument.contains(&index) && parameter.default_value.is_none()
-                })
-            {
-                continue;
-            }
-            let pairs = |signature: &'_ FunctionSignature| -> Vec<(usize, usize)> {
-                let _ = signature;
-                parameter_of_argument.iter().copied().enumerate().collect()
-            };
-
-            // the method's own generic parameters: explicit, inferred, or absent
-            let (signature, type_arguments) = if candidate.arity > 0 {
-                let keys = method_parameter_keys(&self.system(), candidate);
-                let mut engine = Inference::new(keys.clone());
-
-                if !group.explicit_arguments.is_empty() {
-                    if group.explicit_arguments.len() != keys.len() {
-                        continue;
-                    }
-                    for (key, ty) in keys.iter().zip(&group.explicit_arguments) {
-                        engine.preset(*key, ty.clone());
-                    }
-                } else {
-                    // phase 1: ordinary arguments contribute bounds
-                    for (argument_index, parameter_index) in pairs(signature) {
-                        let argument = &arguments[argument_index];
-                        let parameter = &signature.parameters[parameter_index];
-                        if let ArgumentShape::Value(ty) = &argument.shape {
-                            let system = self.system();
-                            engine.lower_bound(&system, &parameter.parameter_type, ty);
-                        }
-                    }
-                    {
-                        let system = self.system();
-                        engine.fix_where_possible(&system);
-                    }
-
-                    // phase 2: lambda bodies, typed against now-concrete inputs,
-                    // feed their return types back
-                    for (argument_index, parameter_index) in pairs(signature) {
-                        let argument = &arguments[argument_index];
-                        let parameter = &signature.parameters[parameter_index];
-                        let ArgumentShape::Lambda(lambda) = &argument.shape else {
-                            continue;
-                        };
-                        let parameter_type = engine.substitute(&parameter.parameter_type);
-                        let Some(delegate) = self.delegate_signature(&parameter_type) else {
-                            continue 'candidates;
-                        };
-                        if delegate
-                            .parameters
-                            .iter()
-                            .any(|parameter| engine.has_unfixed(&parameter.parameter_type))
-                        {
-                            inference_failed = true;
-                            continue 'candidates;
-                        }
-                        if !Self::lambda_shape_matches(lambda, &delegate) {
-                            continue 'candidates;
-                        }
-                        let Some(returned) = self.probe_lambda_return(lambda, &delegate) else {
-                            continue 'candidates;
-                        };
-                        let system = self.system();
-                        engine.lower_bound(&system, &delegate.return_type, &returned);
-                    }
-                    {
-                        let system = self.system();
-                        engine.fix_where_possible(&system);
-                    }
-                    if !engine.all_fixed() {
-                        inference_failed = true;
-                        continue;
-                    }
-                }
-
-                let type_arguments: Vec<Type> = keys
-                    .iter()
-                    .map(|key| {
-                        engine.substitute(&match key {
-                            InferenceKey::Source(symbol) => Type::TypeParameter(*symbol),
-                            InferenceKey::External(index) => {
-                                Type::ExternalMethodTypeParameter(*index)
-                            }
-                        })
-                    })
-                    .collect();
-                let function = match engine
-                    .substitute_signature(&MemberSignature::Function((*signature).clone()))
-                {
-                    MemberSignature::Function(function) => function,
-                    _ => unreachable!(),
-                };
-                (function, type_arguments)
-            } else {
-                if !group.explicit_arguments.is_empty() {
+        for (candidate_index, candidate) in group.candidates.iter().enumerate() {
+            // normal form first; a candidate applicable that way is not also
+            // considered in its expanded form (§12.6.4.2)
+            match self.try_candidate(group, candidate, candidate_index, arguments, false) {
+                Ok(applicable) => {
+                    viable.push(applicable);
                     continue;
                 }
-                ((*signature).clone(), Vec::new())
-            };
-
-            // applicability
-            let mut exact = 0usize;
-            for (argument_index, parameter_index) in pairs(&signature) {
-                let argument = &arguments[argument_index];
-                let parameter = &signature.parameters[parameter_index];
-                use crate::types::ParameterPassing;
-                let modifier_ok = match parameter.passing {
-                    ParameterPassing::Ref => argument.modifier == Some(ArgumentModifier::Ref),
-                    ParameterPassing::Out => argument.modifier == Some(ArgumentModifier::Out),
-                    ParameterPassing::In => argument
-                        .modifier
-                        .map(|modifier| modifier == ArgumentModifier::In)
-                        .unwrap_or(true),
-                    ParameterPassing::Value => argument.modifier.is_none(),
-                };
-                if !modifier_ok {
-                    continue 'candidates;
-                }
-
-                match &argument.shape {
-                    ArgumentShape::Value(ty) => {
-                        if argument
-                            .out_declaration
-                            .map(|(_, infer)| infer)
-                            .unwrap_or(false)
-                        {
-                            // `out var x` matches any out parameter
-                            continue;
-                        }
-                        if *ty == parameter.parameter_type {
-                            exact += 1;
-                            continue;
-                        }
-                        // `ref`/`out` write through the reference, so the types
-                        // must be identical — a conversion would leave the
-                        // callee writing into a slot of the wrong type (§12.6.4.2)
-                        if matches!(
-                            parameter.passing,
-                            ParameterPassing::Ref | ParameterPassing::Out
-                        ) && !matches!(ty, Type::Error)
-                        {
-                            continue 'candidates;
-                        }
-                        let system = self.system();
-                        let convertible = system
-                            .is_implicitly_convertible(ty, &parameter.parameter_type)
-                            || (argument.is_integer_literal
-                                && system
-                                    .numeric_kind(&parameter.parameter_type)
-                                    .map(|kind| kind.is_integral())
-                                    .unwrap_or(false));
-                        if !convertible {
-                            continue 'candidates;
-                        }
-                    }
-                    ArgumentShape::Lambda(lambda) => {
-                        let Some(delegate) = self.delegate_signature(&parameter.parameter_type)
-                        else {
-                            continue 'candidates;
-                        };
-                        if !Self::lambda_shape_matches(lambda, &delegate) {
-                            continue 'candidates;
-                        }
-                    }
+                Err(failed) => inference_failed |= failed,
+            }
+            let takes_params = matches!(
+                &candidate.signature,
+                Some(MemberSignature::Function(function))
+                    if function.parameters.last().is_some_and(|parameter| parameter.is_params)
+            );
+            if takes_params {
+                match self.try_candidate(group, candidate, candidate_index, arguments, true) {
+                    Ok(applicable) => viable.push(applicable),
+                    Err(failed) => inference_failed |= failed,
                 }
             }
-            viable.push((
-                SelectedOverload {
-                    signature,
-                    candidate: candidate_index,
-                    type_arguments,
-                    parameter_of_argument,
-                },
-                exact,
-                omitted,
-            ));
         }
 
-        // most exact matches wins; among those, the one that fills in the
-        // fewest defaults (§12.6.4.3: a candidate needing no optional
-        // parameters is better than one that does)
-        let best = viable
-            .iter()
-            .map(|(_, exact, omitted)| (*exact, usize::MAX - *omitted))
-            .max();
-        let Some(best) = best else {
+        // most exact matches wins; then normal form over expanded; then the
+        // one that fills in the fewest defaults (§12.6.4.3)
+        let rank = |applicable: &Applicable| {
+            (
+                applicable.exact,
+                !applicable.expanded,
+                usize::MAX - applicable.omitted,
+            )
+        };
+        let Some(best) = viable.iter().map(rank).max() else {
             return AttemptOutcome::NoMatch { inference_failed };
         };
-
         let mut winners = viable
             .into_iter()
-            .filter(|(_, exact, omitted)| (*exact, usize::MAX - *omitted) == best);
-        let (selected, _, _) = winners.next().unwrap();
+            .filter(|applicable| rank(applicable) == best);
+        let selected = winners.next().unwrap().selected;
         if winners.next().is_some() {
             return AttemptOutcome::Ambiguous;
         }
         AttemptOutcome::Selected(selected)
+    }
+
+    /// One candidate against the arguments, in normal form or — with the
+    /// trailing `params T[]` opened up into one `T` parameter per remaining
+    /// argument — in expanded form. `Err(true)` when type inference is what
+    /// failed (the diagnostic differs), `Err(false)` otherwise.
+    fn try_candidate(
+        &mut self,
+        group: &MethodGroup<'ast>,
+        candidate: &MemberCandidate,
+        candidate_index: usize,
+        arguments: &[CallArgument<'ast>],
+        expanded: bool,
+    ) -> Result<Applicable, bool> {
+        use crate::types::{ParameterPassing, ParameterSignature};
+        let Some(MemberSignature::Function(declared)) = &candidate.signature else {
+            return Err(false);
+        };
+        if group.via_type && !candidate.is_static {
+            return Err(false);
+        }
+
+        let fixed = declared.parameters.len().saturating_sub(1);
+        let working: FunctionSignature = if expanded {
+            let Some(last) = declared
+                .parameters
+                .last()
+                .filter(|parameter| parameter.is_params)
+            else {
+                return Err(false);
+            };
+            let Type::Array { element, rank: 1 } = &last.parameter_type else {
+                return Err(false);
+            };
+            let mut parameters = declared.parameters[..fixed].to_vec();
+            for _ in 0..arguments.len().saturating_sub(fixed) {
+                parameters.push(ParameterSignature {
+                    passing: ParameterPassing::Value,
+                    is_params: false,
+                    parameter_type: (**element).clone(),
+                    name: None,
+                    default_value: None,
+                });
+            }
+            FunctionSignature {
+                return_type: declared.return_type.clone(),
+                parameters,
+            }
+        } else {
+            declared.clone()
+        };
+
+        if arguments.len() > working.parameters.len() {
+            return Err(false);
+        }
+        // named arguments pick their parameter; the rest go by position
+        let Some(parameter_of_argument) = Self::bind_argument_names(arguments, &working.parameters)
+        else {
+            return Err(false);
+        };
+        // whatever is left unbound must be optional (§12.6.4.2); a `params`
+        // parameter left out is the expanded form's business, not a default
+        let omitted = working
+            .parameters
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| !parameter_of_argument.contains(index))
+            .count();
+        if working
+            .parameters
+            .iter()
+            .enumerate()
+            .any(|(index, parameter)| {
+                !parameter_of_argument.contains(&index) && parameter.default_value.is_none()
+            })
+        {
+            return Err(false);
+        }
+        let pairs: Vec<(usize, usize)> =
+            parameter_of_argument.iter().copied().enumerate().collect();
+
+        // the method's own generic parameters: explicit, inferred, or absent
+        let (working, declared, type_arguments) = if candidate.arity > 0 {
+            let keys = method_parameter_keys(&self.system(), candidate);
+            let mut engine = Inference::new(keys.clone());
+
+            if !group.explicit_arguments.is_empty() {
+                if group.explicit_arguments.len() != keys.len() {
+                    return Err(false);
+                }
+                for (key, ty) in keys.iter().zip(&group.explicit_arguments) {
+                    engine.preset(*key, ty.clone());
+                }
+            } else {
+                // phase 1: ordinary arguments contribute bounds
+                for &(argument_index, parameter_index) in &pairs {
+                    let argument = &arguments[argument_index];
+                    let parameter = &working.parameters[parameter_index];
+                    if let ArgumentShape::Value(ty) = &argument.shape {
+                        let system = self.system();
+                        engine.lower_bound(&system, &parameter.parameter_type, ty);
+                    }
+                }
+                {
+                    let system = self.system();
+                    engine.fix_where_possible(&system);
+                }
+
+                // phase 2: lambda bodies, typed against now-concrete inputs,
+                // feed their return types back
+                for &(argument_index, parameter_index) in &pairs {
+                    let argument = &arguments[argument_index];
+                    let parameter = &working.parameters[parameter_index];
+                    let ArgumentShape::Lambda(lambda) = &argument.shape else {
+                        continue;
+                    };
+                    let parameter_type = engine.substitute(&parameter.parameter_type);
+                    let Some(delegate) = self.delegate_signature(&parameter_type) else {
+                        return Err(false);
+                    };
+                    if delegate
+                        .parameters
+                        .iter()
+                        .any(|parameter| engine.has_unfixed(&parameter.parameter_type))
+                    {
+                        return Err(true);
+                    }
+                    if !Self::lambda_shape_matches(lambda, &delegate) {
+                        return Err(false);
+                    }
+                    let Some(returned) = self.probe_lambda_return(lambda, &delegate) else {
+                        return Err(false);
+                    };
+                    let system = self.system();
+                    engine.lower_bound(&system, &delegate.return_type, &returned);
+                }
+                {
+                    let system = self.system();
+                    engine.fix_where_possible(&system);
+                }
+                if !engine.all_fixed() {
+                    return Err(true);
+                }
+            }
+
+            let type_arguments: Vec<Type> = keys
+                .iter()
+                .map(|key| {
+                    engine.substitute(&match key {
+                        InferenceKey::Source(symbol) => Type::TypeParameter(*symbol),
+                        InferenceKey::External(index) => Type::ExternalMethodTypeParameter(*index),
+                    })
+                })
+                .collect();
+            let substitute = |signature: &FunctionSignature| match engine
+                .substitute_signature(&MemberSignature::Function(signature.clone()))
+            {
+                MemberSignature::Function(function) => function,
+                _ => unreachable!(),
+            };
+            (substitute(&working), substitute(declared), type_arguments)
+        } else {
+            if !group.explicit_arguments.is_empty() {
+                return Err(false);
+            }
+            (working, declared.clone(), Vec::new())
+        };
+
+        // applicability
+        let mut exact = 0usize;
+        for &(argument_index, parameter_index) in &pairs {
+            let argument = &arguments[argument_index];
+            let parameter = &working.parameters[parameter_index];
+            let modifier_ok = match parameter.passing {
+                ParameterPassing::Ref => argument.modifier == Some(ArgumentModifier::Ref),
+                ParameterPassing::Out => argument.modifier == Some(ArgumentModifier::Out),
+                ParameterPassing::In => argument
+                    .modifier
+                    .map(|modifier| modifier == ArgumentModifier::In)
+                    .unwrap_or(true),
+                ParameterPassing::Value => argument.modifier.is_none(),
+            };
+            if !modifier_ok {
+                return Err(false);
+            }
+
+            match &argument.shape {
+                ArgumentShape::Value(ty) => {
+                    if argument
+                        .out_declaration
+                        .map(|(_, infer)| infer)
+                        .unwrap_or(false)
+                    {
+                        // `out var x` matches any out parameter
+                        continue;
+                    }
+                    if *ty == parameter.parameter_type {
+                        exact += 1;
+                        continue;
+                    }
+                    // `ref`/`out` write through the reference, so the types
+                    // must be identical — a conversion would leave the
+                    // callee writing into a slot of the wrong type (§12.6.4.2)
+                    if matches!(
+                        parameter.passing,
+                        ParameterPassing::Ref | ParameterPassing::Out
+                    ) && !matches!(ty, Type::Error)
+                    {
+                        return Err(false);
+                    }
+                    let system = self.system();
+                    let convertible = system
+                        .is_implicitly_convertible(ty, &parameter.parameter_type)
+                        || (argument.is_integer_literal
+                            && system
+                                .numeric_kind(&parameter.parameter_type)
+                                .map(|kind| kind.is_integral())
+                                .unwrap_or(false));
+                    if !convertible {
+                        return Err(false);
+                    }
+                }
+                ArgumentShape::Lambda(lambda) => {
+                    let Some(delegate) = self.delegate_signature(&parameter.parameter_type) else {
+                        return Err(false);
+                    };
+                    if !Self::lambda_shape_matches(lambda, &delegate) {
+                        return Err(false);
+                    }
+                }
+            }
+        }
+
+        Ok(Applicable {
+            selected: SelectedOverload {
+                signature: declared,
+                candidate: candidate_index,
+                type_arguments,
+                parameter_of_argument,
+                params_expansion: expanded.then_some(fixed),
+            },
+            exact,
+            omitted,
+            expanded,
+        })
     }
 
     /// The chosen overload's side effects: lambda bodies checked for real,
@@ -2766,8 +2847,30 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 .get(argument_index)
                 .copied()
                 .unwrap_or(argument_index);
-            let Some(parameter) = signature.parameters.get(parameter_index) else {
-                continue;
+            let expanded_element = selected
+                .params_expansion
+                .filter(|&fixed| parameter_index >= fixed)
+                .and_then(|fixed| signature.parameters.get(fixed))
+                .and_then(|parameter| match &parameter.parameter_type {
+                    Type::Array { element, .. } => Some((**element).clone()),
+                    _ => None,
+                });
+            let element_parameter;
+            let parameter = match expanded_element {
+                Some(element) => {
+                    element_parameter = crate::types::ParameterSignature {
+                        passing: crate::types::ParameterPassing::Value,
+                        is_params: false,
+                        parameter_type: element,
+                        name: None,
+                        default_value: None,
+                    };
+                    &element_parameter
+                }
+                None => match signature.parameters.get(parameter_index) {
+                    Some(parameter) => parameter,
+                    None => continue,
+                },
             };
             match &argument.shape {
                 ArgumentShape::Lambda(lambda) => {
@@ -3963,6 +4066,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             signature: selected.signature.clone(),
             type_arguments: selected.type_arguments.clone(),
             parameter_of_argument: selected.parameter_of_argument.clone(),
+            params_expansion: selected.params_expansion,
         };
         let return_type = selected.signature.return_type.clone();
         Some((call, return_type))

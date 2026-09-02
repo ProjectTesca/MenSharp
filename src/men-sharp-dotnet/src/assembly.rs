@@ -203,6 +203,8 @@ pub struct ParameterDefinition<'data> {
     pub flags: u16,
     /// The default value of an optional parameter.
     pub constant: Option<Constant>,
+    /// Carries `System.ParamArrayAttribute`: declared `params T[]`.
+    pub is_params: bool,
 }
 
 impl ParameterDefinition<'_> {
@@ -433,7 +435,16 @@ fn build<'data>(
     let method_owner = owner_of_ranges(&method_lists, raw.methods.len() as u32);
 
     // which rows carry System.Runtime.CompilerServices.ExtensionAttribute
-    let (extension_methods, extension_types) = extension_carriers(raw, strings, &method_owner)?;
+    let (extension_methods, extension_types, _) = attribute_carriers(
+        raw,
+        strings,
+        &method_owner,
+        "System.Runtime.CompilerServices",
+        "ExtensionAttribute",
+    )?;
+    // which Param rows carry System.ParamArrayAttribute (`params T[]`)
+    let (_, _, params_parameters) =
+        attribute_carriers(raw, strings, &method_owner, "System", "ParamArrayAttribute")?;
 
     let mut types = Vec::with_capacity(raw.type_defs.len());
     for (index, row) in raw.type_defs.iter().enumerate() {
@@ -475,6 +486,7 @@ fn build<'data>(
                         name: heap_string(strings, param.name)?,
                         flags: param.flags,
                         constant: param_constants.get(&param_row).cloned(),
+                        is_params: params_parameters.contains(&param_row),
                     };
                 }
             }
@@ -741,26 +753,26 @@ fn build<'data>(
     })
 }
 
-/// The 1-based MethodDef rows and TypeDef rows that carry
-/// `System.Runtime.CompilerServices.ExtensionAttribute`.
-fn extension_carriers(
+/// 1-based rows of one table.
+type RowSet = std::collections::HashSet<u32>;
+
+/// The 1-based MethodDef, TypeDef and Param rows that carry the attribute
+/// `namespace.name` (`ExtensionAttribute`, `ParamArrayAttribute`, ...).
+fn attribute_carriers(
     raw: &RawTables,
     strings: &[u8],
     method_owner: &HashMap<u32, (u32, u32)>,
-) -> Result<
-    (
-        std::collections::HashSet<u32>,
-        std::collections::HashSet<u32>,
-    ),
-    MetadataError,
-> {
-    let mut methods = std::collections::HashSet::new();
-    let mut types = std::collections::HashSet::new();
+    namespace: &str,
+    name: &str,
+) -> Result<(RowSet, RowSet, RowSet), MetadataError> {
+    let mut methods = RowSet::new();
+    let mut types = RowSet::new();
+    let mut params = RowSet::new();
 
     for attribute in &raw.custom_attributes {
         // the attribute type is named by its constructor: a MethodDef in this
         // assembly or a MemberRef into another
-        let is_extension = match attribute.constructor.table {
+        let carries = match attribute.constructor.table {
             tables::METHOD_DEF => {
                 let Some(&(owner, _)) = method_owner.get(&attribute.constructor.row) else {
                     continue;
@@ -768,8 +780,8 @@ fn extension_carriers(
                 let Some(owner) = raw.type_defs.get(owner as usize) else {
                     continue;
                 };
-                heap_string(strings, owner.namespace)? == "System.Runtime.CompilerServices"
-                    && heap_string(strings, owner.name)? == "ExtensionAttribute"
+                heap_string(strings, owner.namespace)? == namespace
+                    && heap_string(strings, owner.name)? == name
             }
             tables::MEMBER_REF => {
                 let Some(member) = attribute
@@ -790,16 +802,15 @@ fn extension_carriers(
                         else {
                             continue;
                         };
-                        heap_string(strings, reference.namespace)?
-                            == "System.Runtime.CompilerServices"
-                            && heap_string(strings, reference.name)? == "ExtensionAttribute"
+                        heap_string(strings, reference.namespace)? == namespace
+                            && heap_string(strings, reference.name)? == name
                     }
                     _ => false,
                 }
             }
             _ => false,
         };
-        if !is_extension {
+        if !carries {
             continue;
         }
 
@@ -810,11 +821,14 @@ fn extension_carriers(
             tables::TYPE_DEF => {
                 types.insert(attribute.parent.row);
             }
+            tables::PARAM => {
+                params.insert(attribute.parent.row);
+            }
             _ => {}
         }
     }
 
-    Ok((methods, types))
+    Ok((methods, types, params))
 }
 
 /// A coded TypeDefOrRef into a [`TypeSig`]. TypeSpecs are already parsed, so a
