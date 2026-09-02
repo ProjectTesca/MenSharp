@@ -3321,3 +3321,271 @@ fn index_initializers_write_through_the_indexer() {
     };
     assert_eq!(int_of(&emulator, "result"), 75);
 }
+
+#[test]
+fn structs_are_copied_where_csharp_copies_them() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public struct Point
+            {
+                public int x;
+                public int y;
+                public Point(int x, int y) { this.x = x; this.y = y; }
+                public void Move(int dx) { x += dx; }
+                public int Sum() { return x + y; }
+            }
+
+            public struct Line
+            {
+                public Point a;   // a struct inside a struct
+                public Point b;
+            }
+
+            public class Holder
+            {
+                public Point pos;           // default is an instance, not null
+                public Point Prop { get; set; }
+                public Point Copy() { return pos; }   // returns a copy
+            }
+
+            public class Program
+            {
+                public static int assigned;
+                public static int byValue;
+                public static int inPlace;
+                public static int elementInPlace;
+                public static int nested;
+                public static int fieldDefault;
+                public static int arrayDefaults;
+                public static int viaProperty;
+                public static int listCopy;
+                public static int boxed;
+                public static int returned;
+
+                static void Bump(Point p) { p.x = 100; }
+                static Point Make() { Point p = new Point(5, 6); return p; }
+
+                public static void Main()
+                {
+                    // b = a copies: writing b leaves a alone
+                    Point a = new Point(1, 2);
+                    Point b = a;
+                    b.x = 9;
+                    assigned = a.x * 10 + b.x;          // 19
+
+                    // by value: the callee's writes stay in the callee
+                    Bump(a);
+                    byValue = a.x;                      // 1
+
+                    // a method on a variable works in place
+                    a.Move(3);
+                    inPlace = a.x;                      // 4
+
+                    // an array element is a variable: in place too
+                    var points = new Point[2];
+                    points[0].x = 7;
+                    points[0].Move(1);
+                    Point taken = points[0];
+                    taken.x = 0;
+                    elementInPlace = points[0].x;       // 8
+
+                    // nested structs copy all the way down
+                    Line l1 = default;
+                    l1.a.x = 1;
+                    Line l2 = l1;
+                    l2.a.x = 2;
+                    nested = l1.a.x * 10 + l2.a.x;      // 12
+
+                    // a struct field of a class holds an instance from the start
+                    var holder = new Holder();
+                    holder.pos.y = 5;
+                    fieldDefault = holder.pos.y + holder.pos.x;   // 5
+
+                    // new S[n] is n defaults, each its own
+                    var many = new Point[3];
+                    many[1].x = 4;
+                    arrayDefaults = many[0].x + many[1].x + many[2].x;   // 4
+
+                    // a property returns a copy; the getter result is not the field
+                    holder.Prop = new Point(1, 1);
+                    Point fromProp = holder.Prop;
+                    fromProp.x = 50;
+                    Point again = holder.Copy();
+                    again.y = 50;
+                    viaProperty = holder.Prop.x + holder.pos.y;   // 1 + 5 = 6
+
+                    // List<T> stores copies and hands out copies
+                    var list = new List<Point>();
+                    list.Add(a);
+                    a.x = 0;
+                    Point got = list[0];
+                    got.x = 0;
+                    listCopy = list[0].x;               // 4
+
+                    // boxing copies
+                    Point p = new Point(2, 3);
+                    object o = p;
+                    p.x = 0;
+                    Point back = (Point)o;
+                    boxed = back.x;                     // 2
+
+                    returned = Make().Sum();            // 11
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "assigned"), 19);
+    assert_eq!(int_of(&emulator, "byValue"), 1);
+    assert_eq!(int_of(&emulator, "inPlace"), 4);
+    assert_eq!(int_of(&emulator, "elementInPlace"), 8);
+    assert_eq!(int_of(&emulator, "nested"), 12);
+    assert_eq!(int_of(&emulator, "fieldDefault"), 5);
+    assert_eq!(int_of(&emulator, "arrayDefaults"), 4);
+    assert_eq!(int_of(&emulator, "viaProperty"), 6);
+    assert_eq!(int_of(&emulator, "listCopy"), 4);
+    assert_eq!(int_of(&emulator, "boxed"), 2);
+    assert_eq!(int_of(&emulator, "returned"), 11);
+}
+
+#[test]
+fn structs_get_field_wise_equals_and_hash_code() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public struct Cell
+            {
+                public int row;
+                public int col;
+                public string tag;
+            }
+
+            public struct Wrapped
+            {
+                public Cell inner;   // nested: equality recurses
+            }
+
+            // a struct that declares its own: honoured over the synthesized one
+            public struct Loose
+            {
+                public int value;
+                public override bool Equals(object other) { return true; }
+                public override int GetHashCode() { return 7; }
+            }
+
+            public class Program
+            {
+                public static bool equal;
+                public static bool different;
+                public static bool sameHash;
+                public static bool notNull;
+                public static bool notInt;
+                public static bool nestedEqual;
+                public static int dictionary;
+                public static bool declared;
+
+                public static void Main()
+                {
+                    Cell a = new Cell { row = 1, col = 2, tag = "x" };
+                    Cell b = new Cell { row = 1, col = 2, tag = "x" };
+                    Cell c = new Cell { row = 1, col = 3, tag = "x" };
+                    equal = a.Equals(b);
+                    different = !a.Equals(c);
+                    sameHash = a.GetHashCode() == b.GetHashCode();
+                    notNull = !a.Equals(null);
+                    notInt = !a.Equals(5);
+
+                    Wrapped w1 = new Wrapped { inner = a };
+                    Wrapped w2 = new Wrapped { inner = b };
+                    nestedEqual = w1.Equals(w2);
+
+                    // two equal-valued keys are one entry
+                    var counts = new Dictionary<Cell, int>();
+                    counts[a] = 10;
+                    counts[b] = 20;
+                    counts[c] = 1;
+                    dictionary = counts.Count * 100 + counts[a];   // 2 * 100 + 20
+
+                    Loose l1 = new Loose { value = 1 };
+                    Loose l2 = new Loose { value = 2 };
+                    declared = l1.Equals(l2) && l1.GetHashCode() == 7;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    for name in [
+        "equal",
+        "different",
+        "sameHash",
+        "notNull",
+        "notInt",
+        "nestedEqual",
+        "declared",
+    ] {
+        assert!(
+            matches!(emulator.value_of(name), Some(Value::Boolean(true))),
+            "{name} = {:?}",
+            emulator.value_of(name)
+        );
+    }
+    assert_eq!(int_of(&emulator, "dictionary"), 220);
+}
+
+#[test]
+fn writing_a_member_of_a_struct_copy_is_an_error() {
+    // `holder.Prop.x = 1` changes a copy the getter returned — CS1612
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public struct Point { public int x; }
+            public class Holder { public Point Prop { get; set; } }
+            public class Program
+            {
+                public static void Main()
+                {
+                    var holder = new Holder();
+                    holder.Prop.x = 1;
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output
+            .errors
+            .iter()
+            .any(|error| error.message.contains("CS1612")),
+        "{:#?}",
+        output.errors
+    );
+}

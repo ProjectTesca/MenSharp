@@ -5,10 +5,11 @@
 // and value type, like List<T>. The layout mirrors dotnet/runtime's
 // Dictionary (MIT): a bucket array of chain heads over parallel entry
 // arrays (hash, next, key, value) with a free list for removed entries.
-// Hashing and equality go through `object.GetHashCode()`/`object.Equals()`,
-// which are whitelisted externs and dispatch virtually on the boxed key —
-// so strings, ints, enums and engine structs hash by value and classes of
-// your own by identity, exactly as the real one does without a comparer.
+// Hashing and equality call `GetHashCode()`/`Equals()` on the key: for
+// engine and BCL types those are the whitelisted `object` externs, which
+// dispatch on the boxed value (strings, ints, enums, `Vector3` hash by
+// value); a struct of your own gets the compiler's field-wise versions and
+// a class its override or reference identity — as without a comparer.
 //
 // Without exceptions (M# has none yet) the failure cases are defined
 // instead of thrown: `this[missing]` reads `default(TValue)` (use
@@ -72,16 +73,18 @@ namespace System.Collections.Generic
 
         public int Count => count - freeCount;
 
+        // on the key's own static type, so a struct key (synthesized
+        // field-wise Equals/GetHashCode) or a class overriding them is
+        // honoured; for everything else these are the `object` externs,
+        // which dispatch on the box
         private static int Hash(TKey key)
         {
-            object boxed = key;
-            return boxed.GetHashCode() & 0x7FFFFFFF;
+            return key.GetHashCode() & 0x7FFFFFFF;
         }
 
         private static bool KeyEquals(TKey a, TKey b)
         {
-            object boxed = a;
-            return boxed.Equals(b);
+            return a.Equals(b);
         }
 
         private int FindEntry(TKey key)
@@ -189,9 +192,9 @@ namespace System.Collections.Generic
             {
                 if (hashes[i] >= 0)
                 {
-                    object boxed = values[i];
-                    if (boxed == null) { if (value == null) { return true; } }
-                    else if (boxed.Equals(value)) { return true; }
+                    TValue stored = values[i];
+                    if (stored == null) { if (value == null) { return true; } }
+                    else if (stored.Equals(value)) { return true; }
                 }
             }
             return false;

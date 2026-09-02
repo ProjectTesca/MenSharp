@@ -98,7 +98,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Statement::Switch(statement) => self.lower_switch(ctx, statement),
             Statement::Return(ReturnStatement { value, span, .. }) => {
                 if let Some(value) = value {
-                    let lowered = self.lower_expression(ctx, value);
+                    // a returned local or parameter is not copied: its slot
+                    // is dead once the function returns. A field or element
+                    // stays alive, so a struct read from one is copied
+                    let is_local = match value {
+                        Expression::Primary(primary) if primary.chain.is_empty() => {
+                            match &primary.left {
+                                PrimaryLeft::Identifier { name, .. } => {
+                                    ctx.lookup(name.value).is_some()
+                                }
+                                _ => false,
+                            }
+                        }
+                        _ => false,
+                    };
+                    let lowered = if is_local {
+                        self.lower_expression(ctx, value)
+                    } else {
+                        self.owned_value(ctx, value)
+                    };
                     match (lowered, ctx.result) {
                         (Some(value), Some(result)) => self.copy(value, result),
                         (Some(_), None) => {}
@@ -181,7 +199,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let ty = self.substitute(&ty, &ctx.key.bindings);
             let slot = self.temp_for(&ty);
             if let Some(value) = initializer
-                && let Some(lowered) = self.lower_expression(ctx, value)
+                && let Some(lowered) = self.owned_value(ctx, value)
             {
                 self.copy(lowered, slot);
             }
@@ -598,7 +616,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    fn fresh_label(&mut self, prefix: &str) -> LabelId {
+    pub(super) fn fresh_label(&mut self, prefix: &str) -> LabelId {
         self.temp_counter += 1;
         self.program
             .add_label(format!("{prefix}_{}", self.temp_counter))
@@ -802,6 +820,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.extern_type_name(ty)
                 .is_some_and(|mangled| mangled == name)
         };
+
+        // a value type compared with `null`: never equal (C# folds this too)
+        if matches!(operator, Equal | NotEqual) {
+            let value_type = match (left.1, right.1) {
+                (Type::Null, ty) | (ty, Type::Null) => ty,
+                _ => &Type::Error,
+            };
+            if !matches!(value_type, Type::Null | Type::Error | Type::Nullable(_))
+                && !self.is_reference_type(value_type)
+                && self.heap_type(value_type) != "SystemObject"
+            {
+                return Some(self.constant(
+                    "SystemBoolean",
+                    if operator == Equal { "false" } else { "true" },
+                    HeapInit::Boolean(operator != Equal),
+                ));
+            }
+        }
 
         // string concatenation
         if operator == Add && system_is(result_type, "SystemString") {
@@ -1054,7 +1090,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         assignment: &'ast men_sharp_parser::ast::AssignmentExpression<'ast, 'ast>,
     ) -> Option<DataId> {
         let value_expression = assignment.value.as_ref().ok()?;
-        let value = self.lower_expression(ctx, value_expression)?;
+        let value = self.owned_value(ctx, value_expression)?;
         let value_type = self.type_of(ctx, value_expression);
 
         let final_value = if assignment.operator.value == AssignmentOperator::Assign {
@@ -1136,7 +1172,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         let mut piece = self.lower_left(ctx, &primary.left);
         for right in &primary.chain[..count - 1] {
+            let receiver_was_array = matches!(&piece, Piece::Value(_, Type::Array { .. }));
             piece = self.apply_right(ctx, piece, right);
+            if !self.check_write_through_copy(ctx, &piece, right, receiver_was_array) {
+                return Place::Error;
+            }
         }
         let last = &primary.chain[count - 1];
         let receiver = piece.receiver();
@@ -1867,7 +1907,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .map(|ty| self.substitute(&ty, &ctx.key.bindings));
                 match ty {
                     Some(ty) => {
-                        let slot = self.default_value(&ty);
+                        let slot = self.default_value_in(ctx, &ty, span.clone());
                         Piece::Value(slot, ty)
                     }
                     None => {
@@ -2204,7 +2244,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 Some(ArgumentModifier::In) | None => match &argument.value {
                     ArgumentValue::Expression(expression) => {
-                        match self.lower_expression(ctx, expression) {
+                        match self.owned_value(ctx, expression) {
                             Some(value) => values.push(value),
                             None => return Piece::Error,
                         }
@@ -2323,6 +2363,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             MemberOrigin::External { member, .. } => {
                 let member_name = member.name.clone();
+                // `Equals`/`GetHashCode` on a struct or class of the user's:
+                // the declared override, or the synthesized field-wise
+                // version for a struct — never the reference-identity extern
+                if matches!(member_name.as_str(), "Equals" | "GetHashCode")
+                    && let Some((slot, receiver_type)) = &receiver
+                {
+                    let receiver_type = self.substitute(receiver_type, &ctx.key.bindings);
+                    if let Some(piece) = self.object_member_override(
+                        ctx,
+                        &member_name,
+                        (*slot, receiver_type),
+                        &values,
+                        &return_type,
+                        span.clone(),
+                    ) {
+                        return piece;
+                    }
+                }
                 let Some(signature) = self.external_signature(ctx, call, &span) else {
                     return Piece::Error;
                 };
@@ -2619,7 +2677,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     let mut values = Vec::new();
                     for argument in arguments {
                         if let ArgumentValue::Expression(expression) = &argument.value {
-                            match self.lower_expression(ctx, expression) {
+                            match self.owned_value(ctx, expression) {
                                 Some(value) => values.push(value),
                                 None => return Piece::Error,
                             }
@@ -2672,7 +2730,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .unwrap_or(&[])
                 {
                     if let ArgumentValue::Expression(expression) = &argument.value {
-                        match self.lower_expression(ctx, expression) {
+                        match self.owned_value(ctx, expression) {
                             Some(value) => values.push(value),
                             None => return Piece::Error,
                         }
@@ -2750,7 +2808,41 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .find(|signature| self.nodes.has_signature(signature))
             .cloned()
             .unwrap_or_else(|| candidates[1].clone());
-        self.call_extern(ctx, &signature, &[size, slot], span);
+        self.call_extern(ctx, &signature, &[size, slot], span.clone());
+
+        // `new S[n]` holds n default values in C#, and a struct's default is
+        // an instance — so fill the array, one fresh instance per element
+        if let Type::Array { element, rank: 1 } = array_type
+            && self.is_source_struct(element)
+        {
+            let element = (**element).clone();
+            let index = self.temp("SystemInt32");
+            let zero = self.int_constant(0);
+            let one = self.int_constant(1);
+            self.copy(zero, index);
+            let head = self.fresh_label("fill_head");
+            let done = self.fresh_label("fill_done");
+            let condition = self.temp("SystemBoolean");
+            self.program.code.push(Op::Label(head));
+            self.call_extern(
+                ctx,
+                "SystemInt32.__op_LessThan__SystemInt32_SystemInt32__SystemBoolean",
+                &[index, size, condition],
+                span.clone(),
+            );
+            self.program.code.push(Op::Push(condition));
+            self.program.code.push(Op::JumpIfFalse(Target::Label(done)));
+            let value = self.allocate_default_struct(ctx, &element, span.clone());
+            self.array_set(ctx, slot, index, value, array_type, span.clone());
+            self.call_extern(
+                ctx,
+                "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32",
+                &[index, one, index],
+                span.clone(),
+            );
+            self.program.code.push(Op::Jump(Target::Label(head)));
+            self.program.code.push(Op::Label(done));
+        }
         slot
     }
 
@@ -2768,7 +2860,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         for (position, element) in elements.iter().enumerate() {
             if let CollectionElement::Expression(expression) = element
-                && let Some(value) = self.lower_expression(ctx, expression)
+                && let Some(value) = self.owned_value(ctx, expression)
             {
                 let index = self.int_constant(position as i32);
                 self.array_set(ctx, array, index, value, array_type, span.clone());
@@ -2816,7 +2908,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     };
                     let mut values = Vec::with_capacity(expressions.len());
                     for expression in expressions {
-                        match self.lower_expression(ctx, expression) {
+                        match self.owned_value(ctx, expression) {
                             Some(value) => values.push(value),
                             None => return,
                         }
@@ -2905,7 +2997,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         // the checker already said why
                         _ => continue,
                     };
-                    let Some(lowered) = self.lower_expression(ctx, value) else {
+                    let Some(lowered) = self.owned_value(ctx, value) else {
                         continue;
                     };
                     self.write_place(ctx, place, lowered, span.clone());
@@ -3095,7 +3187,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// The corlib type as the semantic model sees it (external `System.X`),
     /// used to type literal slots.
-    fn corlib_type(&self, name: &str) -> Type {
+    pub(super) fn corlib_type(&self, name: &str) -> Type {
         match self.external.find_type(&["System"], name, 0) {
             Some(id) => Type::Named {
                 target: TypeTarget::External(id),

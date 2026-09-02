@@ -135,6 +135,12 @@ enum Role {
     /// The synthesized parameterless constructor of a class with none declared
     /// (runs field initializers). `symbol` is the class.
     DefaultConstructor,
+    /// The synthesized field-wise `bool Equals(object)` of a struct that
+    /// declares none. `symbol` is the struct.
+    StructEquals,
+    /// The synthesized field-wise `int GetHashCode()` of a struct that
+    /// declares none. `symbol` is the struct.
+    StructHashCode,
     /// The synthesized virtual-dispatch stub for `symbol`: compares the
     /// receiver's type id and jumps to the right override. A role of its own so
     /// it never collides with the method's own body — which it would otherwise
@@ -2490,3 +2496,4 @@ fn event_slot_type(dotnet: &str) -> String {
 
 mod expressions;
 mod functions;
+mod structs;

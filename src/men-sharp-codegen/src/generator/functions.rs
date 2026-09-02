@@ -44,6 +44,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 (parameters, Type::Void)
             }
             (Role::DefaultConstructor, _) => (Vec::new(), Type::Void),
+            (Role::StructEquals, _) => (
+                vec![self.corlib_type("Object")],
+                self.corlib_type("Boolean"),
+            ),
+            (Role::StructHashCode, _) => (Vec::new(), self.corlib_type("Int32")),
             _ => (Vec::new(), Type::Void),
         };
         let parameters = parameters
@@ -61,7 +66,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return false;
         }
         match key.role {
-            Role::Constructor | Role::DefaultConstructor => true,
+            Role::Constructor
+            | Role::DefaultConstructor
+            | Role::StructEquals
+            | Role::StructHashCode => true,
             _ => !self.declarations.table.symbol(key.symbol).is_static,
         }
     }
@@ -74,6 +82,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::Setter => name.push_str("_set"),
             Role::Constructor => name.push_str("_ctor"),
             Role::DefaultConstructor => name.push_str("_defaultctor"),
+            Role::StructEquals => name.push_str("_equals"),
+            Role::StructHashCode => name.push_str("_hashcode"),
             Role::Dispatcher => name.push_str("_dispatch"),
         }
         for (_, ty) in &key.bindings {
@@ -206,6 +216,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             (Role::DefaultConstructor, _) => {
                 self.emit_field_initializers(&mut ctx);
             }
+            (Role::StructEquals, _) => self.emit_struct_equals(&mut ctx),
+            (Role::StructHashCode, _) => self.emit_struct_hash_code(&mut ctx),
             (Role::Constructor, Some(SyntaxRef::Constructor(declaration))) => {
                 self.bind_parameters(
                     &mut ctx,
@@ -441,13 +453,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     _ => continue,
                 };
                 if !self.is_reference_type(&field_type) {
-                    let value = self.default_value(&field_type);
+                    let value = self.default_value_in(ctx, &field_type, 0..0);
                     let index = self.int_constant(slot_index as i32);
                     self.set_element(ctx, object, index, value, 0..0);
                 }
                 continue;
             };
-            if let Some(value) = self.lower_expression(ctx, initializer) {
+            if let Some(value) = self.owned_value(ctx, initializer) {
                 let index = self.int_constant(slot_index as i32);
                 self.set_element(ctx, object, index, value, 0..0);
             }

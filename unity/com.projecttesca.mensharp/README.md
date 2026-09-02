@@ -282,12 +282,34 @@ classes by identity, as in .NET. Since M# has no exceptions yet, the cases
 that would throw are defined instead: `dictionary[missingKey]` reads
 `default`, `Add` on a present key overwrites.
 
+## Structs
+
+Your own structs are values, as in C#: assignment, argument passing, returning
+a field, storing into a field or element, and boxing all copy; writing a
+member of a variable, an array element or a field changes it in place.
+Writing a member of a struct that a property, indexer or method returned is
+the C# error it is (CS1612), not a silently lost write.
+
+```csharp
+public struct Point { public int x, y; public void Move(int dx) { x += dx; } }
+
+Point a = new Point { x = 1 };
+Point b = a; b.x = 9;      // a.x is still 1
+points[0].Move(1);          // in place
+var byKey = new Dictionary<Point, string>();   // Equals/GetHashCode are field-wise
+```
+
+Udon has no user types, so a struct is an `object[]` copied at exactly those
+points — each copy is an allocation. Structs without their own
+`Equals`/`GetHashCode` get field-wise ones, so they work as dictionary keys;
+`==` on a struct still needs an operator, which is not supported yet.
+
 ## Not supported yet
 
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- exceptions and user-defined structs;
+- exceptions;
 - pattern matching in `switch` beyond constant labels;
 - the bare declaration shorthand `int[] x = { 1, 2 };` — write
   `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.

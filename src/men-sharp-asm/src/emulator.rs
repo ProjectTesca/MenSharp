@@ -483,6 +483,38 @@ impl Emulator {
                 Ok(())
             }
             // ---- Object identity / equality ----
+            "SystemObject.__GetType__SystemType" => {
+                let args = self.pop_arguments(2)?;
+                let name = match &self.heap[args[0]] {
+                    Value::Null => {
+                        return Err(EmulatorError::TypeError("GetType on null".to_string()));
+                    }
+                    Value::Boolean(_) => "SystemBoolean",
+                    Value::Int32(_) => "SystemInt32",
+                    Value::Int64(_) => "SystemInt64",
+                    Value::UInt32(_) => "SystemUInt32",
+                    Value::Single(_) => "SystemSingle",
+                    Value::Double(_) => "SystemDouble",
+                    Value::Char(_) => "SystemChar",
+                    Value::Str(_) => "SystemString",
+                    Value::Array(_) => "SystemObjectArray",
+                    Value::Type(_) => "SystemType",
+                    Value::SelfComponent(name) => &name.clone(),
+                };
+                self.heap[args[1]] = Value::Type(Rc::from(name));
+                Ok(())
+            }
+            "SystemType.__op_Equality__SystemType_SystemType__SystemBoolean"
+            | "SystemType.__op_Inequality__SystemType_SystemType__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let equal = match (&self.heap[args[0]], &self.heap[args[1]]) {
+                    (Value::Type(a), Value::Type(b)) => a == b,
+                    (Value::Null, Value::Null) => true,
+                    _ => false,
+                };
+                self.heap[args[2]] = Value::Boolean(equal == signature.contains("op_Equality"));
+                Ok(())
+            }
             "SystemObject.__GetHashCode__SystemInt32" => {
                 let args = self.pop_arguments(2)?;
                 let hash = match &self.heap[args[0]] {
