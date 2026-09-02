@@ -3124,12 +3124,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
             Some(Initializer::Collection { elements, .. }) => {
-                // element checks only; matching them against Add overloads or the
-                // array element type follows later
-                for element in *elements {
-                    if let CollectionElement::Expression(expression) = element {
-                        let value_type = self.check_expression(expression);
-                        if let Type::Array { element, .. } = ty {
+                if let Type::Array { element, .. } = ty {
+                    for item in *elements {
+                        if let CollectionElement::Expression(expression) = item {
+                            let value_type = self.check_expression(expression);
                             let literal = Self::is_integer_literal(expression);
                             self.require_convertible(
                                 &value_type,
@@ -3139,9 +3137,92 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             );
                         }
                     }
+                    return;
+                }
+                if matches!(ty, Type::Error | Type::Dynamic) {
+                    return;
+                }
+                // `new C { a, b }` is `Add(a); Add(b);` (§12.8.17.4): each
+                // element is one overload resolution against the type's `Add`,
+                // recorded on the element node for the code generator
+                for item in *elements {
+                    self.check_collection_element(item, ty);
                 }
             }
             None => {}
+        }
+    }
+
+    fn check_collection_element(
+        &mut self,
+        item: &'ast men_sharp_parser::ast::CollectionElement<'ast, 'ast>,
+        collection: &Type,
+    ) {
+        use men_sharp_parser::ast::{CollectionElement, Initializer};
+        let (arguments, span): (Vec<CallArgument<'ast>>, Range<usize>) = match item {
+            CollectionElement::Expression(expression) => {
+                (vec![self.plain_argument(expression)], expression.span())
+            }
+            // `{ k, v }`: one `Add` with several arguments
+            CollectionElement::Nested(Initializer::Collection { elements, span }) => {
+                let mut arguments = Vec::with_capacity(elements.len());
+                for inner in *elements {
+                    match inner {
+                        CollectionElement::Expression(expression) => {
+                            arguments.push(self.plain_argument(expression));
+                        }
+                        CollectionElement::Nested(initializer) => {
+                            self.error(
+                                SemanticErrorKind::UnsupportedExpression,
+                                initializer.span(),
+                            );
+                            return;
+                        }
+                    }
+                }
+                (arguments, span.clone())
+            }
+            CollectionElement::Nested(initializer) => {
+                self.error(SemanticErrorKind::UnsupportedExpression, initializer.span());
+                return;
+            }
+        };
+        let candidates: Vec<MemberCandidate> = self
+            .system()
+            .members_named(collection, "Add")
+            .into_iter()
+            .filter(|candidate| candidate.kind == SymbolKind::Method && !candidate.is_static)
+            .collect();
+        if candidates.is_empty() {
+            let kind = SemanticErrorKind::UnknownMember {
+                type_name: self.display(collection),
+            };
+            self.error(kind, span);
+            return;
+        }
+        let group = MethodGroup {
+            candidates,
+            explicit_arguments: Vec::new(),
+            via_type: false,
+            name: "Add",
+            receiver: Some(collection.clone()),
+            allow_extensions: false,
+            receiver_display: self.display(collection),
+            span: span.clone(),
+        };
+        self.resolve_call(group, arguments, &span, Some(EntityID::from(item)));
+    }
+
+    /// A by-value argument built from a bare expression (no `Argument` node:
+    /// collection-initializer elements).
+    fn plain_argument(&mut self, expression: &'ast Expression<'ast, 'ast>) -> CallArgument<'ast> {
+        CallArgument {
+            shape: ArgumentShape::Value(self.check_expression(expression)),
+            expression: Some(expression),
+            modifier: None,
+            is_integer_literal: Self::is_integer_literal(expression),
+            out_declaration: None,
+            span: expression.span(),
         }
     }
 

@@ -2203,6 +2203,35 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 },
             }
         }
+        self.dispatch_call(
+            ctx,
+            call,
+            receiver,
+            values,
+            write_backs,
+            source_by_ref,
+            span,
+            non_virtual,
+        )
+    }
+
+    /// The second half of a call: arguments already evaluated (`values`, one
+    /// slot each, `ref`/`out` stand-ins included), bind the resolved member and
+    /// emit it. Collection initializers and `foreach` come in here directly,
+    /// since their `Add`/`MoveNext` calls have no argument syntax.
+    #[allow(clippy::too_many_arguments)]
+    fn dispatch_call(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        receiver: Option<(DataId, Type)>,
+        mut values: Vec<DataId>,
+        write_backs: Vec<(Place, DataId)>,
+        source_by_ref: Vec<(usize, Place)>,
+        span: Range<usize>,
+        non_virtual: bool,
+    ) -> Piece {
+        let parameter_offset = usize::from(call.is_extension);
         if call.is_extension {
             let Some((slot, _)) = &receiver else {
                 self.error(ctx, "internal: extension call without a receiver", span);
@@ -2611,7 +2640,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             }
 
-            self.apply_object_initializer(ctx, object, &created, new_expression, span);
+            self.apply_initializer(ctx, object, &created, new_expression, span);
             return Piece::Value(object, created);
         }
 
@@ -2656,7 +2685,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let out = self.temp_for(&created);
                 let mut pushed = values;
                 pushed.push(out);
-                self.call_extern(ctx, &extern_signature, &pushed, span);
+                self.call_extern(ctx, &extern_signature, &pushed, span.clone());
+                self.apply_initializer(ctx, out, &created, new_expression, span);
                 Piece::Value(out, created)
             }
             _ => {
@@ -2714,7 +2744,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    fn apply_object_initializer(
+    /// `new T { ... }` after construction: an object initializer writes
+    /// fields, a collection initializer is one `Add` call per element.
+    fn apply_initializer(
         &mut self,
         ctx: &mut Ctx<'ast>,
         object: DataId,
@@ -2722,18 +2754,65 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         new_expression: &'ast NewExpression<'ast, 'ast>,
         span: Range<usize>,
     ) {
-        use men_sharp_parser::ast::{Initializer, InitializerTarget};
-        let Some(initializer) = &new_expression.initializer else {
-            return;
-        };
-        let Initializer::Object { elements, .. } = initializer else {
-            self.error(
-                ctx,
-                "collection initializers are not supported by the Udon backend yet",
-                span,
-            );
-            return;
-        };
+        use men_sharp_parser::ast::{CollectionElement, Initializer};
+        match &new_expression.initializer {
+            None => {}
+            Some(Initializer::Object { elements, .. }) => {
+                self.apply_object_initializer(ctx, object, created, elements, span);
+            }
+            Some(Initializer::Collection { elements, .. }) => {
+                for item in *elements {
+                    let Some(ResolvedTarget::Call(add)) =
+                        self.bodies.targets.get(&EntityID::from(item)).cloned()
+                    else {
+                        // the checker already said why
+                        continue;
+                    };
+                    // `a` is `Add(a)`; `{ k, v }` is `Add(k, v)`
+                    let expressions: Vec<&'ast Expression<'ast, 'ast>> = match item {
+                        CollectionElement::Expression(expression) => vec![expression],
+                        CollectionElement::Nested(Initializer::Collection { elements, .. }) => {
+                            elements
+                                .iter()
+                                .filter_map(|element| match element {
+                                    CollectionElement::Expression(expression) => Some(expression),
+                                    CollectionElement::Nested(_) => None,
+                                })
+                                .collect()
+                        }
+                        CollectionElement::Nested(Initializer::Object { .. }) => continue,
+                    };
+                    let mut values = Vec::with_capacity(expressions.len());
+                    for expression in expressions {
+                        match self.lower_expression(ctx, expression) {
+                            Some(value) => values.push(value),
+                            None => return,
+                        }
+                    }
+                    self.dispatch_call(
+                        ctx,
+                        &add,
+                        Some((object, created.clone())),
+                        values,
+                        Vec::new(),
+                        Vec::new(),
+                        span.clone(),
+                        false,
+                    );
+                }
+            }
+        }
+    }
+
+    fn apply_object_initializer(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        object: DataId,
+        created: &Type,
+        elements: &'ast [men_sharp_parser::ast::ObjectInitializerElement<'ast, 'ast>],
+        span: Range<usize>,
+    ) {
+        use men_sharp_parser::ast::InitializerTarget;
         let Type::Named {
             target: TypeTarget::Source(class),
             ..
@@ -2749,8 +2828,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(layout) = self.layout_of(created) else {
             return;
         };
-        for element in *elements {
+        for element in elements {
             let InitializerTarget::Member(name) = &element.target else {
+                self.error(
+                    ctx,
+                    "`[index] = value` in an object initializer is not supported by the \
+                     Udon backend yet",
+                    element.span.clone(),
+                );
                 continue;
             };
             let member = self
@@ -2771,11 +2856,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 );
                 continue;
             };
-            if let Ok(InitializerValue::Expression(value)) = &element.value
-                && let Some(lowered) = self.lower_expression(ctx, value)
-            {
-                let index = self.int_constant(index as i32);
-                self.set_element(ctx, object, index, lowered, span.clone());
+            match &element.value {
+                Ok(InitializerValue::Expression(value)) => {
+                    if let Some(lowered) = self.lower_expression(ctx, value) {
+                        let index = self.int_constant(index as i32);
+                        self.set_element(ctx, object, index, lowered, span.clone());
+                    }
+                }
+                Ok(InitializerValue::Nested(nested)) => {
+                    self.error(
+                        ctx,
+                        "a nested initializer inside an object initializer is not supported \
+                         by the Udon backend yet: assign the member a `new` expression",
+                        nested.span(),
+                    );
+                }
+                Err(()) => {}
             }
         }
     }

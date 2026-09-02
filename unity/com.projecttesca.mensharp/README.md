@@ -256,8 +256,8 @@ C# itself binds to, so a class of your own is enumerable without implementing
 any interface:
 
 ```csharp
-var names = new List<string>();
-names.Add("a");
+var names = new List<string> { "a", "b" };   // collection initializer = Add calls
+names.Add("c");
 foreach (var name in names) { ... }
 foreach (char c in "text") { ... }
 ```

@@ -2975,3 +2975,111 @@ fn foreach_over_something_without_an_enumerator_is_an_error() {
         bodies.errors
     );
 }
+
+#[test]
+fn collection_initializers_are_add_calls() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            // any type with an `Add` takes a collection initializer; a
+            // `{ k, v }` element picks the two-argument overload
+            public class Pairs
+            {
+                public int keys;
+                public int values;
+                public void Add(int key, int value) { keys += key; values += value; }
+                public void Add(int both) { keys += both; values += both; }
+            }
+
+            public class Program
+            {
+                public static int sum;
+                public static int count;
+                public static string joined;
+                public static int keys;
+                public static int values;
+                static List<int> field = new List<int> { 10, 20 };
+
+                public static void Main()
+                {
+                    var names = new List<string>
+                    {
+                        "a",
+                        "b"
+                    };
+                    joined = "";
+                    foreach (var name in names) { joined = joined + name; }
+                    count = names.Count;
+
+                    var numbers = new List<int> { 1, 2, 3 };
+                    foreach (var n in numbers) { sum += n; }
+                    foreach (var n in field) { sum += n; }
+
+                    var pairs = new Pairs { { 1, 100 }, 5, { 2, 200 } };
+                    keys = pairs.keys;
+                    values = pairs.values;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "joined"), "ab");
+    assert_eq!(int_of(&emulator, "count"), 2);
+    assert_eq!(int_of(&emulator, "sum"), 36);
+    assert_eq!(int_of(&emulator, "keys"), 8);
+    assert_eq!(int_of(&emulator, "values"), 305);
+}
+
+#[test]
+fn a_collection_initializer_needs_a_matching_add() {
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Bag { }
+            public class Program
+            {
+                public static void Main()
+                {
+                    var a = new Bag { 1 };
+                    var b = new List<int> { "not an int" };
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let kinds: Vec<_> = bodies.errors.iter().map(|error| &error.kind).collect();
+    assert_eq!(kinds.len(), 2, "{kinds:#?}");
+    assert!(
+        matches!(
+            kinds[0],
+            men_sharp_semantics::SemanticErrorKind::UnknownMember { .. }
+        ),
+        "{kinds:#?}"
+    );
+    assert!(
+        matches!(
+            kinds[1],
+            men_sharp_semantics::SemanticErrorKind::NoMatchingOverload
+        ),
+        "{kinds:#?}"
+    );
+}

@@ -428,11 +428,26 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 },
                 _ => None,
             };
+            let object = ctx.this_slot.expect("constructors have this");
             let Some(initializer) = initializer else {
+                // no initializer: C# guarantees the default value, and a
+                // fresh object[] element is null — which is not 0, and an
+                // extern given it for an Int32 throws. Reference types keep
+                // the null they already have
+                let field_type = match self.signatures.members.get(&member) {
+                    Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => {
+                        self.substitute(ty, &ctx.key.bindings)
+                    }
+                    _ => continue,
+                };
+                if !self.is_reference_type(&field_type) {
+                    let value = self.default_value(&field_type);
+                    let index = self.int_constant(slot_index as i32);
+                    self.set_element(ctx, object, index, value, 0..0);
+                }
                 continue;
             };
             if let Some(value) = self.lower_expression(ctx, initializer) {
-                let object = ctx.this_slot.expect("constructors have this");
                 let index = self.int_constant(slot_index as i32);
                 self.set_element(ctx, object, index, value, 0..0);
             }
