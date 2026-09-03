@@ -13,6 +13,7 @@
 
 #if UNITY_EDITOR
 using System;
+using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEngine;
@@ -31,19 +32,19 @@ public class MenSharpAutoCompile : AssetPostprocessor
             {
                 return;
             }
-            if (!Directory.Exists("Assets/MenSharp/Programs"))
+            var programs = new List<string>();
+            foreach (string guid in AssetDatabase.FindAssets("t:MenSharpProgramAsset"))
             {
-                return;
+                programs.Add(AssetDatabase.GUIDToAssetPath(guid));
             }
-            string[] programs = Directory.GetFiles("Assets/MenSharp/Programs", "*.asset");
-            if (programs.Length == 0)
+            if (programs.Count == 0)
             {
                 return;
             }
             DateTime built = File.GetLastWriteTimeUtc(compiler);
             foreach (string program in programs)
             {
-                if (File.GetLastWriteTimeUtc(program) < built)
+                if (File.Exists(program) && File.GetLastWriteTimeUtc(program) < built)
                 {
                     Debug.Log(
                         "MenSharp: the bundled compiler is newer than the compiled programs — "
@@ -61,6 +62,16 @@ public class MenSharpAutoCompile : AssetPostprocessor
         string[] movedAssets,
         string[] movedFromAssetPaths)
     {
+        // a program asset arrived or left (a compile, a package install):
+        // the class → program index is stale
+        foreach (string path in importedAssets)
+        {
+            if (path.EndsWith(".asset") && path.Contains("/Programs/"))
+            {
+                MenSharpSources.InvalidateProgramIndex();
+                break;
+            }
+        }
         if (pending)
         {
             return;
@@ -98,11 +109,15 @@ public class MenSharpAutoCompile : AssetPostprocessor
         };
     }
 
+    /// A change worth a recompile: a MenSharp source, or a library source
+    /// (an UdonSharp asset's script whose surface M# code may use).
     private static bool IsMenSharpSource(string path)
     {
-        return path.StartsWith("Assets/MenSharp/")
-            && path.EndsWith(".cs")
-            && !path.StartsWith("Assets/MenSharp/Programs/");
+        if (!path.EndsWith(".cs"))
+        {
+            return false;
+        }
+        return MenSharpSources.IsMenSharpSource(path) || MenSharpSources.IsLibrarySource(path);
     }
 }
 #endif

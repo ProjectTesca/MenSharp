@@ -206,18 +206,9 @@ public static class MenSharpProxy
     /// been compiled yet.
     public static MenSharpProgramAsset FindProgram(Type behaviourType)
     {
-        // assets are named by the full class path — two behaviours may share
-        // a short name across namespaces ('+' is how reflection spells nesting)
-        string fullPath = (behaviourType.FullName ?? behaviourType.Name).Replace('+', '.');
-        MenSharpProgramAsset program = AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(
-            $"{ProgramsFolder}/{fullPath}.asset");
-        if (program != null)
-        {
-            return program;
-        }
-        // an asset imported before full-path naming; the next compile renames it
-        return AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(
-            $"{ProgramsFolder}/{behaviourType.Name}.asset");
+        // wherever its assembly keeps its programs: Assets/MenSharp/Programs
+        // for the project's own, a package's Programs folder for a package's
+        return MenSharpSources.FindProgram(behaviourType);
     }
 
     /// The UdonBehaviour currently carrying this proxy's program, without

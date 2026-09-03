@@ -190,11 +190,14 @@ public class Switch : MenSharpBehaviour
 }
 ```
 
-The rule is a folder: `Assets/MenSharp` holds your sources, and every other
-`.cs` in the project (under `Assets`, and under packages other than VRChat's,
-`Editor` folders excluded) is read as a *library* — the way Kotlin reads the
-Java on its classpath. The compiler follows UdonSharp's own criteria for what
-it finds there:
+Which sources are MenSharp's is decided by a rule Unity already enforces:
+the scripts of every assembly definition that references
+`ProjectTesca.MenSharp.Runtime` — the reference any script using
+`MenSharpBehaviour` needs to compile at all — plus `Assets/MenSharp` itself.
+Every other `.cs` in the project (under `Assets`, and under packages other
+than VRChat's, `Editor` folders excluded) is read as a *library* — the way
+Kotlin reads the Java on its classpath. The compiler follows UdonSharp's own
+criteria for what it finds there:
 
 - a class deriving from `UdonSharpBehaviour` is a program UdonSharp compiled.
   M# never compiles it; it talks to it by name, as above. Its public surface is
@@ -231,6 +234,18 @@ definition, add it to `Assets/MenSharp/MenSharp.Scripts.asmdef`'s references;
 if it lives in Assembly-CSharp (no asmdef of its own), delete
 `MenSharp.Scripts.asmdef` so your sources live there too — it is written only
 once, when the folder is created, and stays deleted.
+
+## Distributing a package
+
+**MenSharp > Create Package…** writes the skeleton of a VPM package under
+`Packages/`: a `package.json` depending on MenSharp, and a `Runtime/` folder
+with an assembly definition already referencing the MenSharp runtime. Write
+behaviours in `Runtime/`; they compile on save like the ones in
+`Assets/MenSharp`, and their programs land in `Runtime/Programs/` inside the
+package, beside the prefabs you build with them. Ship the folder. On the
+consumer's side the assembly reference is what marks the sources as
+MenSharp's — there is nothing to configure — and their MenSharp recompiles the
+programs in place, GUIDs intact, so the prefabs keep working.
 
 ## Components and cloning
 

@@ -22,9 +22,9 @@ using Debug = UnityEngine.Debug;
 
 public static class MenSharpCompiler
 {
-    private const string SourceRoot = "Assets/MenSharp";
-    private const string ProgramsFolder = SourceRoot + "/Programs";
-    private const string PackageName = "com.projecttesca.mensharp";
+    private const string SourceRoot = MenSharpSources.SourceRoot;
+    private const string ProgramsFolder = MenSharpSources.DefaultProgramsFolder;
+    private const string PackageName = MenSharpSources.PackageName;
 
     [MenuItem("MenSharp/Compile All %#m")]
     public static void CompileAll()
@@ -40,15 +40,15 @@ public static class MenSharpCompiler
             return;
         }
 
-        var sources = Directory.GetFiles(SourceRoot, "*.cs", SearchOption.AllDirectories);
-        if (sources.Length == 0)
+        // MenSharp sources are the scripts of every assembly referencing the
+        // runtime, plus the source folder; everything else is a library (see
+        // MenSharpSources)
+        MenSharpSources.SourceSet set = MenSharpSources.Collect();
+        if (set.MenSharp.Count == 0)
         {
-            Debug.LogError($"MenSharp: no .cs files under {SourceRoot}.");
+            Debug.LogError($"MenSharp: no .cs files under {SourceRoot} (or in an assembly referencing {MenSharpSources.RuntimeAssembly}).");
             return;
         }
-        // UdonSharp scripts in the project: read for the declarations of their
-        // behaviours, so `public Door door` may name one and call it typed
-        var foreign = UdonSharpSources();
 
         string binary = FindCompilerBinary();
         if (binary == null)
@@ -64,50 +64,114 @@ public static class MenSharpCompiler
         }
 
         var stopwatch = Stopwatch.StartNew();
-        if (!RunCompiler(binary, outputDirectory, sources, foreign))
+        if (!RunCompiler(binary, outputDirectory, set.MenSharp.ToArray(), set.Library))
         {
             Debug.LogError("MenSharp: compilation failed.");
             return;
         }
 
-        // one program asset per produced behaviour
+        // one program asset per produced behaviour, beside the assembly that
+        // declares it: a package ships its programs with its prefabs
         var produced = Directory.GetFiles(outputDirectory, "*.uasm");
-        Directory.CreateDirectory(ProgramsFolder);
-        var current = new HashSet<string>();
+        var current = new Dictionary<string, HashSet<string>>();
+        foreach (string folder in set.ProgramsFolders)
+        {
+            current[folder] = new HashSet<string>();
+        }
+        current[ProgramsFolder] = current.TryGetValue(ProgramsFolder, out var own) ? own : new HashSet<string>();
         foreach (string uasmPath in produced)
         {
             // assets are named by the *full* class path ("Demo.Door.asset"):
             // two behaviours may share a short name across namespaces, and a
             // short-named asset would make them overwrite each other
             string classPath = Path.GetFileNameWithoutExtension(uasmPath); // "Demo.Door"
-            string metaPath = Path.Combine(
-                outputDirectory, classPath + ".meta.json");
-            MenSharpImporter.CreateOrUpdate(
-                uasmPath, metaPath, $"{ProgramsFolder}/{classPath}.asset");
-            current.Add(classPath);
+            string metaPath = Path.Combine(outputDirectory, classPath + ".meta.json");
+            string folder = ProgramsFolderFor(metaPath, set);
+            if (!EnsureAssetFolder(folder))
+            {
+                Debug.LogWarning(
+                    $"MenSharp: cannot write programs into {folder} (an immutable package?); "
+                    + $"{classPath} goes to {ProgramsFolder} instead.");
+                folder = ProgramsFolder;
+                EnsureAssetFolder(folder);
+            }
+            MenSharpImporter.CreateOrUpdate(uasmPath, metaPath, $"{folder}/{classPath}.asset");
+            if (!current.TryGetValue(folder, out HashSet<string> names))
+            {
+                names = current[folder] = new HashSet<string>();
+            }
+            names.Add(classPath);
         }
-        DeleteProgramsWithoutABehaviour(current);
+        foreach (KeyValuePair<string, HashSet<string>> entry in current)
+        {
+            DeleteProgramsWithoutABehaviour(entry.Key, entry.Value);
+        }
         AssetDatabase.SaveAssets();
+        MenSharpSources.InvalidateProgramIndex();
 
         Debug.Log(
-            $"MenSharp: compiled {produced.Length} behaviour(s) from {sources.Length} "
-            + $"file(s) in {stopwatch.ElapsedMilliseconds}ms.");
+            $"MenSharp: compiled {produced.Length} behaviour(s) from {set.MenSharp.Count} "
+            + $"file(s) (+{set.Library.Count} library file(s)) in {stopwatch.ElapsedMilliseconds}ms.");
+    }
+
+    /// The programs folder of the assembly the program's source belongs to,
+    /// read from the sidecar's `source` (the path the compiler was given).
+    private static string ProgramsFolderFor(string metaPath, MenSharpSources.SourceSet set)
+    {
+        try
+        {
+            MenSharpMeta meta = JsonUtility.FromJson<MenSharpMeta>(File.ReadAllText(metaPath));
+            if (meta != null && !string.IsNullOrEmpty(meta.source)
+                && set.ProgramsFolderOf.TryGetValue(MenSharpSources.Normalize(meta.source), out string folder))
+            {
+                return folder;
+            }
+        }
+        catch (Exception)
+        {
+            // an unreadable sidecar: the default folder
+        }
+        return ProgramsFolder;
+    }
+
+    /// Makes an asset folder exist, creating it (and the AssetDatabase's
+    /// knowledge of it) when needed; false when the location is not writable.
+    private static bool EnsureAssetFolder(string folder)
+    {
+        if (AssetDatabase.IsValidFolder(folder))
+        {
+            return true;
+        }
+        try
+        {
+            Directory.CreateDirectory(folder);
+        }
+        catch (Exception)
+        {
+            return false;
+        }
+        AssetDatabase.Refresh();
+        return AssetDatabase.IsValidFolder(folder);
     }
 
     /// Program assets left over from behaviours the sources no longer declare.
     /// Keeping them would leave GameObjects running code that is not in the
     /// project any more — and the UdonBehaviour carrying it is hidden, so
     /// nobody would see why.
-    private static void DeleteProgramsWithoutABehaviour(HashSet<string> current)
+    private static void DeleteProgramsWithoutABehaviour(string folder, HashSet<string> current)
     {
-        foreach (string file in Directory.GetFiles(ProgramsFolder, "*.asset"))
+        if (!Directory.Exists(folder))
+        {
+            return;
+        }
+        foreach (string file in Directory.GetFiles(folder, "*.asset"))
         {
             string name = Path.GetFileNameWithoutExtension(file);
             if (current.Contains(name))
             {
                 continue;
             }
-            string assetPath = $"{ProgramsFolder}/{Path.GetFileName(file)}";
+            string assetPath = $"{folder}/{Path.GetFileName(file)}";
             // only ours: anything else in this folder is the user's business
             if (AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(assetPath) == null)
             {
@@ -239,60 +303,6 @@ public static class MenSharpCompiler
         yield return typeof(VRC.SDKBase.Networking).Assembly.Location;
         // UdonSharpBehaviour: what an UdonSharp script's class derives from
         yield return typeof(UdonSharp.UdonSharpBehaviour).Assembly.Location;
-    }
-
-    /// The project's other C# sources — every `.cs` under Assets outside our
-    /// own folder, and under non-VRChat packages, `Editor` folders excluded:
-    /// what the compiler reads as a *library*. UdonSharp behaviours in them
-    /// are programs to talk to by name; everything else (helpers, enums) is
-    /// compiled into a program on use, the way UdonSharp itself does it.
-    /// Their errors are theirs: only what M# code uses is checked, at the
-    /// use. No heuristics, so no file is missed.
-    private static List<string> UdonSharpSources()
-    {
-        var roots = new List<string> { "Assets" };
-        if (Directory.Exists("Packages"))
-        {
-            foreach (string package in Directory.GetDirectories("Packages"))
-            {
-                string name = Path.GetFileName(package);
-                if (name.StartsWith("com.vrchat.", StringComparison.Ordinal) || name == PackageName)
-                {
-                    continue;
-                }
-                roots.Add(package);
-            }
-        }
-        // with the separator: "Assets/MenSharpTools" is not under "Assets/MenSharp"
-        string ownSources = Path.GetFullPath(SourceRoot).TrimEnd(Path.DirectorySeparatorChar)
-            + Path.DirectorySeparatorChar;
-        var found = new List<string>();
-        foreach (string root in roots)
-        {
-            foreach (string file in Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories))
-            {
-                string full = Path.GetFullPath(file);
-                if (full.StartsWith(ownSources, StringComparison.Ordinal) || IsEditorPath(full))
-                {
-                    continue;
-                }
-                found.Add(file);
-            }
-        }
-        found.Sort(StringComparer.Ordinal);
-        return found;
-    }
-
-    private static bool IsEditorPath(string path)
-    {
-        foreach (string segment in path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-        {
-            if (segment == "Editor")
-            {
-                return true;
-            }
-        }
-        return false;
     }
 
     /// Where the bundled compiler for this platform lives. Pure path
