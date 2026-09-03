@@ -1846,6 +1846,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some((slot, ty)) = receiver else {
             return Place::Error;
         };
+        if matches!(&ty, Type::Array { rank, .. } if *rank > 1) {
+            self.error(
+                ctx,
+                "multi-dimensional arrays (`int[,]`) are not supported by the Udon backend: a jagged array (`int[][]`) works",
+                span,
+            );
+            return Place::Error;
+        }
         // `a[1..2] = x`: a slice is a fresh array, not a place (CS0131)
         if let Some(Expression::Range(range)) = Self::single_index_expression(arguments) {
             self.error(
@@ -3654,10 +3662,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         // array creation
         if !new_expression.array_sizes.is_empty() {
-            if new_expression.array_sizes.len() > 1 || !new_expression.array_suffixes.is_empty() {
+            // `new int[2, 3]` — a rectangular array, which Udon has no type
+            // for. `new int[2][]` is a jagged one: an array of arrays, and
+            // those it does have
+            if new_expression.array_sizes.len() > 1 {
                 self.error(
                     ctx,
-                    "multi-dimensional arrays are not supported by the Udon backend yet",
+                    "multi-dimensional arrays (`int[,]`) are not supported by the Udon backend: a jagged array (`int[][]`) works",
                     span,
                 );
                 return Piece::Error;
@@ -3671,7 +3682,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         .get(&EntityID::from(type_ref))
                         .cloned()
                 })
-                .map(|ty| self.substitute(&ty, &ctx.key.bindings));
+                .map(|ty| {
+                    let ty = men_sharp_semantics::apply_suffixes(ty, new_expression.array_suffixes);
+                    self.substitute(&ty, &ctx.key.bindings)
+                });
             let Some(element) = element else {
                 self.error(ctx, "could not resolve the array element type", span);
                 return Piece::Error;

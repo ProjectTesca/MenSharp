@@ -522,10 +522,13 @@ public static class MenSharpProxy
                     continue;
                 }
                 // what Unity never serializes, and the compiler never exports:
-                // delegates (a program's own code addresses) and nullable
-                // value types (a boxed value or null)
+                // delegates (a program's own code addresses), nullable value
+                // types (a boxed value or null), and jagged arrays
                 if (typeof(Delegate).IsAssignableFrom(field.FieldType)
-                    || Nullable.GetUnderlyingType(field.FieldType) != null)
+                    || Nullable.GetUnderlyingType(field.FieldType) != null
+                    || (field.FieldType.IsArray
+                        && field.FieldType.GetElementType() is Type element
+                        && element.IsArray))
                 {
                     continue;
                 }

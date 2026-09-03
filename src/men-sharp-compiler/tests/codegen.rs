@@ -7346,3 +7346,61 @@ fn indexes_from_the_end_and_ranges_slice() {
     assert_eq!(string_of(&emulator, "Log"), "oelloh!");
     assert_eq!(int_of(&emulator, "Result"), 137);
 }
+
+#[test]
+fn jagged_arrays_are_arrays_of_arrays() {
+    let source = r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static int[][] Table = { new int[] { 1, 2 }, new int[] { 3 } };
+                public static int Wide(int[][] rows)
+                {
+                    int widest = 0;
+                    foreach (int[] row in rows)
+                    {
+                        if (row != null && row.Length > widest) widest = row.Length;
+                    }
+                    return widest;
+                }
+                public static void Main()
+                {
+                    int[][] grid = new int[3][];         // rows start null
+                    if (grid[0] == null) Result += 1;    // 1
+                    grid[0] = new int[] { 10, 20 };
+                    grid[1] = new int[2];
+                    grid[1][0] = 30;
+                    grid[1][1] = grid[0][1];             // 20
+                    Result += grid[0][0] + grid[1][0] + grid[1][1];   // 61
+                    Result += grid.Length + grid[0].Length;           // 66
+
+                    int[][] written = new int[][] { new int[] { 1 }, new int[] { 2, 3 } };
+                    Result += written[1][1];             // 69
+                    Result += Wide(written);             // 71
+                    Result += Table[0][1] + Table[1][0]; // 76
+
+                    foreach (int[] row in written)
+                    {
+                        foreach (int value in row) Log += value;
+                    }                                    // 123
+
+                    string[][] words = { new string[] { "a", "b" } };
+                    Log += words[0][1];                  // 123b
+
+                    int[][][] deep = new int[1][][];
+                    deep[0] = new int[1][];
+                    deep[0][0] = new int[] { 7 };
+                    Result += deep[0][0][0];             // 83
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "123b");
+    assert_eq!(int_of(&emulator, "Result"), 83);
+}

@@ -1039,7 +1039,8 @@ fn segment_arity(segment: &NameSegment) -> u32 {
 /// Applies `?`, `[]` and `*` in C#'s reading order: `?` and `*` wrap what precedes
 /// them; a run of rank specifiers reads outermost-first (`int[][,]` is a `[]` array
 /// of `[,]` arrays).
-pub(crate) fn apply_suffixes(base: Type, suffixes: &[TypeSuffix]) -> Type {
+/// `int` + `[]` + `[]` -> `int[][]`: the written suffixes, applied.
+pub fn apply_suffixes(base: Type, suffixes: &[TypeSuffix]) -> Type {
     let mut current = base;
     let mut index = 0;
 

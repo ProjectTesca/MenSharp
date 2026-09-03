@@ -52,7 +52,7 @@ pub use external::{
 };
 pub use lookup::{MemberCandidate, MemberOrigin, TypeSystem};
 pub use merge::{Declarations, SourceText, merge_declarations};
-pub use resolve::{Signatures, resolve_file, resolve_signatures};
+pub use resolve::{Signatures, apply_suffixes, resolve_file, resolve_signatures};
 pub use symbol::{
     Accessibility, DeclarationSite, FileId, Symbol, SymbolId, SymbolKind, SymbolTable, SyntaxRef,
 };

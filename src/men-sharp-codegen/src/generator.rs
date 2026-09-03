@@ -2550,6 +2550,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.is_delegate_type(&ty) || self.nullable_inner(&ty).is_some() {
             return false;
         }
+        // ... and Unity does not serialize an array of arrays either, so a
+        // jagged field is the program's own, not the inspector's
+        if let Type::Array { element, .. } = &ty
+            && matches!(**element, Type::Array { .. })
+        {
+            return false;
+        }
         self.declarations.table.symbol(member).accessibility == Accessibility::Public
             || self.has_attribute(member, "SerializeField")
     }

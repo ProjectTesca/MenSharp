@@ -707,6 +707,12 @@ into the heap, it runs when the program starts — so on a *behaviour* field it
 overwrites what the inspector holds. Leave such a field bare (`public int[]
 steps;`) when the inspector is meant to fill it.
 
+A jagged array (`int[][]`) is an array of arrays, as in C#: `new int[3][]`
+makes the rows null until you fill them, `grid[1][0] = 30` writes through
+both levels, and `foreach (int[] row in grid)` walks the rows. Unity does not
+serialize an array of arrays, so a jagged field is never an inspector
+variable — fill it in `Start()`.
+
 `a[^1]` counts back from the end and `a[1..3]` takes a slice, on arrays and
 strings:
 
@@ -810,6 +816,8 @@ wrong thing:
   type does the same job. `static` local functions that use a variable of the
   method around them (CS8421), and local functions that use a variable written
   below them (CS0841), are errors here as they are in C#;
+- multi-dimensional arrays (`int[,]`) — Udon has no type for one; a jagged
+  array (`int[][]`) does the same job and works;
 - tuples (`(int, int)`), deconstruction and positional patterns;
 - `Index` and `Range` as values (`Index i = ^1;`): `^i` and `i..j` work where
   they are written, on arrays and strings, and nowhere else — Udon has no
