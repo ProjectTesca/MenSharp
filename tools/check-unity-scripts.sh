@@ -43,6 +43,8 @@ for assembly in \
     "$scripts/VRC.Udon.dll" \
     "$scripts/VRC.Udon.Editor.dll" \
     "$scripts/VRC.SDKBase.dll" \
+    "$scripts/UdonSharp.Runtime.dll" \
+    "$scripts/UdonSharp.Editor.dll" \
     "$worlds/Runtime/Udon/External/VRC.Udon.Common.dll" \
     "$worlds/Editor/Udon/External/VRC.Udon.EditorBindings.dll" \
     "$worlds/Editor/Udon/External/VRC.Udon.UAssembly.dll" \

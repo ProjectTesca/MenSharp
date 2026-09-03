@@ -18,11 +18,14 @@ use men_sharp_semantics::{
 };
 
 const USAGE: &str = "usage: men-sharp [--threads N] [--reference lib.dll]... \
+[--udonsharp other.cs]... [--define NAME]... \
 [--emit-udon Namespace.EntryClass --out name | --emit-udon-all --out-dir dir] <file.cs>...";
 
 fn main() -> ExitCode {
     let mut thread_count = None;
     let mut paths = Vec::new();
+    let mut foreign_paths = Vec::new();
+    let mut defines = Vec::new();
     let mut reference_paths = Vec::new();
     let mut udon_entry: Option<String> = None;
     let mut udon_all = false;
@@ -45,6 +48,23 @@ fn main() -> ExitCode {
                     return ExitCode::FAILURE;
                 };
                 reference_paths.push(path);
+            }
+            // an UdonSharp script: read for the declarations of its
+            // behaviours, so M# code can talk to them by name — never
+            // compiled, and its errors are not reported
+            "--udonsharp" => {
+                let Some(path) = arguments.next() else {
+                    eprintln!("--udonsharp needs a .cs path");
+                    return ExitCode::FAILURE;
+                };
+                foreign_paths.push(path);
+            }
+            "--define" | "-d" => {
+                let Some(name) = arguments.next() else {
+                    eprintln!("--define needs a symbol name");
+                    return ExitCode::FAILURE;
+                };
+                defines.push(name);
             }
             "--emit-udon" => {
                 let Some(entry) = arguments.next() else {
@@ -81,10 +101,19 @@ fn main() -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    let mut sources = Vec::with_capacity(paths.len());
+    let mut sources = Vec::with_capacity(paths.len() + foreign_paths.len());
     for path in &paths {
         match std::fs::read_to_string(path) {
             Ok(text) => sources.push(SourceCode::new(path.as_str(), text)),
+            Err(error) => {
+                eprintln!("{path}: {error}");
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    for path in &foreign_paths {
+        match std::fs::read_to_string(path) {
+            Ok(text) => sources.push(SourceCode::foreign(path.as_str(), text)),
             Err(error) => {
                 eprintln!("{path}: {error}");
                 return ExitCode::FAILURE;
@@ -102,7 +131,10 @@ fn main() -> ExitCode {
         }
     }
 
-    let compiler = match Compiler::new(CompilerSettings { thread_count }) {
+    let compiler = match Compiler::new(CompilerSettings {
+        thread_count,
+        defines,
+    }) {
         Ok(compiler) => compiler,
         Err(error) => {
             eprintln!("failed to build the thread pool: {error}");
@@ -265,7 +297,9 @@ fn report(
 ) -> usize {
     let mut count = 0;
 
-    for file in files {
+    // a foreign file's errors are UdonSharp's to report, not ours: what M#
+    // code uses of it is checked at the use site
+    for file in files.iter().filter(|file| !file.foreign) {
         for error in file.ast.errors() {
             let (line, column) = line_column(file.ast.source(), error.span.start);
             eprintln!(
@@ -283,6 +317,9 @@ fn report(
         .chain(&bodies.errors)
     {
         let file = &files[error.file.0 as usize];
+        if file.foreign {
+            continue;
+        }
         let (line, column) = line_column(file.ast.source(), error.span.start);
         eprintln!("{}:{line}:{column}: error: {:?}", file.name, error.kind);
         count += 1;

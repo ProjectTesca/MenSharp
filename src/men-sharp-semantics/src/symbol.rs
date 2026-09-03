@@ -138,6 +138,27 @@ pub enum SyntaxRef<'ast> {
 }
 
 impl SyntaxRef<'_> {
+    /// The whole declaration's span — what an error inside the declaration
+    /// (its body included) falls within.
+    pub fn full_span(&self) -> Range<usize> {
+        match self {
+            SyntaxRef::Namespace(node) => node.span.clone(),
+            SyntaxRef::Class(node) => node.span.clone(),
+            SyntaxRef::Enum(node) => node.span.clone(),
+            SyntaxRef::Delegate(node) => node.span.clone(),
+            SyntaxRef::Field { field, .. } => field.span.clone(),
+            SyntaxRef::Method(node) => node.span.clone(),
+            SyntaxRef::Property(node) => node.span.clone(),
+            SyntaxRef::Indexer(node) => node.span.clone(),
+            SyntaxRef::Event { event, .. } => event.span.clone(),
+            SyntaxRef::Constructor(node) => node.span.clone(),
+            SyntaxRef::Destructor(node) => node.span.clone(),
+            SyntaxRef::Operator(node) => node.span.clone(),
+            SyntaxRef::EnumMember(node) => node.span.clone(),
+            SyntaxRef::TypeParameter(node) => node.span.clone(),
+        }
+    }
+
     /// Whether the member declares a body: a block or expression body on a
     /// method, or at least one accessor with one on a property or indexer.
     /// In an interface that makes a default implementation; in a class,

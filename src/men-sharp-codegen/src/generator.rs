@@ -103,6 +103,7 @@ pub fn generate(
         last_source_mark: None,
         dispatchers: HashMap::new(),
         emitted_dispatchers: HashSet::new(),
+        export_layouts: HashMap::new(),
         call_edges: HashMap::new(),
         temp_counter: 0,
         entry_class: None,
@@ -248,13 +249,20 @@ struct EventEntry {
     arguments: Vec<EventArgument>,
     /// `OnOwnershipRequest`: Udon reads the result back from `__returnValue`.
     returns_value: bool,
+    /// A custom event with a result: the variable another program reads it
+    /// from afterwards, `(name, heap type)`.
+    result_slot: Option<(String, String)>,
 }
 
-/// One value a built-in event hands over: the stub copies the named slot the
-/// runtime wrote into the function's parameter.
+/// One value an event hands over: the stub copies the named slot — written
+/// by the runtime for a built-in event, by the calling program for a custom
+/// one — into the function's parameter.
 struct EventArgument {
     slot: String,
     udon_type: String,
+    /// `ref`/`out`: the parameter's final value goes back into the slot for
+    /// the caller to read.
+    write_back: bool,
 }
 
 /// See [`Generator::exception_state`].
@@ -316,6 +324,9 @@ struct Generator<'a, 'ast> {
     /// subtype list is closed, so a type instantiated afterwards is an
     /// internal error rather than a silently missing branch.
     emitted_dispatchers: HashSet<FunctionKey>,
+    /// Per behaviour class: how other programs reach each of its methods
+    /// and accessors — the names UdonSharp would use. See `programs`.
+    export_layouts: HashMap<SymbolId, HashMap<programs::LayoutKey, programs::ExportLayout>>,
     call_edges: HashMap<FunctionKey, HashSet<FunctionKey>>,
     temp_counter: usize,
     /// Set when the entry class is a `MenSharpBehaviour` subclass: its
@@ -465,6 +476,16 @@ enum Place {
         name: String,
         ty: Type,
     },
+    /// A property with a body on *another* behaviour: reached through its
+    /// accessor events, `(event, variable)` for each — the getter's result
+    /// variable, the setter's value parameter.
+    ProgramAccessor {
+        receiver: DataId,
+        getter: Option<(String, String)>,
+        setter: Option<(String, String)>,
+        name: String,
+        ty: Type,
+    },
     /// External property: `__get_X`/`__set_X` externs.
     ExternalProperty {
         receiver: Option<DataId>,
@@ -551,7 +572,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     Some(_) => udon_event_name(&method_name),
                     None => method_name.clone(),
                 };
-                if !claimed.insert(name.clone()) {
+                if claimed.contains(&name) {
                     continue;
                 }
                 let parameters = match self.signatures.members.get(&member) {
@@ -598,13 +619,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             arguments.push(EventArgument {
                                 slot: event_argument_slot(&method_name, &parameter.name),
                                 udon_type: event_slot_type(&parameter.dotnet_type),
+                                write_back: false,
                             });
                         }
                     }
-                    // not a built-in event, and takes arguments: no event can
-                    // carry them, so it stays an internal function — exporting
-                    // it would run the body with the arguments never written
-                    None if !parameters.is_empty() => {
+                    // a custom event with parameters or a result: exported
+                    // under the names other programs use to reach it (see
+                    // `programs`) — the stub reads the arguments from, and
+                    // leaves the result in, the variables of its layout
+                    None if !parameters.is_empty() || return_type_of(self, member) => {
+                        let exported = self.exported_member_layouts(member);
+                        for (layout, key, passing) in exported {
+                            self.push_layout_entry(
+                                &mut entries,
+                                &mut claimed,
+                                layout,
+                                key,
+                                passing,
+                            );
+                        }
                         continue;
                     }
                     _ => {}
@@ -615,6 +648,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     bindings: Vec::new(),
                 };
                 self.ensure_function(&key);
+                claimed.insert(name.clone());
                 entries.push(EventEntry {
                     name,
                     key,
@@ -622,7 +656,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     // the one event whose *result* Udon reads back, from
                     // `__returnValue` (UdonSharp does the same copy)
                     returns_value: method_name == "OnOwnershipRequest",
+                    result_slot: None,
                 });
+            }
+            // public properties with bodies: their accessors are events too,
+            // so another program can read and write them
+            if self.entry_class.is_some() {
+                let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
+                for member in members {
+                    if self.declarations.table.symbol(member).kind != SymbolKind::Property {
+                        continue;
+                    }
+                    let exported = self.exported_member_layouts(member);
+                    for (layout, key, passing) in exported {
+                        self.push_layout_entry(&mut entries, &mut claimed, layout, key, passing);
+                    }
+                }
             }
         }
         // `[FieldChangeCallback]` fields each get an `_onVarChange_…` entry;
@@ -698,6 +747,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let function = &self.functions[key];
             let offset = function.parameters.len() - entry.arguments.len();
             let parameter_slots: Vec<DataId> = function.parameters[offset..].to_vec();
+            let mut write_backs: Vec<(DataId, DataId)> = Vec::new();
             for (argument, parameter) in entry.arguments.iter().zip(parameter_slots) {
                 let slot = self.program.add_data(DataSymbol {
                     name: argument.slot.clone(),
@@ -707,6 +757,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     sync: None,
                 });
                 self.copy(slot, parameter);
+                if argument.write_back {
+                    write_backs.push((parameter, slot));
+                }
             }
 
             let function = &self.functions[key];
@@ -724,6 +777,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .push(Op::Jump(Target::Label(callee_label)));
             self.program.code.push(Op::Label(done));
             self.emit_unhandled_check(name);
+            // `ref`/`out` parameters and the result, where the caller reads
+            // them back
+            for (parameter, slot) in write_backs {
+                self.copy(parameter, slot);
+            }
+            if let (Some(result), Some((slot_name, udon_type))) =
+                (callee_result, entry.result_slot.clone())
+            {
+                let slot = self.program.add_data(DataSymbol {
+                    name: slot_name,
+                    udon_type,
+                    init: HeapInit::Null,
+                    export: false,
+                    sync: None,
+                });
+                self.copy(result, slot);
+            }
             if let Some(result) = callee_result.filter(|_| entry.returns_value) {
                 let return_value = self.program.add_data(DataSymbol {
                     name: "__returnValue".into(),
@@ -1797,6 +1867,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// The declared Udon heap type for a slot of this M# type.
     fn heap_type(&self, ty: &Type) -> String {
         match ty {
+            // another program (an UdonSharp behaviour's class included): what
+            // a scalar slot may hold is the concrete UdonBehaviour, the one
+            // thing a `this` reference resolves into
+            Type::Named { .. } if self.is_program_reference(ty) => BEHAVIOUR_HEAP_TYPE.into(),
             Type::Named {
                 target: TypeTarget::External(id),
                 arguments,
@@ -1819,9 +1893,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ..
             } => match self.declarations.table.symbol(*symbol).kind {
                 SymbolKind::Enum => "SystemInt32".into(),
-                // another behaviour is another *program*; what a slot can hold
-                // is the interface Udon lets programs talk through
-                _ if self.behaviour_in_type(ty).is_some() => BEHAVIOUR_HEAP_TYPE.into(),
                 _ => "SystemObjectArray".into(),
             },
             Type::Array { element, rank: 1 } => {
@@ -1842,7 +1913,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // type and the Get/Set/get_Length externs to go with it. An
         // UdonBehaviour[] fits one by array covariance; only a *scalar* slot
         // has to be the concrete UdonBehaviour, for `this` to resolve into it
-        if !matches!(ty, Type::Array { .. }) && self.behaviour_in_type(ty).is_some() {
+        if !matches!(ty, Type::Array { .. }) && self.is_program_reference(ty) {
             return BEHAVIOUR_EXTERN_TYPE.into();
         }
         match ty {
@@ -1881,7 +1952,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// cannot appear there (user types, unresolved parameters).
     fn extern_type_name(&self, ty: &Type) -> Option<String> {
         // a behaviour appears in extern signatures as the interface
-        if !matches!(ty, Type::Array { .. }) && self.behaviour_in_type(ty).is_some() {
+        if !matches!(ty, Type::Array { .. }) && self.is_program_reference(ty) {
             return Some(BEHAVIOUR_EXTERN_TYPE.into());
         }
         if let Type::Named {
@@ -1926,6 +1997,38 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         };
         let symbol = *symbol;
+        // a type that cannot be compiled, or that is an engine object in
+        // disguise, has no layout worth building: the error names why
+        if let Some(reason) = self.uncompilable_reason(symbol) {
+            let (file, span) = self.declaration_site(symbol);
+            let name = self.display_path(symbol);
+            self.errors.push(CodegenError {
+                message: format!(
+                    "`{name}` is used from MenSharp code, but MenSharp cannot compile it: \
+                     {reason}"
+                ),
+                file,
+                span,
+            });
+            return None;
+        }
+        if self.declarations.table.symbol(symbol).kind == SymbolKind::Class
+            && !self.is_program_reference(ty)
+            && let Some(base) = self.engine_base_of(symbol)
+        {
+            let (file, span) = self.declaration_site(symbol);
+            let name = self.display_path(symbol);
+            self.errors.push(CodegenError {
+                message: format!(
+                    "`{name}` derives from `{base}`, an engine class: Udon can neither create \
+                     nor hold such an object, so the class cannot be used from a program \
+                     (an UdonSharp behaviour can — through a reference to it)"
+                ),
+                file,
+                span,
+            });
+            return None;
+        }
         let entry = self.declarations.table.symbol(symbol);
         let type_parameters: Vec<SymbolId> = entry.type_parameters.to_vec();
         let members: Vec<SymbolId> = entry.members.to_vec();
@@ -2022,6 +2125,54 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             self.ensure_static(member, export);
         }
+    }
+
+    /// One exported entry from a member's export layout: the event under the
+    /// layout's name, its arguments from the layout's parameter variables,
+    /// its result into the layout's result variable.
+    fn push_layout_entry(
+        &mut self,
+        entries: &mut Vec<EventEntry>,
+        claimed: &mut HashSet<String>,
+        layout: programs::ExportLayout,
+        key: FunctionKey,
+        passing: Vec<men_sharp_semantics::ParameterPassing>,
+    ) {
+        if !claimed.insert(layout.event.clone()) {
+            return;
+        }
+        self.ensure_function(&key);
+        let (parameter_types, return_type) = self.function_shape(&key);
+        let has_this = self.function_has_this(&key);
+        let value_parameters = &parameter_types[usize::from(has_this)..];
+        let arguments = layout
+            .parameters
+            .iter()
+            .zip(value_parameters)
+            .enumerate()
+            .map(|(index, (slot, ty))| EventArgument {
+                slot: slot.clone(),
+                udon_type: self.heap_type(ty),
+                write_back: matches!(
+                    passing.get(index),
+                    Some(
+                        men_sharp_semantics::ParameterPassing::Ref
+                            | men_sharp_semantics::ParameterPassing::Out
+                    )
+                ),
+            })
+            .collect();
+        let result_slot = layout
+            .result
+            .filter(|_| return_type != Type::Void)
+            .map(|name| (name, self.heap_type(&return_type)));
+        entries.push(EventEntry {
+            name: layout.event,
+            key,
+            arguments,
+            returns_value: false,
+            result_slot,
+        });
     }
 
     /// A behaviour class and the classes it inherits from, most derived first,
@@ -2336,26 +2487,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
         }
         member
-    }
-
-    /// The behaviour class a type refers to, looking through arrays. A
-    /// behaviour is a whole Udon program, not a value: nothing in this backend
-    /// can hold one yet, so every place a type like this could reach checks
-    /// here and reports instead of lowering it to a meaningless `object[]`.
-    pub(super) fn behaviour_in_type(&self, ty: &Type) -> Option<SymbolId> {
-        match ty {
-            Type::Named {
-                target: TypeTarget::Source(symbol),
-                ..
-            } if Some(*symbol) != self.marker
-                && is_behaviour_class(self.declarations, self.signatures, *symbol) =>
-            {
-                Some(*symbol)
-            }
-            Type::Array { element, .. } => self.behaviour_in_type(element),
-            Type::Nullable(inner) => self.behaviour_in_type(inner),
-            _ => None,
-        }
     }
 
     /// The heap slot for a member declared directly on `MenSharpBehaviour`
@@ -2680,6 +2811,15 @@ pub fn behaviour_classes(declarations: &Declarations, signatures: &Signatures) -
     found
 }
 
+/// Does this method return something? (For the event export: a parameterless
+/// method with a result still needs a layout, for the result variable.)
+fn return_type_of(generator: &Generator<'_, '_>, member: SymbolId) -> bool {
+    matches!(
+        generator.signatures.members.get(&member),
+        Some(MemberSignature::Function(signature)) if signature.return_type != Type::Void
+    )
+}
+
 /// Unity/VRChat lifecycle methods map to Udon's built-in event names; other
 /// method names become custom events verbatim.
 /// `OnPlayerJoined` → `_onPlayerJoined`: Udon spells its built-in events as
@@ -2729,5 +2869,6 @@ mod exceptions;
 mod expressions;
 mod functions;
 mod patterns;
+mod programs;
 mod runtime;
 mod structs;

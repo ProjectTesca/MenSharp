@@ -145,11 +145,92 @@ public class Switch : MenSharpBehaviour
 ```
 
 Two behaviours are two Udon programs with no memory in common, so all of this
-goes through Udon's by-name access. That is why the member has to be `public`,
-and why a custom event carries no arguments and returns nothing: calling a
-method that takes or returns something is a compile error naming the
-alternative — write a public variable first, then call a method that takes
-nothing.
+goes through Udon's by-name access — which is why the member has to be
+`public`. A call with arguments or a result works too:
+
+```csharp
+door.Slide(2);                         // arguments go into the callee's
+int n = door.Count();                  // parameter variables, the event runs,
+bool ok = door.Take(1, out int rest);  // results and `out`/`ref` come back
+door.Level = n;                        // a property with a body: its
+Debug.Log(door.Level);                 // accessors are events of their own
+```
+
+Under the hood this is UdonSharp's protocol, with UdonSharp's names: the
+arguments are written into variables called `__0_amount__param`, the event
+`__0_Slide` runs the body, and the result is read from `__0___0_Count__ret`
+(a method with parameters is mangled so overloads stay apart; one without
+keeps its name). Every public method and every public property with a body
+of your behaviours is exported this way, so an UdonSharp script — which only
+knows strings — reaches an M# program the same way it reaches its own.
+
+Fields, auto-properties and parameterless methods are addressed by their
+plain names, as before. What stays out of reach is an indexer of another
+behaviour, and `gameObject`/`transform` through another behaviour (Udon
+resolves those against the program that owns the heap).
+
+### Talking to an UdonSharp behaviour
+
+An UdonSharp asset in the project can be used as is: UdonSharp keeps
+compiling it, and an M# behaviour talks to it typed.
+
+```csharp
+public class Switch : MenSharpBehaviour
+{
+    public UCounter counter;        // an UdonSharpBehaviour subclass — drag it in
+
+    public void Interact()
+    {
+        counter.count = 0;          // its public fields, by name
+        counter.Bump(3);            // its methods, with arguments and results
+        int n = counter.Add(20, 22);
+        counter.Level = n;          // its properties, through their accessors
+        counter.Interact();         // its built-in events
+    }
+}
+```
+
+The rule is a folder: `Assets/MenSharp` holds your sources, and every other
+`.cs` in the project (under `Assets`, and under packages other than VRChat's,
+`Editor` folders excluded) is read as a *library* — the way Kotlin reads the
+Java on its classpath. The compiler follows UdonSharp's own criteria for what
+it finds there:
+
+- a class deriving from `UdonSharpBehaviour` is a program UdonSharp compiled.
+  M# never compiles it; it talks to it by name, as above. Its public surface is
+  what you can use — fields, properties, methods, and the members
+  `UdonSharpBehaviour` itself provides (`SendCustomEvent`,
+  `RequestSerialization`, `SendCustomNetworkEvent`).
+- everything else — a static helper class, an enum, a struct — is ordinary
+  code, compiled into *your* program when you use it, exactly as UdonSharp
+  inlines a helper into each behaviour that calls it. `UCounterMath.Triple(4)`
+  from a U# asset just works, static or not.
+- a class deriving from an engine class (a plain `MonoBehaviour`) is neither:
+  Udon can neither create nor hold one, so using it as a type is an error.
+
+A library's errors are its own: nothing is reported for files you did not
+write. What M# code *uses* is checked at the use — a helper that leans on
+something M# does not support is an error there, naming the helper and the
+reason. A library type under a name your own code declares is dropped; yours
+wins. `#if` is evaluated: your files see `COMPILER_MENSHARP`, library files
+see `COMPILER_UDONSHARP` as well (so their `#if !COMPILER_UDONSHARP &&
+UNITY_EDITOR` editor blocks vanish, as they do for UdonSharp), and
+`--define NAME` adds your own.
+
+UdonSharp's own rules still apply on its side: a script needs its UdonSharp
+program asset (one created through *Create > U# Script* has it), and a script
+inside an assembly definition is only compiled by UdonSharp when a *U#
+Assembly Definition* asset points at that asmdef (*Create > U# Assembly
+Definition* with the asmdef selected). Until UdonSharp has compiled the
+program, calls into it do nothing; MenSharp warns about such a reference when
+it transfers values.
+
+For Unity to compile `public UCounter counter` in your M# source, your sources
+must be able to *see* the UdonSharp class: if the asset has an assembly
+definition, add it to `Assets/MenSharp/MenSharp.Scripts.asmdef`'s references;
+if it lives in Assembly-CSharp (no asmdef of its own), delete
+`MenSharp.Scripts.asmdef` so your sources live there too — it is written only
+once, when the folder is created, and stays deleted.
 
 ## Components and cloning
 

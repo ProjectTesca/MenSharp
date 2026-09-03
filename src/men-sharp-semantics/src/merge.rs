@@ -41,6 +41,16 @@ pub struct Declarations<'ast> {
     /// The files' names and text, indexed by [`FileId`] — what turns a span
     /// into `File.cs:line:column` for stack traces. Filled by the driver.
     pub sources: Vec<SourceText>,
+    /// Per [`FileId`]: is the file a *foreign* source — an UdonSharp script
+    /// read for its declarations only? Its bodies are never checked or
+    /// compiled, and its own errors are not the user's to fix; what M# code
+    /// may use of it is the surface of its behaviours, by name. Filled by
+    /// the driver; empty means no file is foreign.
+    pub foreign_files: Vec<bool>,
+    /// Syntax errors of foreign files, `(file, span, message)`: not
+    /// reported, but what they sit in cannot be compiled. Filled by the
+    /// driver.
+    pub foreign_syntax_errors: Vec<(FileId, std::ops::Range<usize>, String)>,
 }
 
 /// One source file as the driver saw it.
@@ -51,6 +61,15 @@ pub struct SourceText {
 }
 
 impl<'ast> Declarations<'ast> {
+    /// Is this file a foreign (declarations-only) source? See
+    /// [`Declarations::foreign_files`].
+    pub fn is_foreign(&self, file: FileId) -> bool {
+        self.foreign_files
+            .get(file.0 as usize)
+            .copied()
+            .unwrap_or(false)
+    }
+
     pub fn symbol_of(&self, entity: EntityID) -> Option<SymbolId> {
         self.symbol_of.get(&entity).copied()
     }
@@ -74,9 +93,18 @@ pub fn merge_declarations<'ast>(files: Vec<FileDeclarations<'ast>>) -> Declarati
         table: SymbolTable::new(),
         symbol_of: HashMap::new(),
         errors: Vec::new(),
+        foreign: false,
     };
 
-    for file in &files {
+    // the user's files first, then the foreign ones: a name both declare
+    // is the user's, and the foreign declaration is left out (see
+    // `Merger::foreign`)
+    for file in files.iter().filter(|file| !file.foreign) {
+        let root = merger.table.root();
+        merger.merge_nodes(root, file.file, &file.members);
+    }
+    merger.foreign = true;
+    for file in files.iter().filter(|file| file.foreign) {
         let root = merger.table.root();
         merger.merge_nodes(root, file.file, &file.members);
     }
@@ -92,6 +120,8 @@ pub fn merge_declarations<'ast>(files: Vec<FileDeclarations<'ast>>) -> Declarati
         files,
         errors,
         sources: Vec::new(),
+        foreign_files: Vec::new(),
+        foreign_syntax_errors: Vec::new(),
     }
 }
 
@@ -99,6 +129,8 @@ struct Merger<'ast> {
     table: SymbolTable<'ast>,
     symbol_of: HashMap<EntityID, SymbolId>,
     errors: Vec<SemanticError>,
+    /// Merging foreign files now: a duplicate type is dropped, not reported.
+    foreign: bool,
 }
 
 impl<'ast> Merger<'ast> {
@@ -198,6 +230,12 @@ impl<'ast> Merger<'ast> {
                 let symbol = self.table.symbol(id);
                 let first = symbol.declarations[0];
 
+                // a foreign type under a name already taken: the earlier
+                // declaration (the user's, or an earlier foreign file's)
+                // stands, this one is not merged at all
+                if self.foreign && !(symbol.is_partial && node.is_partial) {
+                    return;
+                }
                 if !(symbol.is_partial && node.is_partial) {
                     self.errors.push(SemanticError {
                         kind: SemanticErrorKind::DuplicateTypeDefinition {

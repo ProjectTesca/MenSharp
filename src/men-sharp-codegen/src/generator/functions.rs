@@ -83,7 +83,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         (parameters, return_type)
     }
 
-    fn function_has_this(&self, key: &FunctionKey) -> bool {
+    pub(super) fn function_has_this(&self, key: &FunctionKey) -> bool {
         // the behaviour entry class has exactly one instance — the program
         // itself — so its members carry no `this` and its fields are globals
         if self.is_entry_member(key.symbol) {
@@ -214,6 +214,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let site = symbol.declarations.first();
         let file = site.map(|site| site.file).unwrap_or(FileId(0));
         let syntax = site.map(|site| site.syntax);
+
+        // a library (UdonSharp) declaration with errors of its own: its
+        // errors were not reported — using it is where they matter
+        if let Some(reason) = self.uncompilable_reason(key.symbol) {
+            let name = self.display_path(key.symbol);
+            let span = site
+                .map(|site| site.span_start..site.span_end)
+                .unwrap_or(0..0);
+            self.errors.push(CodegenError {
+                message: format!(
+                    "`{name}` is used from MenSharp code, but MenSharp cannot compile it: \
+                     {reason}"
+                ),
+                file,
+                span,
+            });
+            return;
+        }
 
         let mut ctx = Ctx {
             key: key.clone(),
@@ -601,7 +619,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         let target_type = self.substitute(&chain.target_type, &ctx.key.bindings);
         // the entry class is the program itself: its chain has nothing to run
-        if self.behaviour_in_type(&target_type).is_some() {
+        if self.is_program_reference(&target_type) {
             return;
         }
         match &chain.call {
@@ -800,7 +818,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         bindings
     }
 
-    fn declared_modifiers(&self, symbol: SymbolId) -> Vec<Modifier> {
+    pub(super) fn declared_modifiers(&self, symbol: SymbolId) -> Vec<Modifier> {
         self.declarations
             .table
             .symbol(symbol)
@@ -1035,7 +1053,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     let ctx = self.dispatcher_ctx(&key);
                     self.error(&ctx, message, 0..0);
                 }
-                if self.behaviour_in_type(&ty).is_some() {
+                if self.is_program_reference(&ty) {
                     // a behaviour is a program reference, not an object[]:
                     // there is no type id to read, and no way to call into
                     // it but by event name

@@ -624,6 +624,25 @@ fn compile_behaviour(
     Some(programs.into_iter().nth(index).unwrap())
 }
 
+/// The class paths of every behaviour program the compilation produces.
+fn compile_behaviours(sources: Vec<SourceCode>) -> Vec<String> {
+    let Some(dir) = dotnet_shared_dir() else {
+        return Vec::new();
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    compiler
+        .generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files)
+        .into_iter()
+        .map(|program| program.class_path)
+        .collect()
+}
+
 /// Compile with the corlib included (MenSharpBehaviour lives there) and run
 /// one behaviour program.
 fn run_behaviour(source: &str, class_path: &str, event: &str) -> Option<Emulator> {
@@ -1333,31 +1352,513 @@ fn one_behaviour_reaches_another_by_name() {
     }
 }
 
+const CROSS_PROGRAM_CALLS: &str = r#"
+namespace Game
+{
+    public class Door : MenSharp.MenSharpBehaviour
+    {
+        private int level;
+        public void Slide(int amount) { level += amount; }
+        public int Count() { return level; }
+        public int Add(int a, int b) { return a + b; }
+        public bool Take(int amount, out int rest) { rest = level - amount; return rest >= 0; }
+        public int Level
+        {
+            get { return level; }
+            set { level = value; }
+        }
+        public int Twice => level * 2;
+    }
+
+    public class Switch : MenSharp.MenSharpBehaviour
+    {
+        public Door door;
+        public void Interact()
+        {
+            door.Slide(2);
+            int n = door.Count();
+            int sum = door.Add(n, 3);
+            bool ok = door.Take(1, out int rest);
+            door.Level = sum + rest;
+            int level = door.Level + door.Twice;
+        }
+    }
+}
+"#;
+
+/// A method call on another behaviour is UdonSharp's protocol: the
+/// arguments are written into the callee's parameter variables, the event
+/// runs, the result (and every `ref`/`out` argument) is read back — under the
+/// names UdonSharp's own compiler would use, so both sides agree.
 #[test]
-fn what_a_custom_event_cannot_carry_is_an_error() {
-    let Some(program) = compile_behaviour(
+fn a_call_across_programs_carries_arguments_and_results() {
+    let sources = || {
         vec![
             SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new("test.cs", CROSS_PROGRAM_CALLS),
+        ]
+    };
+    let Some(switch) = compile_behaviour(sources(), "Game.Switch") else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        switch.output.errors.is_empty(),
+        "{:#?}",
+        switch.output.errors
+    );
+    let text = switch.output.program.to_uasm().unwrap();
+    let meta = switch.output.program.to_meta_json().unwrap();
+    // the caller's side: the names it writes and raises
+    for name in [
+        "__0_amount__param", // Slide(int amount)
+        "__0_Slide",         // a method with parameters is mangled
+        "Count",             // one without is not
+        "__0_Count__ret",    // its result variable
+        "__0_a__param",
+        "__0_b__param",
+        "__0_Add",
+        "__0___0_Add__ret",  // the mangled name's result
+        "__1_amount__param", // Take's `amount`: the second of that name
+        "__0_rest__param",
+        "__0_Take",
+        "__0___0_Take__ret",
+        "get_Level", // accessors are events of their own
+        "__0_get_Level__ret",
+        "__0_value__param",
+        "__0_set_Level",
+        "get_Twice",
+        "__0_get_Twice__ret",
+    ] {
+        assert!(
+            meta.contains(&format!("\"value\": \"{name}\"")),
+            "{name} missing:\n{meta}"
+        );
+    }
+    assert!(text.contains("__SetProgramVariable__"), "{text}");
+    assert!(text.contains("__GetProgramVariable__"), "{text}");
+    assert!(text.contains("__SendCustomEvent__"), "{text}");
+
+    // the callee's side: the events and variables under the same names
+    let Some(door) = compile_behaviour(sources(), "Game.Door") else {
+        return;
+    };
+    assert!(door.output.errors.is_empty(), "{:#?}", door.output.errors);
+    let text = door.output.program.to_uasm().unwrap();
+    for event in [
+        "__0_Slide",
+        "Count",
+        "__0_Add",
+        "__0_Take",
+        "get_Level",
+        "__0_set_Level",
+        "get_Twice",
+    ] {
+        assert!(
+            text.contains(&format!(".export {event}\n")),
+            "event {event} missing:\n{text}"
+        );
+    }
+    for variable in [
+        "__0_amount__param: %SystemInt32",
+        "__0_Count__ret: %SystemInt32",
+        "__0___0_Add__ret: %SystemInt32",
+        "__1_amount__param: %SystemInt32",
+        "__0_rest__param: %SystemInt32",
+        "__0___0_Take__ret: %SystemBoolean",
+        "__0_get_Level__ret: %SystemInt32",
+        "__0_value__param: %SystemInt32",
+        "__0_get_Twice__ret: %SystemInt32",
+    ] {
+        assert!(
+            text.contains(variable),
+            "variable {variable} missing:\n{text}"
+        );
+        // parameter and result variables are not public variables
+        let name = variable.split(':').next().unwrap();
+        assert!(
+            !text.contains(&format!(".export {name}\n")),
+            "{name} must not be exported:\n{text}"
+        );
+    }
+    // the built-in event keeps its own protocol
+    assert!(
+        text.contains(".export _interact\n") || !text.contains("_interact"),
+        "{text}"
+    );
+}
+
+/// An UdonSharp behaviour, known through its source (declarations only): M#
+/// code reaches its public fields, properties and methods by the names
+/// UdonSharp exported them under. Its bodies are never looked at.
+#[test]
+fn an_udonsharp_behaviour_is_reached_by_its_export_names() {
+    let sources = || {
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::foreign(
+                "Assets/Vendor/UCounter.cs",
+                r#"
+                namespace UdonSharp { public class UdonSharpBehaviour { } }
+                public enum Mode { Slow, Fast }
+                public class UCounter : UdonSharp.UdonSharpBehaviour
+                {
+                    public int count;
+                    private int hidden;
+                    public Mode mode;
+                    public void Bump(int by) { this body is not C# at all; }
+                    public int Read() { return count; }
+                    public int Level { get; set; }
+                    public int Rate { get { return 1; } }
+                    public static class Util { }
+                }
+                public static class Helper
+                {
+                    public static int Twice(int x) { return x * 2; }
+                }
+                "#,
+            ),
             SourceCode::new(
-                "test.cs",
+                "Assets/MenSharp/Switch.cs",
                 r#"
                 namespace Game
                 {
-                    public class Door : MenSharp.MenSharpBehaviour
-                    {
-                        private int secret;
-                        public void Slide(int amount) { }
-                        public int Count() { return 1; }
-                    }
-
                     public class Switch : MenSharp.MenSharpBehaviour
                     {
-                        public Door door;
+                        public UCounter counter;
+                        public UCounter[] counters;
                         public void Interact()
                         {
-                            door.Slide(2);
-                            int n = door.Count();
+                            counter.count = 1;
+                            counter.mode = Mode.Fast;
+                            counter.Bump(2);
+                            int n = counter.Read();
+                            counter.Level = n;
+                            int total = counter.Level + counter.Rate + counters.Length;
                         }
+                    }
+                }
+                "#,
+            ),
+        ]
+    };
+    let Some(switch) = compile_behaviour(sources(), "Game.Switch") else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        switch.output.errors.is_empty(),
+        "{:#?}",
+        switch.output.errors
+    );
+    let text = switch.output.program.to_uasm().unwrap();
+    let meta = switch.output.program.to_meta_json().unwrap();
+    // a reference to an UdonSharp behaviour is a program reference
+    assert!(text.contains("counter: %VRCUdonUdonBehaviour"), "{text}");
+    assert!(
+        text.contains("counters: %VRCUdonCommonInterfacesIUdonEventReceiverArray"),
+        "{text}"
+    );
+    for name in [
+        "count",
+        "mode",
+        "__0_by__param",
+        "__0_Bump",
+        "Read",
+        "__0_Read__ret",
+        // every property of an UdonSharp behaviour goes through its accessors
+        "get_Level",
+        "__0_get_Level__ret",
+        "__0_value__param",
+        "__0_set_Level",
+        "get_Rate",
+        "__0_get_Rate__ret",
+    ] {
+        assert!(
+            meta.contains(&format!("\"value\": \"{name}\"")),
+            "{name} missing:\n{meta}"
+        );
+    }
+    // the UdonSharp program itself is not something M# compiles
+    let found = compile_behaviours(sources());
+    assert_eq!(found, vec!["Game.Switch".to_string()], "{found:?}");
+}
+
+fn exported_int(emulator: &Emulator, name: &str) -> i32 {
+    match emulator.value_of(name) {
+        Some(men_sharp_asm::Value::Int32(value)) => *value,
+        other => panic!("{name}: {other:?}"),
+    }
+}
+
+/// What an UdonSharp (library) source declares besides its behaviours is
+/// compiled into the program that uses it, the way UdonSharp itself
+/// inlines a helper into each behaviour that calls it — a static helper, an
+/// enum, a struct: ordinary code, checked and generated on use.
+#[test]
+fn an_udonsharp_helper_class_is_compiled_into_the_program() {
+    let Some(emulator) = run_sources(
+        vec![
+            SourceCode::foreign(
+                "Assets/Vendor/Helper.cs",
+                r#"
+                public enum Speed { Slow = 1, Fast = 3 }
+                public static class Helper
+                {
+                    public static int Twice(int x) { return x * 2; }
+                    public static int Scale(int x, Speed speed) { return x * (int)speed; }
+                }
+                public struct Pair
+                {
+                    public int a;
+                    public int b;
+                    public int Sum() { return a + b; }
+                }
+                "#,
+            ),
+            SourceCode::new(
+                "Assets/MenSharp/Program.cs",
+                r#"
+                namespace Game
+                {
+                    public class Program
+                    {
+                        public static int total;
+                        public static void Main()
+                        {
+                            Pair pair = new Pair();
+                            pair.a = Helper.Twice(2);
+                            pair.b = Helper.Scale(5, Speed.Fast);
+                            total = pair.Sum();
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert_eq!(exported_int(&emulator, "total"), 4 + 15);
+}
+
+/// A library's errors are its own: nothing is reported for a file the user
+/// did not write — until M# code uses the broken declaration, which is an
+/// error there, naming the reason. The rest of the library stays usable.
+#[test]
+fn a_broken_library_member_is_an_error_only_when_used() {
+    let library = SourceCode::foreign(
+        "Assets/Vendor/Helper.cs",
+        r#"
+        public static class Helper
+        {
+            public static int Fine(int x) { return x + 1; }
+            public static int Broken(int x) { return x + undefined_name; }
+        }
+        public class Broken2 { public int x = this is not C#; }
+        "#,
+    );
+    // using only what works: no error at all
+    let Some(emulator) = run_sources(
+        vec![
+            library.clone(),
+            SourceCode::new(
+                "Assets/MenSharp/Program.cs",
+                r#"
+                namespace Game
+                {
+                    public class Program
+                    {
+                        public static int total;
+                        public static void Main() { total = Helper.Fine(41); }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert_eq!(exported_int(&emulator, "total"), 42);
+}
+
+#[test]
+fn a_broken_library_member_message_names_the_reason() {
+    let sources = vec![
+        SourceCode::foreign(
+            "Assets/Vendor/Helper.cs",
+            r#"
+            public static class Helper
+            {
+                public static int Broken(int x) { return x + undefined_name; }
+            }
+            "#,
+        ),
+        SourceCode::new(
+            "Assets/MenSharp/Program.cs",
+            r#"
+            namespace Game
+            {
+                public class Program
+                {
+                    public static int total;
+                    public static void Main() { total = Helper.Broken(1); }
+                }
+            }
+            "#,
+        ),
+    ];
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let mut sources = sources;
+    sources.extend(Compiler::corlib_sources());
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    // the library's own error is not among the reported ones
+    assert_eq!(bodies.errors, vec![], "library errors must not be reported");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    let messages: Vec<&str> = output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        messages.iter().any(|message| message
+            .contains("`Helper.Broken` is used from MenSharp code")
+            && message.contains("cannot compile it")),
+        "{messages:?}"
+    );
+}
+
+/// `#if` is evaluated: a library file's editor-only block (the UdonSharp
+/// convention `#if !COMPILER_UDONSHARP && UNITY_EDITOR`) and an UdonSharp-only
+/// block are what UdonSharp's compiler would see; the user's own files see
+/// `COMPILER_MENSHARP`.
+#[test]
+fn conditional_compilation_follows_the_defines() {
+    let Some(emulator) = run_sources(
+        vec![
+            SourceCode::foreign(
+                "Assets/Vendor/Helper.cs",
+                r#"
+                #if !COMPILER_UDONSHARP && UNITY_EDITOR
+                using UnityEditor;
+                [CustomEditor(typeof(Helper))]
+                public class HelperEditor : Editor { this would not parse }
+                #endif
+                public static class Helper
+                {
+                #if COMPILER_UDONSHARP
+                    public static int Value() { return 1; }
+                #else
+                    public static int Value() { return 2; }
+                #endif
+                }
+                "#,
+            ),
+            SourceCode::new(
+                "Assets/MenSharp/Program.cs",
+                r#"
+                namespace Game
+                {
+                    public class Program
+                    {
+                        public static int total;
+                        public static void Main()
+                        {
+                #if COMPILER_MENSHARP
+                            total = Helper.Value() + 10;
+                #else
+                            total = -1;
+                #endif
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert_eq!(exported_int(&emulator, "total"), 11);
+}
+
+/// A library type under a name the user's code declares too is dropped —
+/// the user's wins, silently, as a library's would in any C# project.
+#[test]
+fn the_users_type_wins_over_a_library_type_of_the_same_name() {
+    let Some(emulator) = run_sources(
+        vec![
+            SourceCode::foreign(
+                "Assets/Vendor/Helper.cs",
+                r#"
+                public static class Helper { public static int Value() { return 1; } }
+                "#,
+            ),
+            SourceCode::new(
+                "Assets/MenSharp/Program.cs",
+                r#"
+                public static class Helper { public static int Value() { return 2; } }
+                namespace Game
+                {
+                    public class Program
+                    {
+                        public static int total;
+                        public static void Main() { total = Helper.Value(); }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert_eq!(exported_int(&emulator, "total"), 2);
+}
+
+/// A class deriving from an engine class (a plain MonoBehaviour in a
+/// library, say) is neither a program nor an object Udon can hold: using it
+/// as a type is an error naming the base, not a silent `object[]`.
+#[test]
+fn an_engine_derived_library_class_cannot_be_used_as_a_type() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::foreign(
+                "Assets/Vendor/Placer.cs",
+                r#"
+                public class Placer : System.Collections.ArrayList { public int slot; }
+                "#,
+            ),
+            SourceCode::new(
+                "Assets/MenSharp/Switch.cs",
+                r#"
+                namespace Game
+                {
+                    public class Switch : MenSharp.MenSharpBehaviour
+                    {
+                        public Placer placer;
+                        public void Interact() { placer.slot = 1; }
                     }
                 }
                 "#,
@@ -1377,13 +1878,7 @@ fn what_a_custom_event_cannot_carry_is_an_error() {
     assert!(
         messages
             .iter()
-            .any(|message| message.contains("takes arguments")),
-        "{messages:?}"
-    );
-    assert!(
-        messages
-            .iter()
-            .any(|message| message.contains("returns a value")),
+            .any(|message| message.contains("derives from `System.Collections.ArrayList`")),
         "{messages:?}"
     );
 }

@@ -24,6 +24,7 @@ pub mod directive;
 pub mod error;
 pub mod lexer;
 pub mod parser;
+pub mod preprocess;
 
 /// A parsed source file, together with the arena its tree lives in.
 ///
@@ -79,13 +80,25 @@ unsafe impl Sync for MenSharpAST {}
 impl MenSharpAST {
     /// Parses a source file. Always succeeds: syntax errors are collected rather than
     /// thrown, and the tree keeps a hole where each broken construct was.
+    pub fn parse(source: impl Into<Arc<str>>) -> Self {
+        Self::parse_with_defines(source, &[])
+    }
+
+    /// [`MenSharpAST::parse`] with conditional compilation: the arms of
+    /// `#if` that `defines` leaves inactive are blanked before lexing (see
+    /// [`crate::preprocess`]), so [`MenSharpAST::source`] is the text as
+    /// compiled — same length and line structure as the original.
     #[allow(
         clippy::arc_with_non_send_sync,
         reason = "`Bump` is not `Sync`, which is the whole point of the `Sync` justification \
                   above: the arena is sealed after this function returns, so sharing it is safe"
     )]
-    pub fn parse(source: impl Into<Arc<str>>) -> Self {
+    pub fn parse_with_defines(source: impl Into<Arc<str>>, defines: &[&str]) -> Self {
         let source: Arc<str> = source.into();
+        let source: Arc<str> = match preprocess::preprocess(&source, defines) {
+            std::borrow::Cow::Borrowed(_) => source,
+            std::borrow::Cow::Owned(blanked) => Arc::from(blanked),
+        };
         let allocator = Arc::new(Bump::new());
         let mut errors = std::vec::Vec::new();
 
@@ -1280,7 +1293,11 @@ namespace Game.Counters
     fn directives_do_not_disturb_the_parse() {
         let source = "#if UNITY_EDITOR\nusing UnityEditor;\n#endif\n\
                       class A {\n#region Fields\n    int x; // note\n#endregion\n}";
+        // `#if` is evaluated: without the define the `using` is gone
         let ast = MenSharpAST::parse(source);
+        assert_eq!(ast.errors(), &[]);
+        assert_eq!(ast.ast().usings.len(), 0);
+        let ast = MenSharpAST::parse_with_defines(source, &["UNITY_EDITOR"]);
 
         assert_eq!(ast.errors(), &[]);
         assert_eq!(ast.ast().usings.len(), 1);

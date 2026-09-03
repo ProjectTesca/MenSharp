@@ -4,7 +4,9 @@
     "references": [
         "VRC.Udon",
         "VRC.Udon.Editor",
-        "ProjectTesca.MenSharp.Runtime"
+        "ProjectTesca.MenSharp.Runtime",
+        "UdonSharp.Runtime",
+        "UdonSharp.Editor"
     ],
     "includePlatforms": [
         "Editor"

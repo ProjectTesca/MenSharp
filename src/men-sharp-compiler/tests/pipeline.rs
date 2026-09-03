@@ -49,7 +49,11 @@ fn sources() -> Vec<SourceCode> {
 
 /// A stable, order-independent fingerprint of a compilation's outcome.
 fn fingerprint(thread_count: Option<usize>) -> (Vec<String>, Vec<String>) {
-    let compiler = Compiler::new(CompilerSettings { thread_count }).unwrap();
+    let compiler = Compiler::new(CompilerSettings {
+        thread_count,
+        defines: Vec::new(),
+    })
+    .unwrap();
     let files = compiler.parse(sources());
     let declarations = compiler.collect_declarations(&files);
 
@@ -182,6 +186,7 @@ fn signatures_resolve_against_a_real_core_library() {
 fn thread_count_setting_is_respected() {
     let compiler = Compiler::new(CompilerSettings {
         thread_count: Some(3),
+        defines: Vec::new(),
     })
     .unwrap();
     assert_eq!(compiler.thread_count(), 3);

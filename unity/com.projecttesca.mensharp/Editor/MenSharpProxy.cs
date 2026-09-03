@@ -470,6 +470,42 @@ public static class MenSharpProxy
         return paired;
     }
 
+    /// The UdonBehaviour UdonSharp keeps behind one of its proxies — what an
+    /// M# program can actually talk to.
+    private static UdonBehaviour BackingOrWarn(
+        UdonSharp.UdonSharpBehaviour other, MenSharpBehaviour from, string field)
+    {
+        if (other == null)
+        {
+            return null;
+        }
+        UdonBehaviour backing = UdonSharpEditor.UdonSharpEditorUtility.GetBackingUdonBehaviour(other);
+        if (backing == null)
+        {
+            Debug.LogWarning(
+                $"MenSharp: {from.GetType().Name}.{field} points at the UdonSharp behaviour "
+                + $"{other.GetType().Name} on {other.gameObject.name}, which has no backing "
+                + "UdonBehaviour yet — the reference will be empty. Let UdonSharp compile it "
+                + "(it needs a program asset), then re-enter play mode.",
+                from);
+            return null;
+        }
+        // UdonSharp compiles on its own schedule: a program asset it has not
+        // compiled yet has no program, and every call into it would be a
+        // silent no-op — say so instead
+        var program = backing.programSource as UdonSharp.UdonSharpProgramAsset;
+        if (backing.programSource == null || (program != null && program.SerializedProgramAsset == null))
+        {
+            Debug.LogWarning(
+                $"MenSharp: {from.GetType().Name}.{field} points at the UdonSharp behaviour "
+                + $"{other.GetType().Name} on {other.gameObject.name}, whose program UdonSharp "
+                + "has not compiled yet — calls into it will do nothing. Run VRChat SDK > "
+                + "Udon Sharp > Compile All UdonSharp Programs, then re-enter play mode.",
+                from);
+        }
+        return backing;
+    }
+
     /// The fields Unity serializes on the proxy — public ones plus
     /// `[SerializeField]`, minus `[NonSerialized]` — which is also exactly
     /// what the compiler exports. Walked class by class because GetFields
@@ -525,6 +561,26 @@ public static class MenSharpProxy
                 {
                     mapped[index] = PairedOrWarn(
                         source.GetValue(index) as MenSharpBehaviour, proxy, field.Name);
+                }
+                value = mapped;
+                valueType = typeof(UdonBehaviour[]);
+            }
+            // an UdonSharp behaviour is a proxy too, over the UdonBehaviour
+            // UdonSharp keeps behind it
+            else if (typeof(UdonSharp.UdonSharpBehaviour).IsAssignableFrom(valueType))
+            {
+                value = BackingOrWarn(value as UdonSharp.UdonSharpBehaviour, proxy, field.Name);
+                valueType = typeof(UdonBehaviour);
+            }
+            else if (valueType.IsArray
+                && typeof(UdonSharp.UdonSharpBehaviour).IsAssignableFrom(valueType.GetElementType()))
+            {
+                var source = (Array)value;
+                var mapped = new UdonBehaviour[source == null ? 0 : source.Length];
+                for (int index = 0; index < mapped.Length; index++)
+                {
+                    mapped[index] = BackingOrWarn(
+                        source.GetValue(index) as UdonSharp.UdonSharpBehaviour, proxy, field.Name);
                 }
                 value = mapped;
                 valueType = typeof(UdonBehaviour[]);

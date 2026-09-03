@@ -31,6 +31,10 @@ use crate::symbol::{
 #[derive(Debug)]
 pub struct FileDeclarations<'ast> {
     pub file: FileId,
+    /// A foreign (UdonSharp) file: merged after every other, and a type it
+    /// declares under a name the user's code already declares is dropped
+    /// without a word — the user's wins, as a library's would.
+    pub foreign: bool,
     /// `using` directives at file scope, `global using` included.
     pub usings: Vec<&'ast UsingDirective<'ast, 'ast>>,
     pub extern_aliases: Vec<&'ast ExternAliasDirective<'ast>>,
@@ -92,6 +96,7 @@ pub fn collect_file<'ast>(
 ) -> FileDeclarations<'ast> {
     FileDeclarations {
         file,
+        foreign: false,
         usings: unit.usings.iter().collect(),
         extern_aliases: unit.extern_aliases.iter().collect(),
         members: collect_namespace_members(unit.members),

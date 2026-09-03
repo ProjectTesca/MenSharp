@@ -32,14 +32,13 @@ public static class MenSharpCompiler
         if (!Directory.Exists(SourceRoot))
         {
             Directory.CreateDirectory(SourceRoot);
-            EnsureAssemblyDefinition();
+            CreateAssemblyDefinition();
             AssetDatabase.Refresh();
             Debug.Log(
                 $"MenSharp: created {SourceRoot}. Put your .cs sources there (classes "
                 + "inheriting MenSharpBehaviour become programs) and compile again.");
             return;
         }
-        EnsureAssemblyDefinition();
 
         var sources = Directory.GetFiles(SourceRoot, "*.cs", SearchOption.AllDirectories);
         if (sources.Length == 0)
@@ -47,6 +46,9 @@ public static class MenSharpCompiler
             Debug.LogError($"MenSharp: no .cs files under {SourceRoot}.");
             return;
         }
+        // UdonSharp scripts in the project: read for the declarations of their
+        // behaviours, so `public Door door` may name one and call it typed
+        var foreign = UdonSharpSources();
 
         string binary = FindCompilerBinary();
         if (binary == null)
@@ -62,7 +64,7 @@ public static class MenSharpCompiler
         }
 
         var stopwatch = Stopwatch.StartNew();
-        if (!RunCompiler(binary, outputDirectory, sources))
+        if (!RunCompiler(binary, outputDirectory, sources, foreign))
         {
             Debug.LogError("MenSharp: compilation failed.");
             return;
@@ -118,13 +120,19 @@ public static class MenSharpCompiler
         }
     }
 
-    private static bool RunCompiler(string binary, string outputDirectory, string[] sources)
+    private static bool RunCompiler(
+        string binary, string outputDirectory, string[] sources, List<string> foreign)
     {
         var arguments = new List<string>();
         foreach (string reference in ReferenceAssemblies())
         {
             arguments.Add("--reference");
             arguments.Add(reference);
+        }
+        foreach (string path in foreign)
+        {
+            arguments.Add("--udonsharp");
+            arguments.Add(path);
         }
         arguments.Add("--emit-udon-all");
         arguments.Add("--out-dir");
@@ -166,7 +174,12 @@ public static class MenSharpCompiler
     /// which keeps them out of *UdonSharp's* compilation pass (U# compiles
     /// every Assembly-CSharp script and cannot resolve MenSharpBehaviour).
     /// Unity still compiles them normally, so IDE completion keeps working.
-    private static void EnsureAssemblyDefinition()
+    ///
+    /// Written once, when the source folder is first created. Deleting it is
+    /// a choice this code respects: an assembly definition cannot reference
+    /// Assembly-CSharp, so a project whose UdonSharp assets live there (no
+    /// asmdef of their own) needs the M# sources there too, to name them.
+    private static void CreateAssemblyDefinition()
     {
         string path = SourceRoot + "/MenSharp.Scripts.asmdef";
         if (File.Exists(path))
@@ -177,7 +190,8 @@ public static class MenSharpCompiler
     ""name"": ""MenSharp.Scripts"",
     ""rootNamespace"": """",
     ""references"": [
-        ""ProjectTesca.MenSharp.Runtime""
+        ""ProjectTesca.MenSharp.Runtime"",
+        ""UdonSharp.Runtime""
     ],
     ""includePlatforms"": [],
     ""excludePlatforms"": [],
@@ -223,6 +237,62 @@ public static class MenSharpCompiler
         yield return typeof(VRC.Udon.Common.Interfaces.IUdonEventReceiver).Assembly.Location;
         // Networking, VRCPlayerApi
         yield return typeof(VRC.SDKBase.Networking).Assembly.Location;
+        // UdonSharpBehaviour: what an UdonSharp script's class derives from
+        yield return typeof(UdonSharp.UdonSharpBehaviour).Assembly.Location;
+    }
+
+    /// The project's other C# sources — every `.cs` under Assets outside our
+    /// own folder, and under non-VRChat packages, `Editor` folders excluded:
+    /// what the compiler reads as a *library*. UdonSharp behaviours in them
+    /// are programs to talk to by name; everything else (helpers, enums) is
+    /// compiled into a program on use, the way UdonSharp itself does it.
+    /// Their errors are theirs: only what M# code uses is checked, at the
+    /// use. No heuristics, so no file is missed.
+    private static List<string> UdonSharpSources()
+    {
+        var roots = new List<string> { "Assets" };
+        if (Directory.Exists("Packages"))
+        {
+            foreach (string package in Directory.GetDirectories("Packages"))
+            {
+                string name = Path.GetFileName(package);
+                if (name.StartsWith("com.vrchat.", StringComparison.Ordinal) || name == PackageName)
+                {
+                    continue;
+                }
+                roots.Add(package);
+            }
+        }
+        // with the separator: "Assets/MenSharpTools" is not under "Assets/MenSharp"
+        string ownSources = Path.GetFullPath(SourceRoot).TrimEnd(Path.DirectorySeparatorChar)
+            + Path.DirectorySeparatorChar;
+        var found = new List<string>();
+        foreach (string root in roots)
+        {
+            foreach (string file in Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories))
+            {
+                string full = Path.GetFullPath(file);
+                if (full.StartsWith(ownSources, StringComparison.Ordinal) || IsEditorPath(full))
+                {
+                    continue;
+                }
+                found.Add(file);
+            }
+        }
+        found.Sort(StringComparer.Ordinal);
+        return found;
+    }
+
+    private static bool IsEditorPath(string path)
+    {
+        foreach (string segment in path.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+        {
+            if (segment == "Editor")
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// Where the bundled compiler for this platform lives. Pure path

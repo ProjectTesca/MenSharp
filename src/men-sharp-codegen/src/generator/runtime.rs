@@ -59,7 +59,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 | SymbolKind::Struct
                 | SymbolKind::RecordStruct
                 | SymbolKind::Interface
-        ) && self.behaviour_in_type(ty).is_none()
+        ) && !self.is_program_reference(ty)
     }
 
     /// `(Collider)obj`: a cast to an engine (or .NET) class or interface
@@ -250,7 +250,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let subtypes: Vec<i32> = self
             .type_order
             .iter()
-            .filter(|ty| self.is_subtype(ty, &target) && self.behaviour_in_type(ty).is_none())
+            .filter(|ty| self.is_subtype(ty, &target) && !self.is_program_reference(ty))
             .filter_map(|ty| self.layouts.get(ty).map(|layout| layout.type_id))
             .collect();
         let condition = self.temp("SystemBoolean");
@@ -563,7 +563,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let ctx = self.dispatcher_ctx(key);
                 self.error(&ctx, message, 0..0);
             }
-            if self.behaviour_in_type(&ty).is_none()
+            if !self.is_program_reference(&ty)
                 && let Some(implementation) = self.object_member_implementation(&ty, name)
             {
                 self.ensure_function(&implementation);
@@ -602,7 +602,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let targets: Vec<(Type, i32)> = self
             .type_order
             .iter()
-            .filter(|ty| self.behaviour_in_type(ty).is_none())
+            .filter(|ty| !self.is_program_reference(ty))
             .filter_map(|ty| {
                 self.layouts
                     .get(ty)

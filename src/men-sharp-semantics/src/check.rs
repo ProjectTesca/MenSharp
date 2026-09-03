@@ -30,6 +30,8 @@
 use std::collections::HashMap;
 use std::ops::Range;
 
+use crate::FileId;
+
 use men_sharp_parser::ast::{
     Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator, Block,
     ConstructorInitializerKind, EntityID, Expression, ForInitializer, FunctionBody,
@@ -73,6 +75,11 @@ pub struct BodyCheck {
     /// chain to (a struct, or a base that is not a source class).
     pub constructor_chains: HashMap<SymbolId, ConstructorChain>,
     pub errors: Vec<SemanticError>,
+    /// Members and types of foreign files that had errors — syntax,
+    /// declaration, signature or body — and the first reason. Not reported
+    /// as such (a library's errors are not the user's), but compiling one
+    /// is an error at the use. See [`uncompilable_foreign_members`].
+    pub uncompilable: HashMap<SymbolId, String>,
 }
 
 impl BodyCheck {
@@ -83,7 +90,67 @@ impl BodyCheck {
         self.enumerations.extend(other.enumerations);
         self.constructor_chains.extend(other.constructor_chains);
         self.errors.extend(other.errors);
+        self.uncompilable.extend(other.uncompilable);
     }
+}
+
+/// Which declarations of the foreign files an error fell inside: for each
+/// error in such a file — a syntax error, a declaration or signature
+/// error, a body error — the innermost type or member whose declaration
+/// spans it, with the error's text. The driver stores the result in
+/// [`BodyCheck::uncompilable`].
+pub fn uncompilable_foreign_members(
+    declarations: &Declarations<'_>,
+    signatures: &Signatures,
+    bodies: &BodyCheck,
+) -> HashMap<SymbolId, String> {
+    // per foreign file: every declaration span in it
+    let mut spans: HashMap<FileId, Vec<(std::ops::Range<usize>, SymbolId)>> = HashMap::new();
+    for (id, symbol) in declarations.table.iter() {
+        if symbol.kind == SymbolKind::Namespace {
+            continue;
+        }
+        for site in &symbol.declarations {
+            if declarations.is_foreign(site.file) {
+                spans
+                    .entry(site.file)
+                    .or_default()
+                    .push((site.syntax.full_span(), id));
+            }
+        }
+    }
+    if spans.is_empty() {
+        return HashMap::new();
+    }
+
+    let mut out: HashMap<SymbolId, String> = HashMap::new();
+    let mut record = |file: FileId, span: &std::ops::Range<usize>, message: String| {
+        let Some(candidates) = spans.get(&file) else {
+            return;
+        };
+        // the innermost declaration containing the error
+        let innermost = candidates
+            .iter()
+            .filter(|(range, _)| range.start <= span.start && span.end <= range.end)
+            .min_by_key(|(range, _)| range.end - range.start);
+        if let Some((_, symbol)) = innermost {
+            out.entry(*symbol).or_insert(message);
+        }
+    };
+    for (file, span, message) in &declarations.foreign_syntax_errors {
+        record(*file, span, message.clone());
+    }
+    for error in declarations
+        .errors
+        .iter()
+        .chain(&signatures.errors)
+        .chain(&bodies.errors)
+    {
+        if declarations.is_foreign(error.file) {
+            record(error.file, &error.span, format!("{:?}", error.kind));
+        }
+    }
+    out
 }
 
 /// The constructor call a constructor makes first (§15.11.2): to a base
@@ -229,6 +296,7 @@ pub fn check_file(
         enumerations: checker.enumerations,
         constructor_chains: checker.constructor_chains,
         errors: checker.resolver.out.errors,
+        uncompilable: HashMap::new(),
     }
 }
 

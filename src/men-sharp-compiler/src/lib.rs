@@ -22,7 +22,7 @@
 //! ```
 //! use men_sharp_compiler::{Compiler, CompilerSettings, SourceCode};
 //!
-//! let compiler = Compiler::new(CompilerSettings { thread_count: Some(2) }).unwrap();
+//! let compiler = Compiler::new(CompilerSettings { thread_count: Some(2), ..Default::default() }).unwrap();
 //! let files = compiler.parse(vec![SourceCode::new("main.ms", "class Program {}")]);
 //! let declarations = compiler.collect_declarations(&files);
 //! assert!(declarations.errors.is_empty());
@@ -48,6 +48,11 @@ pub use references::{ReferenceError, ReferenceSet};
 pub struct CompilerSettings {
     /// Worker threads for the parallel phases. `None` means one per available core.
     pub thread_count: Option<usize>,
+    /// Conditional compilation symbols (`#if NAME`), on top of the ones the
+    /// compiler always defines: `COMPILER_MENSHARP` for every file, and
+    /// `COMPILER_UDONSHARP` for foreign (UdonSharp) files, which were written
+    /// for that compiler's eyes.
+    pub defines: Vec<String>,
 }
 
 /// One input file: a display name (usually the path) and its text.
@@ -55,6 +60,10 @@ pub struct CompilerSettings {
 pub struct SourceCode {
     pub name: Arc<str>,
     pub text: Arc<str>,
+    /// A foreign source: an UdonSharp script, read for the declarations of
+    /// its behaviours (what M# code can reach by name) and nothing more —
+    /// its bodies are UdonSharp's to compile, and so are its errors.
+    pub foreign: bool,
 }
 
 impl SourceCode {
@@ -62,6 +71,16 @@ impl SourceCode {
         Self {
             name: name.into(),
             text: text.into(),
+            foreign: false,
+        }
+    }
+
+    /// An UdonSharp source: declarations only. See [`SourceCode::foreign`].
+    pub fn foreign(name: impl Into<Arc<str>>, text: impl Into<Arc<str>>) -> Self {
+        Self {
+            name: name.into(),
+            text: text.into(),
+            foreign: true,
         }
     }
 }
@@ -71,6 +90,8 @@ impl SourceCode {
 pub struct ParsedFile {
     pub name: Arc<str>,
     pub ast: MenSharpAST,
+    /// See [`SourceCode::foreign`].
+    pub foreign: bool,
 }
 
 pub struct Compiler {
@@ -108,9 +129,18 @@ impl Compiler {
         self.pool.install(|| {
             sources
                 .into_par_iter()
-                .map(|source| ParsedFile {
-                    name: source.name,
-                    ast: MenSharpAST::parse(source.text),
+                .map(|source| {
+                    let mut defines: Vec<&str> =
+                        self.settings.defines.iter().map(String::as_str).collect();
+                    defines.push("COMPILER_MENSHARP");
+                    if source.foreign {
+                        defines.push("COMPILER_UDONSHARP");
+                    }
+                    ParsedFile {
+                        name: source.name,
+                        ast: MenSharpAST::parse_with_defines(source.text, &defines),
+                        foreign: source.foreign,
+                    }
                 })
                 .collect()
         })
@@ -120,15 +150,35 @@ impl Compiler {
     /// symbol table. The result borrows the parsed files, which is what ties the
     /// symbol table's lifetime to the syntax trees it points into.
     pub fn collect_declarations<'ast>(&self, files: &'ast [ParsedFile]) -> Declarations<'ast> {
-        let collected = self.pool.install(|| {
+        let collected: Vec<_> = self.pool.install(|| {
             files
                 .par_iter()
                 .enumerate()
-                .map(|(index, file)| collect_file(FileId(index as u32), file.ast.ast()))
+                .map(|(index, file)| {
+                    let mut declarations = collect_file(FileId(index as u32), file.ast.ast());
+                    declarations.foreign = file.foreign;
+                    declarations
+                })
                 .collect()
         });
 
         let mut declarations = merge_declarations(collected);
+        // a foreign file's syntax errors are not reported, but they make the
+        // declarations around them uncompilable — kept for `check_bodies`
+        declarations.foreign_syntax_errors = files
+            .iter()
+            .enumerate()
+            .filter(|(_, file)| file.foreign)
+            .flat_map(|(index, file)| {
+                file.ast.errors().iter().map(move |error| {
+                    (
+                        FileId(index as u32),
+                        error.span.clone(),
+                        format!("syntax error: {:?}", error.kind),
+                    )
+                })
+            })
+            .collect();
         declarations.sources = files
             .iter()
             .map(|file| men_sharp_semantics::SourceText {
@@ -136,6 +186,7 @@ impl Compiler {
                 text: std::sync::Arc::from(file.ast.source()),
             })
             .collect();
+        declarations.foreign_files = files.iter().map(|file| file.foreign).collect();
         declarations
     }
 
@@ -209,6 +260,13 @@ impl Compiler {
         }
         all.errors
             .sort_by_key(|error| (error.file, error.span.start, error.span.end));
+        // a foreign file is a library: its errors are not the user's to fix
+        // and are not reported, but whatever they sit in cannot be compiled
+        // — used from M# code, that is reported there, with the reason
+        all.uncompilable =
+            men_sharp_semantics::uncompilable_foreign_members(declarations, signatures, &all);
+        all.errors
+            .retain(|error| !declarations.is_foreign(error.file));
         all
     }
 
