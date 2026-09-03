@@ -1264,7 +1264,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let SyntaxRef::Field { declarator, .. } = site.syntax else {
             return;
         };
-        let Some(InitializerValue::Expression(value)) = &declarator.initializer else {
+        let Some(written) = &declarator.initializer else {
             return;
         };
         let slot = self.statics[&field];
@@ -1290,9 +1290,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             caught: Vec::new(),
         };
         self.emit_function_start_mark(&ctx);
-        if let Some(value_slot) = self.lower_expression(&mut ctx, value) {
-            let _ = ty;
-            self.copy(value_slot, slot);
+        match written {
+            InitializerValue::Expression(value) => {
+                if let Some(value_slot) = self.lower_expression(&mut ctx, value) {
+                    let _ = ty;
+                    self.copy(value_slot, slot);
+                }
+            }
+            // `static int[] Steps = { 1, 2 };`
+            InitializerValue::Nested(nested) => {
+                if let Some(array) =
+                    self.lower_array_shorthand(&mut ctx, &ty, nested, nested.span())
+                {
+                    self.copy(array, slot);
+                }
+            }
         }
     }
 
@@ -2678,29 +2690,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 SyntaxRef::Property(property) => property.initializer.as_ref(),
                 _ => None,
             })
-            .and_then(|initializer| match initializer {
-                InitializerValue::Expression(expression) => Some(expression),
-                InitializerValue::Nested(nested) => {
-                    // `= { 1, 2 };` — dropping it silently would leave the
-                    // field null with no complaint
-                    let (declaration_file, _) = self.declaration_site(field);
-                    self.errors.push(CodegenError {
-                        message: "the array-initializer shorthand is not supported by the \
-                                  Udon backend yet: write `= new T[] { ... }`"
-                            .into(),
-                        file: declaration_file,
-                        span: nested.span(),
-                    });
-                    None
-                }
-            });
+            ;
 
         // literal initializers bake into the heap default instead of running
         // as code. This matters for exported behaviour fields: the inspector's
         // public-variable values are applied *after* the heap loads, so a
         // baked default lets them win — runtime initializer code would
         // overwrite them on the first event
-        let baked = initializer.and_then(|expression| literal_heap_init(expression, &udon_type));
+        // `= { 1, 2 }` builds an array, so it always runs at startup
+        let baked = match initializer {
+            Some(InitializerValue::Expression(expression)) => {
+                literal_heap_init(expression, &udon_type)
+            }
+            _ => None,
+        };
         let runs_at_startup = initializer.is_some() && baked.is_none();
 
         let sync = self.sync_mode_of(field);

@@ -434,6 +434,24 @@ impl Emulator {
             "SystemSingle.__op_Division__SystemSingle_SystemSingle__SystemSingle" => {
                 binary_f32!(|a: f32, b: f32| Value::Single(a / b))
             }
+            "SystemSingle.__op_Equality__SystemSingle_SystemSingle__SystemBoolean" => {
+                binary_f32!(|a: f32, b: f32| Value::Boolean(a == b))
+            }
+            "SystemSingle.__op_Inequality__SystemSingle_SystemSingle__SystemBoolean" => {
+                binary_f32!(|a: f32, b: f32| Value::Boolean(a != b))
+            }
+            "SystemSingle.__op_LessThan__SystemSingle_SystemSingle__SystemBoolean" => {
+                binary_f32!(|a: f32, b: f32| Value::Boolean(a < b))
+            }
+            "SystemSingle.__op_GreaterThan__SystemSingle_SystemSingle__SystemBoolean" => {
+                binary_f32!(|a: f32, b: f32| Value::Boolean(a > b))
+            }
+            "SystemSingle.__op_LessThanOrEqual__SystemSingle_SystemSingle__SystemBoolean" => {
+                binary_f32!(|a: f32, b: f32| Value::Boolean(a <= b))
+            }
+            "SystemSingle.__op_GreaterThanOrEqual__SystemSingle_SystemSingle__SystemBoolean" => {
+                binary_f32!(|a: f32, b: f32| Value::Boolean(a >= b))
+            }
             // ---- Boolean ----
             "SystemBoolean.__op_UnaryNegation__SystemBoolean__SystemBoolean" => {
                 let args = self.pop_arguments(2)?;

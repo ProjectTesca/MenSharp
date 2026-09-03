@@ -206,18 +206,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         for declarator in declaration.declarators {
             let initializer = match &declarator.initializer {
                 Some(InitializerValue::Expression(value)) => Some(value),
-                Some(InitializerValue::Nested(nested)) => {
-                    // `int[] x = { 1, 2 };` — dropping it silently would
-                    // leave x null with no complaint
-                    self.error(
-                        ctx,
-                        "the array-initializer shorthand is not supported by the Udon \
-                         backend yet: write `= new T[] { ... }`",
-                        nested.span(),
-                    );
-                    None
-                }
-                None => None,
+                Some(InitializerValue::Nested(_)) | None => None,
             };
             // `var` declarations resolve to the initializer's type
             let ty = match &declared {
@@ -232,6 +221,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 && let Some(lowered) = self.owned_value_as(ctx, value, &ty)
             {
                 self.copy(lowered, slot);
+            }
+            // `int[] x = { 1, 2 };`
+            if let Some(InitializerValue::Nested(nested)) = &declarator.initializer
+                && let Some(array) = self.lower_array_shorthand(ctx, &ty, nested, nested.span())
+            {
+                self.copy(array, slot);
             }
             self.bind_local(ctx, declarator.name.value, slot, ty);
         }
@@ -3399,7 +3394,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             };
             let slot = self.allocate_array(ctx, &array_type, size, span.clone());
             // element initializers
-            self.fill_array_initializer(ctx, slot, &array_type, new_expression, span);
+            if let Some(elements) = Self::collection_elements(&new_expression.initializer) {
+                self.fill_array_initializer(ctx, slot, &array_type, elements, span);
+            }
             return Piece::Value(slot, array_type);
         }
 
@@ -3434,17 +3431,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // `new int[] { 1, 2 }` / `new[] { 1, 2 }`: no written size — it is
         // the element count
         if let Type::Array { rank: 1, .. } = &created {
-            use men_sharp_parser::ast::{CollectionElement, Initializer};
-            let count = match &new_expression.initializer {
-                Some(Initializer::Collection { elements, .. }) => elements
-                    .iter()
-                    .filter(|element| matches!(element, CollectionElement::Expression(_)))
-                    .count(),
-                _ => 0,
-            };
-            let size = self.int_constant(count as i32);
-            let slot = self.allocate_array(ctx, &created, size, span.clone());
-            self.fill_array_initializer(ctx, slot, &created, new_expression, span);
+            let elements = Self::collection_elements(&new_expression.initializer);
+            let slot = self.allocate_written_array(ctx, &created, elements, span.clone());
+            if let Some(elements) = elements {
+                self.fill_array_initializer(ctx, slot, &created, elements, span);
+            }
             return Piece::Value(slot, created);
         }
 
@@ -3653,18 +3644,69 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         slot
     }
 
-    fn fill_array_initializer(
+    /// The `{ ... }` elements of an initializer, when it is a collection one.
+    fn collection_elements(
+        initializer: &'ast Option<men_sharp_parser::ast::Initializer<'ast, 'ast>>,
+    ) -> Option<&'ast [men_sharp_parser::ast::CollectionElement<'ast, 'ast>]> {
+        match initializer {
+            Some(men_sharp_parser::ast::Initializer::Collection { elements, .. }) => Some(elements),
+            _ => None,
+        }
+    }
+
+    /// An array as long as the elements written for it.
+    fn allocate_written_array(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        array_type: &Type,
+        elements: Option<&'ast [men_sharp_parser::ast::CollectionElement<'ast, 'ast>]>,
+        span: Range<usize>,
+    ) -> DataId {
+        use men_sharp_parser::ast::CollectionElement;
+        let count = elements.map_or(0, |elements| {
+            elements
+                .iter()
+                .filter(|element| matches!(element, CollectionElement::Expression(_)))
+                .count()
+        });
+        let size = self.int_constant(count as i32);
+        self.allocate_array(ctx, array_type, size, span)
+    }
+
+    /// `int[] a = { 1, 2 };` — C# reads the braces as `new int[] { 1, 2 }`,
+    /// and the declared type says what to make.
+    pub(super) fn lower_array_shorthand(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        array_type: &Type,
+        initializer: &'ast men_sharp_parser::ast::Initializer<'ast, 'ast>,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        if !matches!(array_type, Type::Array { rank: 1, .. }) {
+            // the checker said why; nothing sensible to build
+            return None;
+        }
+        let elements = match initializer {
+            men_sharp_parser::ast::Initializer::Collection { elements, .. } => Some(&**elements),
+            men_sharp_parser::ast::Initializer::Object { .. } => None,
+        };
+        let slot = self.allocate_written_array(ctx, array_type, elements, span.clone());
+        if let Some(elements) = elements {
+            self.fill_array_initializer(ctx, slot, array_type, elements, span);
+        }
+        Some(slot)
+    }
+
+    /// `{ 1, 2, 3 }` into an array that is already the right size.
+    pub(super) fn fill_array_initializer(
         &mut self,
         ctx: &mut Ctx<'ast>,
         array: DataId,
         array_type: &Type,
-        new_expression: &'ast NewExpression<'ast, 'ast>,
+        elements: &'ast [men_sharp_parser::ast::CollectionElement<'ast, 'ast>],
         span: Range<usize>,
     ) {
-        use men_sharp_parser::ast::{CollectionElement, Initializer};
-        let Some(Initializer::Collection { elements, .. }) = &new_expression.initializer else {
-            return;
-        };
+        use men_sharp_parser::ast::CollectionElement;
         let element_type = match array_type {
             Type::Array { element, .. } => Some((**element).clone()),
             _ => None,
@@ -3845,6 +3887,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             LiteralExpression::Integer(text) => {
                 let raw: String = text.value.chars().filter(|c| *c != '_').collect();
                 let trimmed = raw.trim_end_matches(['u', 'U', 'l', 'L']);
+                let suffix = raw[trimmed.len()..].to_ascii_lowercase();
                 let parsed = if let Some(hex) = trimmed
                     .strip_prefix("0x")
                     .or_else(|| trimmed.strip_prefix("0X"))
@@ -3858,16 +3901,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 } else {
                     trimmed.parse::<i64>()
                 };
-                match parsed {
-                    Ok(value) if i32::try_from(value).is_ok() => {
-                        let slot = self.int_constant(value as i32);
-                        let ty = self.corlib_type("Int32");
-                        Piece::Value(slot, ty)
+                // the suffix picks the type, exactly as the checker read it;
+                // without one, C# takes the first of `int`, `long` that fits
+                match (parsed, suffix.contains('u'), suffix.contains('l')) {
+                    (Ok(value), false, false) if i32::try_from(value).is_ok() => {
+                        Piece::Value(self.int_constant(value as i32), self.corlib_type("Int32"))
+                    }
+                    (Ok(value), false, _) => {
+                        let slot =
+                            self.constant("SystemInt64", &value.to_string(), HeapInit::Int64(value));
+                        Piece::Value(slot, self.corlib_type("Int64"))
+                    }
+                    (Ok(value), true, false) if u32::try_from(value).is_ok() => {
+                        let slot = self.constant(
+                            "SystemUInt32",
+                            &value.to_string(),
+                            HeapInit::UInt32(value as u32),
+                        );
+                        Piece::Value(slot, self.corlib_type("UInt32"))
+                    }
+                    (Ok(_), true, _) => {
+                        self.error(
+                            ctx,
+                            "`ulong` literals are not supported by the Udon backend yet",
+                            text.span.clone(),
+                        );
+                        Piece::Error
                     }
                     _ => {
                         self.error(
                             ctx,
-                            "integer literals outside `int` range are not supported yet",
+                            "this integer literal does not fit in `long`",
                             text.span.clone(),
                         );
                         Piece::Error

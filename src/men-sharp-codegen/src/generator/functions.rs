@@ -608,20 +608,34 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let Some(site) = symbol.declarations.first() else {
                 continue;
             };
-            let initializer = match &site.syntax {
+            let written = match &site.syntax {
                 SyntaxRef::Field { declarator, .. } | SyntaxRef::Event { declarator, .. } => {
-                    match &declarator.initializer {
-                        Some(InitializerValue::Expression(value)) => Some(value),
-                        _ => None,
-                    }
+                    declarator.initializer.as_ref()
                 }
-                SyntaxRef::Property(property) => match &property.initializer {
-                    Some(InitializerValue::Expression(value)) => Some(value),
-                    _ => None,
-                },
+                SyntaxRef::Property(property) => property.initializer.as_ref(),
+                _ => None,
+            };
+            let initializer = match written {
+                Some(InitializerValue::Expression(value)) => Some(value),
                 _ => None,
             };
             let object = ctx.this_slot.expect("constructors have this");
+            // `public int[] steps = { 1, 2 };`
+            if let Some(InitializerValue::Nested(nested)) = written {
+                let field_type = match self.signatures.members.get(&member) {
+                    Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => {
+                        self.substitute(ty, &ctx.key.bindings)
+                    }
+                    _ => continue,
+                };
+                if let Some(array) =
+                    self.lower_array_shorthand(ctx, &field_type, nested, nested.span())
+                {
+                    let index = self.int_constant(slot_index as i32);
+                    self.set_element(ctx, object, index, array, 0..0);
+                }
+                continue;
+            }
             let Some(initializer) = initializer else {
                 // no initializer: C# guarantees the default value, and a
                 // fresh object[] element is null — which is not 0, and an

@@ -699,6 +699,14 @@ foreach (var pair in ages) { Debug.Log($"{pair.Key}: {pair.Value}"); }
 foreach (var key in ages.Keys) { ... }
 ```
 
+`int[] steps = { 1, 2, 3 };` — the brace shorthand — works wherever C# takes
+it: a local, a field, `= { }` for an empty array, with each element converted
+to the element type (`long[] ids = { 1, 2 };`). It is exactly
+`= new int[] { 1, 2, 3 }`, and, like any initializer the compiler cannot bake
+into the heap, it runs when the program starts — so on a *behaviour* field it
+overwrites what the inspector holds. Leave such a field bare (`public int[]
+steps;`) when the inspector is meant to fill it.
+
 `text[i]` reads a character, as in C#, with the same
 `IndexOutOfRangeException` on a bad index. Udon exposes no `String.get_Chars`,
 so each read is a one-character `ToCharArray(i, 1)` — cheap, but an
@@ -757,8 +765,9 @@ wrong thing:
   type does the same job. `static` local functions that use a variable of the
   method around them (CS8421), and local functions that use a variable written
   below them (CS0841), are errors here as they are in C#;
-- the bare declaration shorthand `int[] x = { 1, 2 };` — write
-  `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.
+- `ulong` literals (`1UL`), and integer literals too big for `long`;
+- nested array braces (`{ { 1, 2 }, { 3, 4 } }`) — jagged and rectangular
+  arrays are not there yet.
 
 `ref`/`out` work everywhere: on engine methods (`Physics.Raycast(ray, out hit)`,
 `int.TryParse`) and on methods you define yourself. Named arguments

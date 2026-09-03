@@ -3277,51 +3277,6 @@ fn array_initializers_and_default_expressions() {
 }
 
 #[test]
-fn the_array_initializer_shorthand_is_an_error_not_a_silent_null() {
-    // `int[] x = { 1, 2 };` used to be dropped without a word, leaving x null
-    let Some(dir) = dotnet_shared_dir() else {
-        return;
-    };
-    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
-    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
-    let references = compiler.load_references(&bytes).unwrap();
-    let files = compiler.parse(vec![SourceCode::new(
-        "test.cs",
-        r#"
-        namespace Game
-        {
-            public class Program
-            {
-                public static void Main()
-                {
-                    int[] numbers = { 1, 2 };
-                    numbers[0] = 3;
-                }
-            }
-        }
-        "#,
-    )]);
-    let declarations = compiler.collect_declarations(&files);
-    let signatures = compiler.resolve_signatures(&declarations, &references);
-    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
-    let output = compiler.generate_udon(
-        &declarations,
-        &signatures,
-        &bodies,
-        &references,
-        &["Game", "Program"],
-    );
-    assert!(
-        output
-            .errors
-            .iter()
-            .any(|error| error.message.contains("array-initializer shorthand")),
-        "{:#?}",
-        output.errors
-    );
-}
-
-#[test]
 fn foreach_walks_a_list_a_string_and_a_user_enumerator() {
     let Some(emulator) = run_with_corlib(
         r#"
@@ -7051,4 +7006,48 @@ fn a_string_can_be_indexed() {
     };
     assert_eq!(string_of(&emulator, "Log"), "hobl!");
     assert_eq!(int_of(&emulator, "Result"), 151);
+}
+
+#[test]
+fn an_array_can_be_written_with_braces_alone() {
+    let source = r#"
+        namespace Game
+        {
+            public class Holder
+            {
+                public int[] Numbers = { 1, 2, 3 };
+                public string[] Names = { "a", "b" };
+                public int[] Empty = { };
+            }
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static int[] Steps = { 5, 6, 7 };
+                public static float[] Ratios = { 0.5f, 1.5f };
+                public static void Main()
+                {
+                    int[] local = { 10, 20, 30 };
+                    long[] widened = { 1, 2 };            // int literals into a long[]
+                    Result = local[0] + local[2];         // 40
+                    Result += Steps[1];                   // 46
+                    Result += local.Length + Steps.Length; // 52
+                    var holder = new Holder();
+                    Result += holder.Numbers[2];          // 55
+                    Result += holder.Empty.Length;        // 55
+                    Log += holder.Names[1];               // b
+                    if (Ratios[1] == 1.5f) Result += 100; // 155
+                    if (widened[1] == 2L) Result += 1000; // 1155
+                    foreach (int step in Steps) Result += step;  // 1173
+                    local[1] = 5;
+                    Result += local[1];                   // 1178
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "b");
+    assert_eq!(int_of(&emulator, "Result"), 1178);
 }

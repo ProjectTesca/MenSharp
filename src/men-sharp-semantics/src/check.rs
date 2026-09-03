@@ -692,6 +692,56 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
+    /// `{ 1, 2 }` where a value was expected: C# reads it as
+    /// `new T[] { 1, 2 }`, and only for an array type (CS0622).
+    fn check_array_initializer(
+        &mut self,
+        initializer: &'ast men_sharp_parser::ast::Initializer<'ast, 'ast>,
+        declared: &Type,
+    ) {
+        use men_sharp_parser::ast::{CollectionElement, Initializer};
+
+        let element = match declared {
+            Type::Error => return,
+            Type::Array { element, rank: 1 } => (**element).clone(),
+            other => {
+                let kind = SemanticErrorKind::TypeMismatch {
+                    expected: self.display(other),
+                    found: "array initializer".to_string(),
+                };
+                self.error(kind, initializer.span());
+                return;
+            }
+        };
+        let elements = match initializer {
+            Initializer::Collection { elements, .. } => *elements,
+            // `= { }`: nothing between the braces reads as an object
+            // initializer, and is the empty array
+            Initializer::Object { elements: [], .. } => &[][..],
+            Initializer::Object { .. } => {
+                let kind = SemanticErrorKind::TypeMismatch {
+                    expected: self.display(declared),
+                    found: "object initializer".to_string(),
+                };
+                self.error(kind, initializer.span());
+                return;
+            }
+        };
+        for written in elements {
+            match written {
+                CollectionElement::Expression(expression) => {
+                    let literal = Self::is_integer_literal(expression);
+                    let ty = self.check_expression_expecting(expression, Some(&element));
+                    self.require_convertible(&ty, &element, literal, expression.span());
+                }
+                // `{ { 1, 2 }, { 3, 4 } }`: a jagged or rectangular array
+                CollectionElement::Nested(nested) => {
+                    self.error(SemanticErrorKind::UnsupportedExpression, nested.span());
+                }
+            }
+        }
+    }
+
     /// `a[i]`, `text[i]`: every index has to be an `int`.
     fn require_integer_indices(&mut self, arguments: &[CallArgument<'ast>]) {
         let int32 = self.corlib("Int32");
@@ -1770,16 +1820,35 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let Some(MemberSignature::Field(field_type)) = member_signature else {
                     return;
                 };
-                if let Some(InitializerValue::Expression(initializer)) = &declarator.initializer {
-                    let function = crate::types::FunctionSignature {
-                        return_type: field_type.clone(),
-                        parameters: Vec::new(),
-                    };
-                    self.enter_body(&function, &[], node.is_static, |checker| {
-                        let literal = Self::is_integer_literal(initializer);
-                        let ty = checker.check_expression_expecting(initializer, Some(&field_type));
-                        checker.require_convertible(&ty, &field_type, literal, initializer.span());
-                    });
+                match &declarator.initializer {
+                    Some(InitializerValue::Expression(initializer)) => {
+                        let function = crate::types::FunctionSignature {
+                            return_type: field_type.clone(),
+                            parameters: Vec::new(),
+                        };
+                        self.enter_body(&function, &[], node.is_static, |checker| {
+                            let literal = Self::is_integer_literal(initializer);
+                            let ty =
+                                checker.check_expression_expecting(initializer, Some(&field_type));
+                            checker.require_convertible(
+                                &ty,
+                                &field_type,
+                                literal,
+                                initializer.span(),
+                            );
+                        });
+                    }
+                    // `public int[] steps = { 1, 2 };`
+                    Some(InitializerValue::Nested(initializer)) => {
+                        let function = crate::types::FunctionSignature {
+                            return_type: field_type.clone(),
+                            parameters: Vec::new(),
+                        };
+                        self.enter_body(&function, &[], node.is_static, |checker| {
+                            checker.check_array_initializer(initializer, &field_type);
+                        });
+                    }
+                    None => {}
                 }
                 let _ = field;
             }
@@ -2263,6 +2332,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     let declared = declared.clone();
                     let ty = self.check_expression_expecting(initializer, Some(&declared));
                     self.require_convertible(&ty, &declared, literal, initializer.span());
+                    declared
+                }
+                // `int[] a = { 1, 2 };` — the shorthand for `new int[] { ... }`
+                (declared, Some(InitializerValue::Nested(initializer))) => {
+                    let declared = declared.clone();
+                    self.check_array_initializer(initializer, &declared);
                     declared
                 }
                 (declared, _) => declared.clone(),
@@ -3044,7 +3119,28 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     (true, true) => "UInt64",
                     (true, false) => "UInt32",
                     (false, true) => "Int64",
-                    (false, false) => "Int32",
+                    // without a suffix C# takes the first type the value
+                    // fits: `int`, then `long`
+                    (false, false) => {
+                        let digits: String = stripped.chars().filter(|c| *c != '_').collect();
+                        let value = if let Some(hex) = digits
+                            .strip_prefix("0x")
+                            .or_else(|| digits.strip_prefix("0X"))
+                        {
+                            i64::from_str_radix(hex, 16)
+                        } else if let Some(bits) = digits
+                            .strip_prefix("0b")
+                            .or_else(|| digits.strip_prefix("0B"))
+                        {
+                            i64::from_str_radix(bits, 2)
+                        } else {
+                            digits.parse::<i64>()
+                        };
+                        match value {
+                            Ok(value) if i32::try_from(value).is_err() => "Int64",
+                            _ => "Int32",
+                        }
+                    }
                 };
                 self.corlib(name)
             }
