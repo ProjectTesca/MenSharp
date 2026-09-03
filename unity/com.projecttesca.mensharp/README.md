@@ -127,6 +127,29 @@ External writes to `_level` run the `Level` setter with the written value (the
 field still holds the old one, so the setter can compare). Writes from your
 own code go to the field directly, as in UdonSharp.
 
+A custom event can carry arguments over the network (SDK 3.7 and later):
+
+```csharp
+using VRC.SDK3.UdonNetworkCalling;
+using VRC.Udon.Common.Interfaces;
+
+[NetworkCallable]                       // or [NetworkCallable(5)]: at most
+public void Hit(int damage, string by)  // five per second
+{
+    ...
+}
+
+SendCustomNetworkEvent(NetworkEventTarget.All, nameof(Hit), 3, "me");
+other.SendCustomNetworkEvent(NetworkEventTarget.Owner, nameof(Other.Ping), 7);
+```
+
+The rules are UdonSharp's: public, an instance method, not virtual or an
+override, not generic, not a built-in event, up to eight parameters of engine
+or .NET types (numbers, strings, vectors, players, arrays of those). The
+compiler records, per event, which variables the arguments arrive in and their
+types; the program asset hands that to the SDK, which serializes the arguments
+by it. Both behaviours need a sync mode other than none.
+
 ## Talking to another behaviour
 
 ```csharp

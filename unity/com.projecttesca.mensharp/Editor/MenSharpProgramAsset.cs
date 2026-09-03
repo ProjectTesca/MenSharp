@@ -38,6 +38,60 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         ApplyMenSharpMeta();
     }
 
+    /// The `[NetworkCallable]` metadata from the sidecar, in the SDK's
+    /// shape: stored beside the program, read by the runtime (and ClientSim)
+    /// to serialize a network event's arguments into the named variables.
+    protected override VRC.SDK3.UdonNetworkCalling.NetworkCallingEntrypointMetadata[] GetLastNetworkCallingMetadata()
+    {
+        if (string.IsNullOrEmpty(metaJson))
+        {
+            return null;
+        }
+        MenSharpMeta meta;
+        try
+        {
+            meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+        if (meta?.networkCallable == null || meta.networkCallable.Length == 0)
+        {
+            return null;
+        }
+        var entries = new System.Collections.Generic.List<VRC.SDK3.UdonNetworkCalling.NetworkCallingEntrypointMetadata>();
+        foreach (MenSharpNetworkCallable callable in meta.networkCallable)
+        {
+            var parameters = new System.Collections.Generic.List<VRC.SDK3.UdonNetworkCalling.NetworkCallingParameterMetadata>();
+            bool complete = true;
+            foreach (MenSharpNetworkParameter parameter in callable.parameters ?? new MenSharpNetworkParameter[0])
+            {
+                Type type = ResolveType(parameter.type);
+                if (type == null)
+                {
+                    Debug.LogError(
+                        $"MenSharp: the network callable `{callable.@event}` has a parameter of type "
+                        + $"{parameter.type}, which is not loaded; the event is left without metadata.",
+                        this);
+                    complete = false;
+                    break;
+                }
+                parameters.Add(new VRC.SDK3.UdonNetworkCalling.NetworkCallingParameterMetadata(parameter.name, type));
+            }
+            if (!complete)
+            {
+                continue;
+            }
+            var attribute = callable.maxEventsPerSecond > 0
+                ? new VRC.SDK3.UdonNetworkCalling.NetworkCallableAttribute(callable.maxEventsPerSecond)
+                : new VRC.SDK3.UdonNetworkCalling.NetworkCallableAttribute();
+            entries.Add(new VRC.SDK3.UdonNetworkCalling.NetworkCallingEntrypointMetadata(
+                callable.@event, attribute, parameters.ToArray()));
+        }
+        return entries.ToArray();
+    }
+
     // ----------------------------------------------------------- assembly
 
     // The SDK's shared assembler (`UdonEditorManager.Assemble`) builds every
@@ -320,6 +374,27 @@ public class MenSharpMeta
     /// Code address → source position, in address order. The watcher maps the
     /// report's program counter to the last entry at or before it.
     public MenSharpSourceMark[] lines;
+    /// `[NetworkCallable]` events: what the SDK needs to carry their
+    /// arguments over the network — the variable each argument arrives in
+    /// and its type. Handed to the SDK when the program is stored.
+    public MenSharpNetworkCallable[] networkCallable;
+}
+
+[Serializable]
+public class MenSharpNetworkCallable
+{
+    public string @event;
+    /// 0 for no limit given.
+    public int maxEventsPerSecond;
+    public MenSharpNetworkParameter[] parameters;
+}
+
+[Serializable]
+public class MenSharpNetworkParameter
+{
+    public string name;
+    /// .NET full name (`System.Int32`, `UnityEngine.Vector3`).
+    public string type;
 }
 
 [Serializable]

@@ -42,6 +42,42 @@ namespace MenSharp
         {
             udonBehaviour.SendCustomEvent(eventName);
         }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName);
+        }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName, object parameter0)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName, parameter0);
+        }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName, object parameter0, object parameter1)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName, parameter0, parameter1);
+        }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName, object parameter0, object parameter1, object parameter2)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName, parameter0, parameter1, parameter2);
+        }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName, object parameter0, object parameter1, object parameter2, object parameter3)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName, parameter0, parameter1, parameter2, parameter3);
+        }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName, object parameter0, object parameter1, object parameter2, object parameter3, object parameter4)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName, parameter0, parameter1, parameter2, parameter3, parameter4);
+        }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName, object parameter0, object parameter1, object parameter2, object parameter3, object parameter4, object parameter5)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName, parameter0, parameter1, parameter2, parameter3, parameter4, parameter5);
+        }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName, object parameter0, object parameter1, object parameter2, object parameter3, object parameter4, object parameter5, object parameter6)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName, parameter0, parameter1, parameter2, parameter3, parameter4, parameter5, parameter6);
+        }
+        public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName, object parameter0, object parameter1, object parameter2, object parameter3, object parameter4, object parameter5, object parameter6, object parameter7)
+        {
+            udonBehaviour.SendCustomNetworkEvent(target, eventName, parameter0, parameter1, parameter2, parameter3, parameter4, parameter5, parameter6, parameter7);
+        }
 
         // VRChat replaces Unity's Instantiate with its own, and what it exposes
         // is a wrapper module rather than a type — there is no `VRCInstantiate`

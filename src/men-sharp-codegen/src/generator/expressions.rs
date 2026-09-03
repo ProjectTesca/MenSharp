@@ -120,6 +120,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     } else {
                         self.owned_value(ctx, value)
                     };
+                    // converted to the declared return type
+                    let (_, return_type) = self.function_shape(&ctx.key);
+                    let lowered = lowered.map(|slot| {
+                        let from = self.type_of(ctx, value);
+                        self.convert(ctx, slot, &from, &return_type, span.clone())
+                    });
                     match (lowered, ctx.result) {
                         (Some(value), Some(result)) => self.copy(value, result),
                         (Some(_), None) => {}
@@ -218,7 +224,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let ty = self.substitute(&ty, &ctx.key.bindings);
             let slot = self.temp_for(&ty);
             if let Some(value) = initializer
-                && let Some(lowered) = self.owned_value(ctx, value)
+                && let Some(lowered) = self.owned_value_as(ctx, value, &ty)
             {
                 self.copy(lowered, slot);
             }
@@ -1232,12 +1238,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         assignment: &'ast men_sharp_parser::ast::AssignmentExpression<'ast, 'ast>,
     ) -> Option<DataId> {
         let value_expression = assignment.value.as_ref().ok()?;
+        if assignment.operator.value == AssignmentOperator::Assign {
+            // the target first (its index expressions run before the value,
+            // as in C#), then the value converted to the target's type
+            let place = self.lower_place(ctx, &assignment.target);
+            let value = match place_type(&place) {
+                Some(target) => self.owned_value_as(ctx, value_expression, &target)?,
+                None => self.owned_value(ctx, value_expression)?,
+            };
+            self.write_place(ctx, place, value, assignment.span.clone());
+            return Some(value);
+        }
         let value = self.owned_value(ctx, value_expression)?;
         let value_type = self.type_of(ctx, value_expression);
 
-        let final_value = if assignment.operator.value == AssignmentOperator::Assign {
-            value
-        } else {
+        let final_value = {
             let operator = match assignment.operator.value {
                 AssignmentOperator::Add => BinaryOperator::Add,
                 AssignmentOperator::Subtract => BinaryOperator::Subtract,
@@ -1936,6 +1951,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     fn lower_left(&mut self, ctx: &mut Ctx<'ast>, left: &'ast PrimaryLeft<'ast, 'ast>) -> Piece {
         match left {
             PrimaryLeft::Literal(literal) => self.lower_literal(ctx, literal),
+            // `nameof(Hit)`, `nameof(Other.Ping)`: the spelling of the last
+            // name — a constant, as in C#
+            PrimaryLeft::Nameof { value, span, .. } => {
+                match value.as_ref().ok().and_then(nameof_text) {
+                    Some(text) => {
+                        let slot = self.string_constant(text);
+                        Piece::Value(slot, self.corlib_type("String"))
+                    }
+                    None => {
+                        self.error(ctx, "this `nameof` operand is not supported", span.clone());
+                        Piece::Error
+                    }
+                }
+            }
             PrimaryLeft::Identifier { name, span, .. } => {
                 match self.bodies.targets.get(&EntityID::from(left)) {
                     Some(ResolvedTarget::Local) => match ctx.lookup(name.value) {
@@ -2342,7 +2371,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 Some(ArgumentModifier::In) | None => match &argument.value {
                     ArgumentValue::Expression(expression) => {
-                        match self.owned_value(ctx, expression) {
+                        // converted to the parameter's type (a `params`
+                        // element goes to the element type)
+                        let target = call.signature.parameters.get(slot + parameter_offset).map(
+                            |parameter| {
+                                let ty =
+                                    self.substitute(&parameter.parameter_type, &ctx.key.bindings);
+                                let written = self.type_of(ctx, expression);
+                                match (&ty, parameter.is_params) {
+                                    (Type::Array { element, .. }, true)
+                                        if !matches!(written, Type::Array { .. }) =>
+                                    {
+                                        (**element).clone()
+                                    }
+                                    _ => ty,
+                                }
+                            },
+                        );
+                        let lowered = match target {
+                            Some(target) => self.owned_value_as(ctx, expression, &target),
+                            None => self.owned_value(ctx, expression),
+                        };
+                        match lowered {
                             Some(value) => ordered[slot] = Some(value),
                             None => return Piece::Error,
                         }
@@ -2404,7 +2454,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .get(index)
                 .copied()
                 .unwrap_or(index);
-            let value = self.owned_value(ctx, expression)?;
+            let target = call.signature.parameters.get(slot).map(|parameter| {
+                let ty = self.substitute(&parameter.parameter_type, &ctx.key.bindings);
+                let written = self.type_of(ctx, expression);
+                match (&ty, parameter.is_params) {
+                    (Type::Array { element, .. }, true)
+                        if !matches!(written, Type::Array { .. }) =>
+                    {
+                        (**element).clone()
+                    }
+                    _ => ty,
+                }
+            });
+            let value = match target {
+                Some(target) => self.owned_value_as(ctx, expression, &target)?,
+                None => self.owned_value(ctx, expression)?,
+            };
             if slot < ordered.len() {
                 ordered[slot] = Some(value);
             }
@@ -2581,6 +2646,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     && self.is_program_reference(receiver_type)
                 {
                     let slot = *slot;
+                    // `door.SendCustomEvent(...)`: MenSharpBehaviour's own
+                    // members are Udon's operations on the other program
+                    if let Some(piece) =
+                        self.try_marker_member_call(ctx, call, symbol, slot, &values, span.clone())
+                    {
+                        return piece;
+                    }
                     return self.cross_program_call(
                         ctx,
                         call,
@@ -3188,12 +3260,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(Initializer::Collection { elements, .. }) = &new_expression.initializer else {
             return;
         };
+        let element_type = match array_type {
+            Type::Array { element, .. } => Some((**element).clone()),
+            _ => None,
+        };
         for (position, element) in elements.iter().enumerate() {
-            if let CollectionElement::Expression(expression) = element
-                && let Some(value) = self.owned_value(ctx, expression)
-            {
-                let index = self.int_constant(position as i32);
-                self.array_set(ctx, array, index, value, array_type, span.clone());
+            if let CollectionElement::Expression(expression) = element {
+                let value = match &element_type {
+                    Some(target) => self.owned_value_as(ctx, expression, target),
+                    None => self.owned_value(ctx, expression),
+                };
+                if let Some(value) = value {
+                    let index = self.int_constant(position as i32);
+                    self.array_set(ctx, array, index, value, array_type, span.clone());
+                }
             }
         }
     }
@@ -3327,7 +3407,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         // the checker already said why
                         _ => continue,
                     };
-                    let Some(lowered) = self.owned_value(ctx, value) else {
+                    let lowered = match place_type(&place) {
+                        Some(target) => self.owned_value_as(ctx, value, &target),
+                        None => self.owned_value(ctx, value),
+                    };
+                    let Some(lowered) = lowered else {
                         continue;
                     };
                     self.write_place(ctx, place, lowered, span.clone());
@@ -3557,4 +3641,36 @@ fn unescape(text: &str) -> String {
         }
     }
     out
+}
+
+/// What `nameof(x.y.z)` spells: the last name of its operand.
+fn nameof_text<'a>(expression: &'a Expression<'a, 'a>) -> Option<&'a str> {
+    let Expression::Primary(primary) = expression else {
+        return None;
+    };
+    if let Some(last) = primary.chain.last() {
+        return match last {
+            PrimaryRight::Member { name, .. } => name.as_ref().ok().map(|name| name.value),
+            _ => None,
+        };
+    }
+    match &primary.left {
+        PrimaryLeft::Identifier { name, .. } => Some(name.value),
+        _ => None,
+    }
+}
+
+/// The type of what a place holds, for converting a value written to it.
+fn place_type(place: &Place) -> Option<Type> {
+    match place {
+        Place::Slot(_, ty)
+        | Place::SelfReference { ty, .. }
+        | Place::Field { ty, .. }
+        | Place::Accessor { ty, .. }
+        | Place::ProgramVariable { ty, .. }
+        | Place::ProgramAccessor { ty, .. }
+        | Place::ExternalProperty { ty, .. } => Some(ty.clone()),
+        Place::Element { element, .. } => Some(element.clone()),
+        Place::Error => None,
+    }
 }

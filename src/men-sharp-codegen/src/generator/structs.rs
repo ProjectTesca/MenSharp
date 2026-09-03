@@ -177,6 +177,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         Some(value)
     }
 
+    /// [`Generator::owned_value`], converted to `target` when the written
+    /// type differs — the implicit numeric conversion of an assignment, an
+    /// argument or a return (`float f = 1;` copies an `Int32` into a
+    /// `Single` slot otherwise, and an extern reading it throws).
+    pub(super) fn owned_value_as(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        expression: &'ast Expression<'ast, 'ast>,
+        target: &Type,
+    ) -> Option<DataId> {
+        let value = self.owned_value(ctx, expression)?;
+        let from = self.type_of(ctx, expression);
+        Some(self.convert(ctx, value, &from, target, expression.span()))
+    }
+
     /// Does this expression produce a value nothing else refers to? Only the
     /// shapes that certainly do count; anything else is copied, which is
     /// never wrong, only slower.

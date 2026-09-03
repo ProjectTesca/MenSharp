@@ -677,6 +677,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // `[FieldChangeCallback]` fields each get an `_onVarChange_…` entry;
         // collected before the queue drains so their setters get compiled
         let callbacks = self.collect_field_callbacks();
+        // `[NetworkCallable]` methods: validated whether or not they were
+        // exported (a private one is an error, not silence), and recorded
+        // with the variables their arguments arrive in
+        self.record_network_callables();
 
         // a behaviour may legitimately be all public variables and no events —
         // an explicit entry class was asked for by name, so it must have one
@@ -2869,6 +2873,7 @@ mod components;
 mod exceptions;
 mod expressions;
 mod functions;
+mod network;
 mod patterns;
 mod programs;
 mod runtime;

@@ -210,6 +210,19 @@ pub struct Program {
     /// (with the program name in the second): what identifies this program
     /// in the VM's heap dump when it halts on an extern's exception.
     pub program_id: Option<i64>,
+    /// The `[NetworkCallable]` events: what the runtime needs to carry
+    /// their arguments over the network (see `generator::network`).
+    pub network_callables: Vec<NetworkCallable>,
+}
+
+/// One network-callable event: the variables its arguments arrive in, by
+/// name and .NET type, in parameter order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkCallable {
+    pub event: String,
+    pub max_events_per_second: Option<u32>,
+    /// `(heap variable, .NET full type name)` per parameter.
+    pub parameters: Vec<(String, String)>,
 }
 
 impl Program {
@@ -456,6 +469,35 @@ impl Program {
         }
         if let Some(id) = self.program_id {
             let _ = write!(out, ",\n  \"programId\": {id}");
+        }
+        if !self.network_callables.is_empty() {
+            out.push_str(",\n  \"networkCallable\": [");
+            for (index, callable) in self.network_callables.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                let rate = callable
+                    .max_events_per_second
+                    .map_or("0".to_string(), |rate| rate.to_string());
+                let _ = write!(
+                    out,
+                    "\n    {{\"event\": {}, \"maxEventsPerSecond\": {rate}, \"parameters\": [",
+                    json_string(&callable.event)
+                );
+                for (position, (name, dotnet)) in callable.parameters.iter().enumerate() {
+                    if position > 0 {
+                        out.push(',');
+                    }
+                    let _ = write!(
+                        out,
+                        " {{\"name\": {}, \"type\": {}}}",
+                        json_string(name),
+                        json_string(dotnet)
+                    );
+                }
+                out.push_str(" ]}");
+            }
+            out.push_str("\n  ]");
         }
         // address → source position, in address order; a position repeats
         // at most once in a row

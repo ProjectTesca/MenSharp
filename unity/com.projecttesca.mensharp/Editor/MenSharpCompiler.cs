@@ -303,6 +303,8 @@ public static class MenSharpCompiler
         yield return typeof(VRC.SDKBase.Networking).Assembly.Location;
         // UdonSharpBehaviour: what an UdonSharp script's class derives from
         yield return typeof(UdonSharp.UdonSharpBehaviour).Assembly.Location;
+        // [NetworkCallable], NetworkEventTarget's users, VRC components
+        yield return typeof(VRC.SDK3.UdonNetworkCalling.NetworkCallableAttribute).Assembly.Location;
     }
 
     /// Where the bundled compiler for this platform lives. Pure path

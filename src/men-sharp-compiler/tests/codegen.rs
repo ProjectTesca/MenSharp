@@ -6009,3 +6009,187 @@ fn a_program_is_found_on_a_game_object_by_its_id() {
     // the result is a program reference
     assert!(text.contains("%VRCUdonUdonBehaviour"), "{text}");
 }
+
+/// `[NetworkCallable]`: the event keeps its written name, its parameters
+/// arrive in the layout's variables, and the sidecar carries the metadata
+/// the runtime serializes the arguments by. Anything the rules refuse is an
+/// error naming the method.
+#[test]
+fn a_network_callable_event_carries_its_metadata() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new(
+                "base.cs",
+                r#"
+                namespace MenSharp
+                {
+                    public class MenSharpBehaviour
+                    {
+                        public object gameObject { get; }
+                        public void SendCustomEvent(string eventName) { }
+                    }
+                }
+                namespace VRC.SDK3.UdonNetworkCalling
+                {
+                    public class NetworkCallableAttribute : System.Attribute
+                    {
+                        public NetworkCallableAttribute() { }
+                        public NetworkCallableAttribute(int maxEventsPerSecond) { }
+                    }
+                }
+                "#,
+            ),
+            SourceCode::new(
+                "Assets/MenSharp/Turret.cs",
+                r#"
+                using VRC.SDK3.UdonNetworkCalling;
+                namespace Game
+                {
+                    public enum Mode { Slow, Fast }
+                    public class Turret : MenSharp.MenSharpBehaviour
+                    {
+                        public int hits;
+                        public Turret other;
+                        [NetworkCallable]
+                        public void Hit(int damage, string by) { hits += damage; }
+                        [NetworkCallable(5)]
+                        public void Aim(float[] at, Mode mode) { }
+                        public void Interact() { other.SendCustomEvent(nameof(Hit)); }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Turret",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    let meta = program.output.program.to_meta_json().unwrap();
+    // never mangled, parameters in the layout's variables
+    assert!(text.contains(".export Hit\n"), "{text}");
+    assert!(text.contains(".export Aim\n"), "{text}");
+    assert!(text.contains("__0_damage__param: %SystemInt32"), "{text}");
+    assert!(text.contains("__0_at__param: %SystemSingleArray"), "{text}");
+    // the metadata: variable names and .NET types, the rate
+    assert!(
+        meta.contains(r#"{"event": "Hit", "maxEventsPerSecond": 0, "parameters": [ {"name": "__0_damage__param", "type": "System.Int32"}, {"name": "__0_by__param", "type": "System.String"} ]}"#),
+        "{meta}"
+    );
+    assert!(
+        meta.contains(r#"{"event": "Aim", "maxEventsPerSecond": 5, "parameters": [ {"name": "__0_at__param", "type": "System.Single[]"}, {"name": "__0_mode__param", "type": "System.Int32"} ]}"#),
+        "{meta}"
+    );
+    // MenSharpBehaviour's own operation on another behaviour is the extern
+    // on that program
+    assert!(
+        text.contains(
+            "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEvent__SystemString__SystemVoid"
+        ),
+        "{text}"
+    );
+}
+
+#[test]
+fn what_a_network_callable_cannot_be_is_an_error() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "Assets/MenSharp/Turret.cs",
+                r#"
+                namespace Game
+                {
+                    public class Ammo { public int count; }
+                    public class Turret : MenSharp.MenSharpBehaviour
+                    {
+                        [NetworkCallable] private void Hidden(int x) { }
+                        [NetworkCallable] public static void Shared(int x) { }
+                        [NetworkCallable] public virtual void Open(int x) { }
+                        [NetworkCallable] public void Reload(Ammo ammo) { }
+                        [NetworkCallable] public void Interact() { }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Turret",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    for expected in [
+        "must be public: `Hidden`",
+        "cannot be static: `Shared`",
+        "cannot be virtual, abstract or an override: `Open`",
+        "network callable `Reload` has a type the network cannot carry",
+        "`Interact` is a built-in event",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "{expected}: {messages:?}"
+        );
+    }
+}
+
+/// An implicit numeric conversion is real code on Udon: an `Int32`
+/// constant copied into a `Single` slot stays an `Int32`, and the first
+/// extern reading it throws. So `float f = 1`, `Half(3)`, `new V(1, 2)`,
+/// `return 1` in a float method and `{ 1, 2 }` in a float array all
+/// convert.
+#[test]
+fn integer_values_convert_where_a_float_is_expected() {
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public struct V { public float x; public V(float a, float b) { x = a + b; } }
+            public class Program : MenSharp.MenSharpBehaviour
+            {
+                public float total;
+                public float[] samples;
+                static float Half(float x) { return x / 2; }
+                static float One() { return 1; }
+                static float Sum(params float[] values) { return 1; }
+                public void Interact()
+                {
+                    float f = 1;
+                    total = 2;
+                    V v = new V(1, 2);
+                    samples = new float[] { 1, 2 };
+                    total = Half(3) + f + v.x + One() + Sum(1, 2);
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let Some(program) = compile_behaviour(sources, "Game.Program") else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    let conversions = text
+        .matches("SystemConvert.__ToSingle__SystemInt32__SystemSingle")
+        .count();
+    // f, total, V(1, 2), the two array elements, Half(3), One's return, Sum's two
+    assert!(conversions >= 10, "{conversions} conversions:\n{text}");
+}
