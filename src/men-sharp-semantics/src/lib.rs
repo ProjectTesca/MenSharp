@@ -1616,6 +1616,74 @@ mod tests {
     }
 
     #[test]
+    fn local_functions_bind_like_methods() {
+        checked!(
+            check,
+            r#"
+            public class Body
+            {
+                int Run(int seed)
+                {
+                    // called above its own declaration
+                    int later = Double(seed);
+                    int Double(int x) { return x * 2; }
+                    // and sharing a variable written above it
+                    int factor = 3;
+                    int Scaled() { return later * factor; }
+                    return Scaled() + Twice(later);
+                    int Twice(int x) => Double(x);
+                }
+            }
+            "#,
+        );
+        assert_eq!(error_kinds(&check), Vec::<&SemanticErrorKind>::new());
+    }
+
+    #[test]
+    fn a_local_function_is_neither_generic_nor_static_and_capturing() {
+        checked!(
+            check,
+            r#"
+            public class Body
+            {
+                void Run()
+                {
+                    T Pick<T>(T a) { return a; }
+                    int total = 0;
+                    static void Add() { total = total + 1; }
+                    Add();
+                    // CS0841: `late` is not a variable yet where `Early` stands
+                    void Early() { total = late; }
+                    int late = 2;
+                    Early();
+                }
+            }
+            "#,
+        );
+        let kinds = error_kinds(&check);
+        assert!(
+            kinds
+                .iter()
+                .any(|kind| matches!(kind, SemanticErrorKind::GenericLocalFunction)),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|kind| matches!(
+                kind,
+                SemanticErrorKind::StaticLocalFunctionCapture { name } if name == "total"
+            )),
+            "{kinds:?}"
+        );
+        assert!(
+            kinds.iter().any(|kind| matches!(
+                kind,
+                SemanticErrorKind::LocalUsedBeforeDeclaration { name } if name == "late"
+            )),
+            "{kinds:?}"
+        );
+    }
+
+    #[test]
     fn global_usings_are_visible_compilation_wide() {
         declarations!(
             declarations,

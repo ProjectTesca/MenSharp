@@ -135,6 +135,23 @@ pub enum SemanticErrorKind {
     ReturnValueMismatch,
     /// A lambda whose parameter list does not fit the target delegate.
     LambdaParameterMismatch,
+    /// `void F<T>()` written inside a body: Udon has no way to pick a
+    /// compiled instance per set of type arguments at a local call site, so
+    /// a local function cannot be generic. A generic method of the type
+    /// does the same job.
+    GenericLocalFunction,
+    /// A `static` local function used a variable of the enclosing body
+    /// (CS8421): drop the `static`, or pass the value as a parameter.
+    StaticLocalFunctionCapture {
+        name: String,
+    },
+    /// A local function used a variable of the enclosing body written below
+    /// it (CS0841). Local functions are visible throughout their block;
+    /// variables begin where they are declared, so move the declaration
+    /// above the function.
+    LocalUsedBeforeDeclaration {
+        name: String,
+    },
     /// A construct the checker does not handle yet. Temporary scaffolding: each of
     /// these becomes a real implementation or a precise "unsupported on Udon"
     /// diagnostic as the checker grows.

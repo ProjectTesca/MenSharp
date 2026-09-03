@@ -12,6 +12,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     pub(super) fn lower_block(&mut self, ctx: &mut Ctx<'ast>, block: &'ast Block<'ast, 'ast>) {
         ctx.locals.push(HashMap::new());
+        // before the statements: a local function may be called from above
+        // its own declaration
+        self.register_local_functions(ctx, block);
         for statement in block.statements {
             self.lower_statement(ctx, statement);
         }
@@ -24,6 +27,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Statement::Block(block) => self.lower_block(ctx, block),
             Statement::Empty { .. } => {}
             Statement::LocalVariable(declaration) => self.lower_local(ctx, declaration),
+            // registered by the block, compiled when something calls it
+            Statement::LocalFunction(_) => {}
             Statement::Expression(ExpressionStatement { expression, .. }) => {
                 self.lower_expression(ctx, expression);
             }
@@ -1759,6 +1764,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     ty: member_type,
                 }
             }
+            // a local function is a call target, never a place
+            MemberOrigin::LocalFunction(_) => {
+                self.error(ctx, "a local function is not a value here", span);
+                Place::Error
+            }
         }
     }
 
@@ -2823,6 +2833,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let written_type = self.type_of(ctx, expression);
                 Some(self.convert(ctx, value, &written_type, &parameter_type, span.clone()))
             }
+            (Some(DefaultArgument::Source), MemberOrigin::LocalFunction(id)) => {
+                let key = self.local_function_key(ctx, *id);
+                let node = self.local_functions.get(&key).map(|info| info.node)?;
+                let Some(expression) = node
+                    .parameters
+                    .as_ref()
+                    .ok()
+                    .and_then(|list| list.parameters.get(parameter_index))
+                    .and_then(|parameter| parameter.default_value.as_ref())
+                else {
+                    self.error(
+                        ctx,
+                        "internal: optional parameter without a default",
+                        span.clone(),
+                    );
+                    return None;
+                };
+                let value = self.lower_expression(ctx, expression)?;
+                let written_type = self.type_of(ctx, expression);
+                Some(self.convert(ctx, value, &written_type, &parameter_type, span.clone()))
+            }
             (Some(DefaultArgument::Constant(constant)), _) => {
                 let value = self.typed_constant(&constant, &parameter_type);
                 if value.is_none() {
@@ -2927,6 +2958,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .map(|(index, place)| (index + parameter_offset, place))
                     .collect();
                 match self.call_function(ctx, &key, this, &values, &by_ref, span) {
+                    Some(result) => Piece::Value(result, return_type),
+                    None if return_type == Type::Void => Piece::Void,
+                    None => Piece::Error,
+                }
+            }
+            // a local function of this body: no receiver, no dispatch — the
+            // boxes of what it captures go in front of its arguments
+            MemberOrigin::LocalFunction(id) => {
+                let key = self.local_function_key(ctx, *id);
+                let Some(payload) = self.local_function_payload(ctx, &key, span.clone()) else {
+                    return Piece::Error;
+                };
+                let this = self.function_has_this(&key).then_some(()).and(payload.first().copied());
+                let leading = payload.len();
+                let mut arguments: Vec<DataId> = payload[usize::from(this.is_some())..].to_vec();
+                arguments.extend(values);
+                let by_ref: Vec<(usize, Place)> = source_by_ref
+                    .into_iter()
+                    .map(|(index, place)| {
+                        (index + leading - usize::from(this.is_some()), place)
+                    })
+                    .collect();
+                match self.call_function(ctx, &key, this, &arguments, &by_ref, span) {
                     Some(result) => Piece::Value(result, return_type),
                     None if return_type == Type::Void => Piece::Void,
                     None => Piece::Error,

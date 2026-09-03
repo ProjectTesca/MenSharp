@@ -11,6 +11,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     pub(super) fn function_shape(&self, key: &FunctionKey) -> (Vec<Type>, Type) {
         match key.role {
             Role::Lambda(_) => return self.lambda_shape(key),
+            Role::LocalFunction(_) => return self.local_function_shape(key),
             Role::DelegateInvoker(index) => return self.invoker_shape(index),
             _ => {}
         }
@@ -93,6 +94,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // a lambda's `this` is the enclosing member's, handed over in
             // the closure — when that member has one at all
             Role::Lambda(_) => return self.lambdas.get(key).is_some_and(|info| info.has_this),
+            Role::LocalFunction(_) => {
+                return self
+                    .local_functions
+                    .get(key)
+                    .is_some_and(|info| info.has_this);
+            }
             Role::DelegateInvoker(_) => return false,
             _ => {}
         }
@@ -120,6 +127,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::StructHashCode => name.push_str("_hashcode"),
             Role::Dispatcher => name.push_str("_dispatch"),
             Role::Lambda(_) => name.push_str("_lambda"),
+            Role::LocalFunction(id) => {
+                let local = self
+                    .local_functions
+                    .iter()
+                    .find(|(key, _)| key.role == Role::LocalFunction(id))
+                    .map(|(_, info)| info.node.name.value)
+                    .unwrap_or("local");
+                name.push_str(&format!("_local_{local}"));
+            }
             Role::DelegateInvoker(index) => name = format!("fn_delegate_invoke_{index}"),
             Role::GetterDispatcher => name.push_str("_get_dispatch"),
             Role::SetterDispatcher => name.push_str("_set_dispatch"),
@@ -284,6 +300,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let value_parameters = &parameters[usize::from(has_this)..];
         match (key.role, &syntax) {
             (Role::Lambda(_), _) => self.emit_lambda_body(&mut ctx, key),
+            (Role::LocalFunction(_), _) => self.emit_local_function_body(&mut ctx, key),
             (Role::DelegateInvoker(_), _) => self.emit_invoker_body(&mut ctx),
             (Role::DefaultConstructor, _) => {
                 // the implicit constructor: field initializers, then `base()`
@@ -445,7 +462,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    fn bind_parameters(
+    pub(super) fn bind_parameters(
         &mut self,
         ctx: &mut Ctx<'ast>,
         declared: Option<&'ast [men_sharp_parser::ast::Parameter<'ast, 'ast>]>,
@@ -464,7 +481,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    fn emit_function_body(&mut self, ctx: &mut Ctx<'ast>, body: &'ast FunctionBody<'ast, 'ast>) {
+    pub(super) fn emit_function_body(&mut self, ctx: &mut Ctx<'ast>, body: &'ast FunctionBody<'ast, 'ast>) {
         match body {
             FunctionBody::Block(block) => self.lower_block(ctx, block),
             FunctionBody::Expression {

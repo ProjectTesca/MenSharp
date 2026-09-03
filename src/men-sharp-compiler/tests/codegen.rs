@@ -6759,3 +6759,250 @@ fn a_conditional_takes_the_type_its_context_wants() {
     assert_eq!(string_of(&emulator, "Log"), "yes-1");
     assert_eq!(int_of(&emulator, "Result"), 112);
 }
+
+#[test]
+fn local_functions_run_capture_and_recurse() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Result;
+                public static int Total;
+                public static string Log = "";
+                public static int Field = 7;
+
+                public int Instance = 3;
+                public int UsesThis()
+                {
+                    int Doubled() { return Instance * 2; }
+                    return Doubled();
+                }
+
+                public static void Main()
+                {
+                    // called before it is written, and after
+                    Result = Twice(3);                          // 6
+                    int Twice(int x) { return x * 2; }
+                    Result += Twice(4);                         // 14
+
+                    // an expression body, a default argument and a named one
+                    int Step(int x, int by = 10) => x + by;
+                    Result += Step(1);                          // 25
+                    Result += Step(by: 5, x: 0);                // 30
+
+                    // recursion, and mutual recursion between two of them
+                    int Fact(int n) { return n <= 1 ? 1 : n * Fact(n - 1); }
+                    Result += Fact(5);                          // 150
+                    bool Even(int n) { return n == 0 ? true : Odd(n - 1); }
+                    bool Odd(int n) { return n == 0 ? false : Even(n - 1); }
+                    if (Even(10) && Odd(7)) Result += 1000;     // 1150
+
+                    // capture: the variable is shared, not copied
+                    int total = 0;
+                    void Add(int by) { total += by; }
+                    Add(2);
+                    Add(3);
+                    total += 1;
+                    Add(4);
+                    Total = total;                              // 10
+
+                    // a variable the function shares with the body
+                    string word = "hi";
+                    void Shout() { Log += word + "!"; }
+                    Shout();
+                    word = "bye";
+                    Shout();                                    // hi!bye!
+
+                    // `ref` and `out` parameters
+                    void Swap(ref int a, ref int b) { int t = a; a = b; b = t; }
+                    int left = 1;
+                    int right = 2;
+                    Swap(ref left, ref right);
+                    Result += left * 10 + right;                // 1150 + 21 = 1171
+                    void Split(int value, out int high, out int low)
+                    {
+                        high = value / 10;
+                        low = value % 10;
+                    }
+                    Split(48, out int h, out int l);
+                    Result += h + l;                            // 1171 + 12 = 1183
+
+                    // a static one, and one reaching a static field
+                    static int Pure(int x) { return x + 1; }
+                    int Reads() { return Field; }
+                    Result += Pure(0) + Reads();                // 1183 + 8 = 1191
+
+                    // one nested in another, capturing through both levels
+                    int outer = 100;
+                    int Outer()
+                    {
+                        int middle = 20;
+                        int Inner() { return outer + middle; }
+                        return Inner() + Inner();
+                    }
+                    Result += Outer();                          // 1191 + 240 = 1431
+
+                    // a lambda calling a local function that captures
+                    Func<int, int> through = n => Twice(n) + total;
+                    Result += through(5);                       // 1431 + 20 = 1451
+
+                    // a local function as a delegate
+                    Func<int, int> group = Twice;
+                    Result += group(6);                         // 1463
+
+                    // callers that never name `counter` still have to hand
+                    // it to the function that does
+                    int counter = 0;
+                    void Bump() { counter++; }
+                    void BumpTwice() { Bump(); Bump(); }
+                    Action raise = () => Bump();
+                    BumpTwice();
+                    raise();
+                    Result += counter;                          // 1466
+
+                    // called from a loop body, capturing the loop variable
+                    for (int i = 0; i < 3; i++)
+                    {
+                        void Mark() { Log += i; }
+                        Mark();
+                    }                                           // hi!bye!012
+
+                    // an instance member's local function, using `this`
+                    Result += new Program().UsesThis();         // 1472
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "hi!bye!012");
+    assert_eq!(int_of(&emulator, "Total"), 10);
+    assert_eq!(int_of(&emulator, "Result"), 1472);
+}
+
+#[test]
+fn local_functions_live_anywhere_a_block_does() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static int Seed = 4;
+
+                public int Value;
+                public int Doubled => Doubling();
+                public Program(int start)
+                {
+                    int Adjust(int x) { return x + Bonus(); }
+                    Value = Adjust(start);
+                }
+                public int Bonus() { return 2; }
+                private int Doubling()
+                {
+                    int Twice() { return Value * 2; }
+                    return Twice();
+                }
+
+                public static void Main()
+                {
+                    // inside a nested block, and inside a loop body
+                    if (Seed > 0)
+                    {
+                        int Half(int x) { return x / 2; }
+                        Result += Half(Seed);                   // 2
+                    }
+                    for (int i = 0; i < 3; i++)
+                    {
+                        string Tag() { return "<" + i + ">"; }
+                        Log += Tag();
+                    }                                           // <0><1><2>
+
+                    // inside a lambda body, capturing the lambda's parameter
+                    Func<int, int> outer = n =>
+                    {
+                        int Plus(int x) { return x + n; }
+                        return Plus(10);
+                    };
+                    Result += outer(5);                         // 17
+
+                    // its own `try`/`catch`, and a `throw` that leaves it
+                    int Risky(int x)
+                    {
+                        try
+                        {
+                            if (x == 0) throw new Exception("zero");
+                            return 100 / x;
+                        }
+                        catch (Exception e)
+                        {
+                            Log += e.Message;
+                            return -1;
+                        }
+                    }
+                    Result += Risky(4) + Risky(0);              // 17 + 25 - 1 = 41
+
+                    // calling instance and static members of the class
+                    var program = new Program(1);
+                    Result += program.Value + program.Doubled;  // 41 + 3 + 6 = 50
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "<0><1><2>zero");
+    assert_eq!(int_of(&emulator, "Result"), 50);
+}
+
+#[test]
+fn a_local_function_reaching_a_variable_that_has_no_value_yet_is_an_error() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "Assets/MenSharp/Early.cs",
+                r#"
+                namespace Game
+                {
+                    public class Early : MenSharp.MenSharpBehaviour
+                    {
+                        public string Log;
+                        public void Interact()
+                        {
+                            // the call runs before `word` is a variable at
+                            // all — C# calls that a use before assignment
+                            Show();
+                            string word = "hi";
+                            void Show() { Log += word; }
+                            Show();
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Early",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("uses `word` of the enclosing method")),
+        "{messages:#?}"
+    );
+}

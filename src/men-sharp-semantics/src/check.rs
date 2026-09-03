@@ -27,7 +27,7 @@
 //!
 //! [`check_file`] is one file's pure function, fanned out per file by the driver.
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
 use crate::FileId;
@@ -36,7 +36,8 @@ use men_sharp_parser::ast::{
     Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator, Block,
     ConstructorInitializerKind, EntityID, Expression, ForInitializer, FunctionBody,
     InitializerValue, InterpolationPart, LambdaBody, LambdaExpression, LambdaParameters,
-    LiteralExpression, LocalVariableDeclaration, MemberSeparator, Pattern, PrimaryExpression,
+    LiteralExpression, LocalVariableDeclaration, MemberSeparator, MethodDeclaration, Modifier,
+    Pattern, PrimaryExpression,
     PrimaryLeft, PrimaryRight, Statement, SwitchLabel, UnaryOperator, UsingResource,
     VariableDesignation,
 };
@@ -51,8 +52,10 @@ use crate::{
     lookup::{MemberCandidate, MemberOrigin, TypeSystem},
     merge::Declarations,
     resolve::{NamespaceScope, Resolution, Resolver, Signatures, apply_suffixes},
-    symbol::{SymbolId, SymbolKind},
-    types::{FunctionSignature, MemberSignature, TupleElement, Type, TypeTarget},
+    symbol::{Accessibility, SymbolId, SymbolKind},
+    types::{
+        FunctionSignature, MemberSignature, ParameterPassing, TupleElement, Type, TypeTarget,
+    },
 };
 
 /// The output of body checking for one file (or, merged, a compilation).
@@ -90,6 +93,21 @@ pub struct BodyCheck {
     /// captures — the variables that have to live in a box the lambda can
     /// share, rather than in the member's own slots.
     pub captured_locals: HashMap<SymbolId, Vec<String>>,
+    /// Per member: the type of every name in [`Self::captured_locals`] —
+    /// what the box holds, which a local function's own body has to know
+    /// without seeing the declaration.
+    pub capture_types: HashMap<SymbolId, HashMap<String, Type>>,
+    /// Every local function of the compilation, by its declaration node:
+    /// what a call to it binds to. See [`crate::MemberOrigin::LocalFunction`].
+    pub local_functions: HashMap<EntityID, LocalFunctionSignature>,
+}
+
+/// A local function's declaration, as a call site sees it.
+#[derive(Debug, Clone)]
+pub struct LocalFunctionSignature {
+    pub signature: FunctionSignature,
+    /// `static void F()`: it may use nothing of the enclosing body.
+    pub is_static: bool,
 }
 
 impl BodyCheck {
@@ -103,6 +121,8 @@ impl BodyCheck {
         self.uncompilable.extend(other.uncompilable);
         self.captures.extend(other.captures);
         self.captured_locals.extend(other.captured_locals);
+        self.capture_types.extend(other.capture_types);
+        self.local_functions.extend(other.local_functions);
     }
 }
 
@@ -272,6 +292,13 @@ pub fn check_file(
         current_member: None,
         captures: HashMap::new(),
         captured_locals: HashMap::new(),
+        capture_types: HashMap::new(),
+        local_functions: HashMap::new(),
+        local_calls: HashMap::new(),
+        declared_names: HashMap::new(),
+        static_local_functions: HashSet::new(),
+        local_order: 0,
+        local_function_order: HashMap::new(),
         expression_types: HashMap::new(),
         targets: HashMap::new(),
         enumerations: HashMap::new(),
@@ -304,6 +331,7 @@ pub fn check_file(
     checker.scopes[0].usings = root_usings;
 
     checker.walk_nodes(&file.members);
+    checker.close_captures();
 
     BodyCheck {
         expression_types: checker.expression_types,
@@ -323,6 +351,8 @@ pub fn check_file(
             .into_iter()
             .map(|(member, names)| (member, names.into_iter().collect()))
             .collect(),
+        capture_types: checker.capture_types,
+        local_functions: checker.local_functions,
     }
 }
 
@@ -427,12 +457,37 @@ impl CallArgument<'_> {
     }
 }
 
+/// One nested scope of a body: the variables it declares and the local
+/// functions written in it. Both live in the same declaration space, and
+/// both go out of scope together.
+#[derive(Default)]
+struct Scope<'ast> {
+    locals: HashMap<&'ast str, LocalVariable>,
+    functions: HashMap<&'ast str, LocalFunctionEntry<'ast>>,
+}
+
+/// A declared local or parameter: its type, and when it was written —
+/// what a local function declared above it may not reach (CS0841).
+struct LocalVariable {
+    ty: Type,
+    order: usize,
+}
+
+/// A local function in scope: what a call to it binds to.
+struct LocalFunctionEntry<'ast> {
+    node: &'ast MethodDeclaration<'ast, 'ast>,
+    /// `None` for a declaration the checker refused (a generic one): calls
+    /// still resolve to it, quietly, so one error is reported and not one
+    /// per call.
+    signature: Option<FunctionSignature>,
+}
+
 struct Checker<'a, 'ast> {
     resolver: Resolver<'a, 'ast>,
     signatures: &'a Signatures,
     scopes: Vec<NamespaceScope<'ast>>,
     type_stack: Vec<SymbolId>,
-    locals: Vec<HashMap<&'ast str, Type>>,
+    locals: Vec<Scope<'ast>>,
     this_type: Option<Type>,
     static_context: bool,
     return_type: Type,
@@ -448,6 +503,25 @@ struct Checker<'a, 'ast> {
     /// See [`BodyCheck::captures`] and [`BodyCheck::captured_locals`].
     captures: HashMap<EntityID, BTreeSet<String>>,
     captured_locals: HashMap<SymbolId, BTreeSet<String>>,
+    /// See [`BodyCheck::capture_types`].
+    capture_types: HashMap<SymbolId, HashMap<String, Type>>,
+    /// See [`BodyCheck::local_functions`].
+    local_functions: HashMap<EntityID, LocalFunctionSignature>,
+    /// Which local functions each lambda or local function calls: a caller
+    /// has to hand the callee everything the callee captures, so capture
+    /// sets travel along these edges (see [`Self::close_captures`]).
+    local_calls: HashMap<EntityID, HashSet<EntityID>>,
+    /// Every name a lambda or local function declares itself — the names it
+    /// owns, which no caller has to pass it.
+    declared_names: HashMap<EntityID, BTreeSet<String>>,
+    /// The `static` local functions, which may capture nothing (CS8421).
+    static_local_functions: HashSet<EntityID>,
+    /// Every local and parameter is stamped as it is declared, in order.
+    local_order: usize,
+    /// Where each local function stands in that order: it may use the
+    /// variables written above it, and no others (CS0841). Local functions
+    /// themselves are visible throughout their block, above and below.
+    local_function_order: HashMap<EntityID, usize>,
     expression_types: HashMap<EntityID, Type>,
     targets: HashMap<EntityID, ResolvedTarget>,
     enumerations: HashMap<EntityID, ForeachEnumeration>,
@@ -528,27 +602,56 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     }
 
     fn declare_local(&mut self, name: &'ast str, ty: Type) {
+        // a name declared inside a lambda or local function belongs to it:
+        // no caller has to hand it over (see `close_captures`)
+        if let Some((entity, _)) = self.lambda_stack.last() {
+            self.declared_names
+                .entry(*entity)
+                .or_default()
+                .insert(name.to_string());
+        }
+        self.local_order += 1;
+        let order = self.local_order;
         if let Some(scope) = self.locals.last_mut() {
-            scope.insert(name, ty);
+            scope.locals.insert(name, LocalVariable { ty, order });
+        }
+    }
+
+    /// A parameter bound straight into a scope of its own, stamped like
+    /// any other declaration.
+    fn new_local(&mut self, ty: Type) -> LocalVariable {
+        self.local_order += 1;
+        LocalVariable {
+            ty,
+            order: self.local_order,
         }
     }
 
     fn local(&self, name: &str) -> Option<&Type> {
-        self.locals.iter().rev().find_map(|scope| scope.get(name))
+        self.locals
+            .iter()
+            .rev()
+            .find_map(|scope| scope.locals.get(name))
+            .map(|local| &local.ty)
     }
 
     /// A local or parameter was named: when its declaration lies outside a
     /// lambda being checked, that lambda — and every lambda between —
     /// captures it.
-    fn note_local_use(&mut self, name: &str) {
+    fn note_local_use(&mut self, name: &str, span: &Range<usize>) {
         let Some(depth) = self
             .locals
             .iter()
-            .rposition(|scope| scope.contains_key(name))
+            .rposition(|scope| scope.locals.contains_key(name))
         else {
             return;
         };
+        let variable = &self.locals[depth].locals[name];
+        let ty = variable.ty.clone();
+        let order = variable.order;
         let mut captured = false;
+        let mut in_static = false;
+        let mut declared_later = false;
         for (lambda, base) in &self.lambda_stack {
             if depth < *base {
                 self.captures
@@ -556,13 +659,270 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     .or_default()
                     .insert(name.to_string());
                 captured = true;
+                in_static |= self.static_local_functions.contains(lambda);
+                // a local function is written where it is: the variables
+                // below it are not yet variables (CS0841)
+                declared_later |= self
+                    .local_function_order
+                    .get(lambda)
+                    .is_some_and(|written| order > *written);
             }
+        }
+        if in_static {
+            let kind = SemanticErrorKind::StaticLocalFunctionCapture {
+                name: name.to_string(),
+            };
+            self.error(kind, span.clone());
+        }
+        if declared_later {
+            let kind = SemanticErrorKind::LocalUsedBeforeDeclaration {
+                name: name.to_string(),
+            };
+            self.error(kind, span.clone());
         }
         if captured && let Some(member) = self.current_member {
             self.captured_locals
                 .entry(member)
                 .or_default()
                 .insert(name.to_string());
+            self.capture_types
+                .entry(member)
+                .or_default()
+                .insert(name.to_string(), ty);
+        }
+    }
+
+    /// A local function in scope, innermost first.
+    fn local_function(&self, name: &str) -> Option<&LocalFunctionEntry<'ast>> {
+        self.locals
+            .iter()
+            .rev()
+            .find_map(|scope| scope.functions.get(name))
+    }
+
+    /// The names a freshly built scope declares belong to the lambda or
+    /// local function that is about to open it.
+    fn note_declared(&mut self, scope: &Scope<'ast>) {
+        if let Some((entity, _)) = self.lambda_stack.last() {
+            let entity = *entity;
+            let names: Vec<String> = scope.locals.keys().map(|name| name.to_string()).collect();
+            self.declared_names.entry(entity).or_default().extend(names);
+        }
+    }
+
+    /// Every local function written in a block, declared before the block's
+    /// statements are walked: a local function may be called from anywhere
+    /// in its block, its own body included (C# §13.6.4).
+    fn declare_local_functions(
+        &mut self,
+        block: &'ast Block<'ast, 'ast>,
+    ) -> Vec<&'ast MethodDeclaration<'ast, 'ast>> {
+        let mut declared = Vec::new();
+        for statement in block.statements {
+            let Statement::LocalFunction(function) = statement else {
+                continue;
+            };
+            let id = EntityID::from(function);
+            let is_static = Self::has_modifier(function, Modifier::Static);
+            // a generic local function would need one compiled instance per
+            // set of type arguments, which the Udon backend has no way to
+            // pick at a call site
+            let signature = if function.generics.is_some() {
+                self.error(
+                    SemanticErrorKind::GenericLocalFunction,
+                    function.name.span.clone(),
+                );
+                None
+            } else if Self::has_modifier(function, Modifier::Async) {
+                self.error(
+                    SemanticErrorKind::UnsupportedStatement,
+                    function.span.clone(),
+                );
+                None
+            } else {
+                let signature = self.local_function_signature(function);
+                self.local_functions.insert(
+                    id,
+                    LocalFunctionSignature {
+                        signature: signature.clone(),
+                        is_static,
+                    },
+                );
+                declared.push(function);
+                Some(signature)
+            };
+            if is_static {
+                self.static_local_functions.insert(id);
+            }
+            if let Some(scope) = self.locals.last_mut() {
+                scope
+                    .functions
+                    .insert(function.name.value, LocalFunctionEntry { node: function, signature });
+            }
+        }
+        declared
+    }
+
+    fn has_modifier(function: &MethodDeclaration<'ast, 'ast>, modifier: Modifier) -> bool {
+        function
+            .modifiers
+            .iter()
+            .any(|written| written.value == modifier)
+    }
+
+    fn local_function_signature(
+        &mut self,
+        function: &'ast MethodDeclaration<'ast, 'ast>,
+    ) -> FunctionSignature {
+        use men_sharp_parser::ast::ParameterModifier;
+
+        let return_type = self.resolve_type(&function.return_type);
+        let mut parameters = Vec::new();
+        if let Ok(list) = &function.parameters {
+            for parameter in list.parameters {
+                let parameter_type = match &parameter.parameter_type {
+                    Some(type_ref) => self.resolve_type(type_ref),
+                    None => Type::Error,
+                };
+                let mut passing = ParameterPassing::Value;
+                let mut is_params = false;
+                for modifier in parameter.modifiers {
+                    match modifier.value {
+                        ParameterModifier::Ref => passing = ParameterPassing::Ref,
+                        ParameterModifier::Out => passing = ParameterPassing::Out,
+                        ParameterModifier::In => passing = ParameterPassing::In,
+                        ParameterModifier::Params => is_params = true,
+                        _ => {}
+                    }
+                }
+                parameters.push(crate::types::ParameterSignature {
+                    passing,
+                    is_params,
+                    parameter_type,
+                    name: parameter.name.as_ref().ok().map(|name| name.value.to_string()),
+                    default_value: parameter
+                        .default_value
+                        .as_ref()
+                        .map(|_| crate::types::DefaultArgument::Source),
+                });
+            }
+        }
+        FunctionSignature {
+            return_type,
+            parameters,
+        }
+    }
+
+    /// A local function's body, checked once its whole block is known — so
+    /// it may use a variable the block declares below it, as C# allows.
+    fn check_local_function_body(&mut self, function: &'ast MethodDeclaration<'ast, 'ast>) {
+        let id = EntityID::from(function);
+        let Some(declaration) = self.local_functions.get(&id).cloned() else {
+            return;
+        };
+        let signature = declaration.signature;
+
+        let saved_return = std::mem::replace(&mut self.return_type, signature.return_type.clone());
+        let saved_static = self.static_context;
+        // a `return` in here is this function's, not that of a lambda whose
+        // return type is being probed around it
+        let saved_probe = self.lambda_probe_returns.take();
+        self.static_context |= declaration.is_static;
+
+        self.lambda_stack.push((id, self.locals.len()));
+        let mut scope = Scope::default();
+        if let Ok(list) = &function.parameters {
+            for (parameter, signature) in list.parameters.iter().zip(&signature.parameters) {
+                if let Ok(name) = &parameter.name {
+                    let local = self.new_local(signature.parameter_type.clone());
+                    scope.locals.insert(name.value, local);
+                }
+            }
+        }
+        self.note_declared(&scope);
+        self.locals.push(scope);
+
+        self.check_function_body_inner(&function.body);
+
+        self.locals.pop();
+        self.lambda_stack.pop();
+        self.lambda_probe_returns = saved_probe;
+        self.static_context = saved_static;
+        self.return_type = saved_return;
+    }
+
+    /// A name that is a local function: the call binds to it directly, and
+    /// whatever lambda or local function names it takes on its captures.
+    fn local_function_group(
+        &mut self,
+        name: &'ast str,
+        span: &Range<usize>,
+    ) -> Option<Meaning<'ast>> {
+        let entry = self.local_function(name)?;
+        let id = EntityID::from(entry.node);
+        let signature = entry.signature.clone();
+        if let Some((caller, _)) = self.lambda_stack.last() {
+            let caller = *caller;
+            self.local_calls.entry(caller).or_default().insert(id);
+        }
+        // a declaration the checker refused: its error is already out, and
+        // a call to it is no reason for a second one
+        let Some(signature) = signature else {
+            return Some(Meaning::Error);
+        };
+        Some(Meaning::Group(MethodGroup {
+            candidates: vec![MemberCandidate {
+                origin: MemberOrigin::LocalFunction(id),
+                kind: SymbolKind::Method,
+                // it takes no receiver: what it needs of the enclosing body
+                // travels as captures, not as `this`
+                is_static: true,
+                accessibility: Accessibility::Private,
+                arity: 0,
+                signature: Some(MemberSignature::Function(signature)),
+                declaring_type: self.this_type.clone().unwrap_or(Type::Error),
+            }],
+            explicit_arguments: Vec::new(),
+            via_type: false,
+            name,
+            receiver: None,
+            allow_extensions: false,
+            receiver_display: name.to_string(),
+            span: span.clone(),
+        }))
+    }
+
+    /// Capture sets travel along calls: a lambda or local function that
+    /// calls a local function has to hand it every box it captures, so it
+    /// captures them too — minus the ones it declares itself. Repeated
+    /// until nothing changes, so a chain (and mutual recursion) settles.
+    fn close_captures(&mut self) {
+        loop {
+            let mut changed = false;
+            let edges: Vec<(EntityID, Vec<EntityID>)> = self
+                .local_calls
+                .iter()
+                .map(|(caller, callees)| (*caller, callees.iter().copied().collect()))
+                .collect();
+            for (caller, callees) in edges {
+                let own = self.declared_names.get(&caller).cloned().unwrap_or_default();
+                let mut wanted: BTreeSet<String> = BTreeSet::new();
+                for callee in callees {
+                    if let Some(names) = self.captures.get(&callee) {
+                        wanted.extend(names.iter().filter(|name| !own.contains(*name)).cloned());
+                    }
+                }
+                if wanted.is_empty() {
+                    continue;
+                }
+                let captures = self.captures.entry(caller).or_default();
+                for name in wanted {
+                    changed |= captures.insert(name);
+                }
+            }
+            if !changed {
+                return;
+            }
         }
     }
 
@@ -1199,7 +1559,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             match candidate.origin {
                 MemberOrigin::Source(id) => !self.is_bodiless_member(id),
-                MemberOrigin::External { .. } => true,
+                MemberOrigin::External { .. } | MemberOrigin::LocalFunction(_) => true,
             }
         })
     }
@@ -1438,7 +1798,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let saved_static = self.static_context;
         let saved_return = std::mem::replace(&mut self.return_type, function.return_type.clone());
 
-        self.locals.push(HashMap::new());
+        self.locals.push(Scope::default());
         for (index, parameter) in parameter_syntax.iter().enumerate() {
             if let (Ok(name), Some(signature)) = (&parameter.name, function.parameters.get(index)) {
                 self.declare_local(name.value, signature.parameter_type.clone());
@@ -1525,7 +1885,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             | AccessorKind::Remove
                     );
 
-                    self.locals.push(HashMap::new());
+                    self.locals.push(Scope::default());
                     let saved_return = self.return_type.clone();
                     if is_setter {
                         self.declare_local("value", member_type.clone());
@@ -1565,9 +1925,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     // ----------------------------------------------------------- statements
 
     fn check_block(&mut self, block: &'ast Block<'ast, 'ast>) {
-        self.locals.push(HashMap::new());
+        self.locals.push(Scope::default());
+        let functions = self.declare_local_functions(block);
         for statement in block.statements {
             self.check_statement(statement);
+        }
+        // last of all: a local function may use any variable of its block,
+        // wherever in the block that variable is written
+        for function in functions {
+            self.check_local_function_body(function);
         }
         self.locals.pop();
     }
@@ -1607,7 +1973,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
             Statement::For(statement) => {
-                self.locals.push(HashMap::new());
+                self.locals.push(Scope::default());
                 match &statement.initializer {
                     Some(ForInitializer::Declaration(declaration)) => {
                         self.check_local_declaration(declaration)
@@ -1631,7 +1997,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 self.locals.pop();
             }
             Statement::Foreach(statement) => {
-                self.locals.push(HashMap::new());
+                self.locals.push(Scope::default());
                 let element = match &statement.collection {
                     Ok(collection) => {
                         let collection_type = self.check_expression(collection);
@@ -1666,7 +2032,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 };
                 if let Ok(sections) = statement.sections {
                     for section in sections {
-                        self.locals.push(HashMap::new());
+                        self.locals.push(Scope::default());
                         for label in section.labels {
                             if let SwitchLabel::Case { pattern, guard, .. } = label {
                                 if let Ok(pattern) = pattern {
@@ -1689,7 +2055,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.check_block(block);
                 }
                 for catch in statement.catches {
-                    self.locals.push(HashMap::new());
+                    self.locals.push(Scope::default());
                     let exception = catch
                         .exception_type
                         .as_ref()
@@ -1716,7 +2082,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
             Statement::Using(statement) => {
-                self.locals.push(HashMap::new());
+                self.locals.push(Scope::default());
                 match &statement.resource {
                     Ok(UsingResource::Declaration(declaration)) => {
                         self.check_local_declaration(declaration)
@@ -1750,7 +2116,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
             Statement::Fixed(statement) => {
-                self.locals.push(HashMap::new());
+                self.locals.push(Scope::default());
                 if let Ok(declaration) = &statement.declaration {
                     self.check_local_declaration(declaration);
                 }
@@ -1820,11 +2186,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 );
             }
             Statement::LocalFunction(function) => {
-                // needs local signature resolution; scaffolding until then
-                self.error(
-                    SemanticErrorKind::UnsupportedStatement,
-                    function.span.clone(),
-                );
+                // where it stands among the block's variables: it may use
+                // the ones above it, and its body is checked knowing that
+                self.local_function_order
+                    .insert(EntityID::from(function), self.local_order);
+                // declared and checked by the block it belongs to; reaching
+                // one from anywhere else means it is not in a block at all
+                let declared = self
+                    .local_function(function.name.value)
+                    .is_some_and(|entry| EntityID::from(entry.node) == EntityID::from(function));
+                if !declared {
+                    self.error(
+                        SemanticErrorKind::UnsupportedStatement,
+                        function.span.clone(),
+                    );
+                }
             }
             Statement::Labeled(statement) => {
                 if let Ok(inner) = statement.statement {
@@ -2229,7 +2605,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let mut arm_types: Vec<Type> = Vec::new();
                 if let Ok(arms) = switch.arms {
                     for arm in arms {
-                        self.locals.push(HashMap::new());
+                        self.locals.push(Scope::default());
                         self.check_pattern(&arm.pattern, &value);
                         if let Some(guard) = &arm.guard {
                             self.check_condition(guard);
@@ -2489,10 +2865,17 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if generics.is_none()
                     && let Some(ty) = self.local(name.value).cloned()
                 {
-                    self.note_local_use(name.value);
+                    self.note_local_use(name.value, span);
                     self.targets
                         .insert(EntityID::from(left), ResolvedTarget::Local);
                     return Meaning::Value(ty);
+                }
+
+                // a local function shadows a member of the same name
+                if generics.is_none()
+                    && let Some(meaning) = self.local_function_group(name.value, span)
+                {
+                    return meaning;
                 }
 
                 // members of the enclosing type (inherited included)
@@ -3749,6 +4132,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                                 self.resolver.declarations.table.symbol(*id).is_extension
                             }
                             MemberOrigin::External { member, .. } => member.is_extension,
+                            MemberOrigin::LocalFunction(_) => false,
                         };
                         if is_extension && candidate.declaring_type == class_type {
                             candidates.push(candidate);
@@ -3918,17 +4302,20 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let saved_probe = self.lambda_probe_returns.take();
         let saved_return = std::mem::replace(&mut self.return_type, Type::Infer);
 
-        let mut scope = HashMap::new();
+        let mut scope = Scope::default();
         for (name, parameter) in Self::lambda_parameter_names(lambda)
             .into_iter()
             .zip(&delegate.parameters)
         {
             if let Some(name) = name {
-                scope.insert(name, parameter.parameter_type.clone());
+                scope
+                    .locals
+                    .insert(name, self.new_local(parameter.parameter_type.clone()));
             }
         }
         self.lambda_stack
             .push((EntityID::from(lambda), self.locals.len()));
+        self.note_declared(&scope);
         self.locals.push(scope);
 
         let result = match &lambda.body {
@@ -3970,10 +4357,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             return;
         }
 
-        let mut scope = HashMap::new();
+        let mut scope = Scope::default();
         for (name, parameter) in names.iter().zip(&delegate.parameters) {
             if let Some(name) = name {
-                scope.insert(*name, parameter.parameter_type.clone());
+                scope
+                    .locals
+                    .insert(*name, self.new_local(parameter.parameter_type.clone()));
             }
         }
         // explicitly written parameter types must agree with the delegate
@@ -3997,6 +4386,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         self.lambda_stack
             .push((EntityID::from(lambda), self.locals.len()));
+        self.note_declared(&scope);
         self.locals.push(scope);
         let saved_return = std::mem::replace(&mut self.return_type, delegate.return_type.clone());
 
@@ -5225,5 +5615,7 @@ fn method_parameter_keys(system: &TypeSystem, candidate: &MemberCandidate) -> Ve
             .map(|&parameter| InferenceKey::Source(parameter))
             .collect(),
         MemberOrigin::External { .. } => (0..candidate.arity).map(InferenceKey::External).collect(),
+        // a local function cannot be generic
+        MemberOrigin::LocalFunction(_) => Vec::new(),
     }
 }

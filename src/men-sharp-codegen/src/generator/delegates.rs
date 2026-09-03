@@ -29,7 +29,7 @@
 //! iteration's box, as C# promises. The checker says which names those
 //! are (`BodyCheck::captured_locals`, `BodyCheck::captures`).
 
-use men_sharp_parser::ast::{LambdaBody, LambdaExpression, LambdaParameters};
+use men_sharp_parser::ast::{LambdaBody, LambdaExpression, LambdaParameters, MethodDeclaration};
 use men_sharp_semantics::{ExternalTypeKind, FunctionSignature, ParameterPassing};
 
 use super::*;
@@ -48,7 +48,18 @@ pub(super) struct LambdaInfo<'ast> {
     node: &'ast LambdaExpression<'ast, 'ast>,
     /// The captured variables in payload order, each with its type: the
     /// boxes the function receives before its own parameters.
-    captures: Vec<(&'ast str, Type)>,
+    captures: Vec<(String, Type)>,
+    pub(super) has_this: bool,
+    parameters: Vec<Type>,
+    returns: Type,
+}
+
+/// A local function that became a function.
+pub(super) struct LocalFunctionInfo<'ast> {
+    pub(super) node: &'ast MethodDeclaration<'ast, 'ast>,
+    /// The captured variables in parameter order, each with its type: the
+    /// boxes the function receives before its own parameters.
+    captures: Vec<(String, Type)>,
     pub(super) has_this: bool,
     parameters: Vec<Type>,
     returns: Type,
@@ -411,7 +422,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // what it captures: `this` when the enclosing body has one, then
         // every named variable — each of which the body declared boxed
         let mut payload: Vec<DataId> = Vec::new();
-        let mut captures: Vec<(&'ast str, Type)> = Vec::new();
+        let mut captures: Vec<(String, Type)> = Vec::new();
         payload.extend(ctx.this_slot);
         let names: Vec<String> = self
             .bodies
@@ -441,7 +452,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 );
                 return None;
             }
-            captures.push((*key_name, local.ty.clone()));
+            captures.push((key_name.clone(), local.ty.clone()));
             payload.push(local.slot);
         }
 
@@ -519,6 +530,187 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    // --------------------------------------------------- local functions
+
+    /// The function a local function of this body compiles to.
+    pub(super) fn local_function_key(&self, ctx: &Ctx<'ast>, id: EntityID) -> FunctionKey {
+        FunctionKey {
+            symbol: ctx.key.symbol,
+            role: Role::LocalFunction(id),
+            bindings: ctx.key.bindings.clone(),
+        }
+    }
+
+    /// Registers every local function written directly in a block, before
+    /// the block is lowered: one may be called from above its declaration,
+    /// and from a lambda written above it.
+    pub(super) fn register_local_functions(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        block: &'ast Block<'ast, 'ast>,
+    ) {
+        for statement in block.statements {
+            let Statement::LocalFunction(node) = statement else {
+                continue;
+            };
+            let id = EntityID::from(node);
+            let key = self.local_function_key(ctx, id);
+            if self.local_functions.contains_key(&key) {
+                continue;
+            }
+            let Some(declaration) = self.bodies.local_functions.get(&id) else {
+                // the checker refused it (a generic one) and reported why
+                continue;
+            };
+            let signature = declaration.signature.clone();
+            let is_static = declaration.is_static;
+            // the type of a captured variable comes from the checker: the
+            // box of one declared further down the block does not exist yet
+            let types = self.bodies.capture_types.get(&ctx.key.symbol);
+            let captures: Vec<(String, Type)> = self
+                .bodies
+                .captures
+                .get(&id)
+                .map(|names| {
+                    names
+                        .iter()
+                        .map(|name| {
+                            let ty = types
+                                .and_then(|types| types.get(name))
+                                .cloned()
+                                .unwrap_or(Type::Error);
+                            (name.clone(), self.substitute(&ty, &ctx.key.bindings))
+                        })
+                        .collect()
+                })
+                .unwrap_or_default();
+            let parameters = signature
+                .parameters
+                .iter()
+                .map(|parameter| self.substitute(&parameter.parameter_type, &ctx.key.bindings))
+                .collect();
+            let returns = self.substitute(&signature.return_type, &ctx.key.bindings);
+            self.local_functions.insert(
+                key,
+                LocalFunctionInfo {
+                    node,
+                    captures,
+                    has_this: !is_static && ctx.this_slot.is_some(),
+                    parameters,
+                    returns,
+                },
+            );
+        }
+    }
+
+    /// A local function's parameters: one box per captured variable, then
+    /// the ones it declares.
+    pub(super) fn local_function_shape(&self, key: &FunctionKey) -> (Vec<Type>, Type) {
+        let Some(info) = self.local_functions.get(key) else {
+            return (Vec::new(), Type::Void);
+        };
+        let mut parameters: Vec<Type> = info
+            .captures
+            .iter()
+            .map(|_| self.object_array_type())
+            .collect();
+        parameters.extend(info.parameters.iter().cloned());
+        (parameters, info.returns.clone())
+    }
+
+    /// The boxes a call hands a local function, `this` first when it has
+    /// one: what the enclosing body holds for every name it captures.
+    pub(super) fn local_function_payload(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        key: &FunctionKey,
+        span: Range<usize>,
+    ) -> Option<Vec<DataId>> {
+        let Some(info) = self.local_functions.get(key) else {
+            self.error(ctx, "internal: this local function has no function", span);
+            return None;
+        };
+        let has_this = info.has_this;
+        let function = info.node.name.value.to_string();
+        let names: Vec<String> = info
+            .captures
+            .iter()
+            .map(|(name, _)| name.clone())
+            .collect();
+        let mut payload: Vec<DataId> = Vec::new();
+        if has_this {
+            let Some(this) = ctx.this_slot else {
+                self.error(
+                    ctx,
+                    format!(
+                        "`{function}` uses the object the enclosing method runs on, which is not \
+                         available here — a `static` local function cannot hand it on"
+                    ),
+                    span,
+                );
+                return None;
+            };
+            payload.push(this);
+        }
+        for name in names {
+            let found = ctx
+                .locals
+                .iter()
+                .rev()
+                .find_map(|scope| scope.get(name.as_str()))
+                .filter(|local| local.boxed)
+                .map(|local| local.slot);
+            let Some(slot) = found else {
+                self.error(
+                    ctx,
+                    format!(
+                        "`{function}` uses `{name}` of the enclosing method, which is not \
+                         available at this call: a `static` local function cannot hand it on, \
+                         and a variable declared below has no value yet"
+                    ),
+                    span,
+                );
+                return None;
+            };
+            payload.push(slot);
+        }
+        Some(payload)
+    }
+
+    /// The body of a local function: bind the boxes and the parameters,
+    /// then its own body.
+    pub(super) fn emit_local_function_body(&mut self, ctx: &mut Ctx<'ast>, key: &FunctionKey) {
+        let (node, captures, has_this, parameters) = {
+            let info = &self.local_functions[key];
+            (
+                info.node,
+                info.captures.clone(),
+                info.has_this,
+                info.parameters.clone(),
+            )
+        };
+        let slots = self.functions[key].parameters.clone();
+        let mut next = usize::from(has_this);
+        for (name, ty) in captures {
+            ctx.locals[0].insert(
+                name,
+                Local {
+                    slot: slots[next],
+                    ty,
+                    boxed: true,
+                },
+            );
+            next += 1;
+        }
+        self.bind_parameters(
+            ctx,
+            node.parameters.as_ref().ok().map(|list| list.parameters),
+            &slots[next..],
+            &parameters,
+        );
+        self.emit_function_body(ctx, &node.body);
+    }
+
     // ----------------------------------------------------- method groups
 
     /// `Func<int, int> f = Twice;` — a delegate to a method of the
@@ -540,6 +732,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return None;
         };
+        // `Action a = Local;` — the payload is what a call would have
+        // passed: the `this` it was written under, then its boxes
+        if let MemberOrigin::LocalFunction(id) = call.origin {
+            let key = self.local_function_key(ctx, id);
+            let payload = self.local_function_payload(ctx, &key, span.clone())?;
+            self.ensure_function(&key);
+            let (_, index) = self.ensure_invoker(&shape);
+            let thunk = self.ensure_thunk(&key, index, payload.len());
+            return Some(self.make_delegate(ctx, thunk, &payload, span));
+        }
         let MemberOrigin::Source(symbol) = call.origin else {
             self.error(
                 ctx,
@@ -652,7 +854,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ctx.locals
             .last_mut()
             .expect("a scope is open")
-            .insert(name, local);
+            .insert(name.to_string(), local);
     }
 
     /// A fresh one-element `object[]` holding `value`.

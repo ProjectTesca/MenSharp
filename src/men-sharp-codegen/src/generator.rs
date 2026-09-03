@@ -112,6 +112,7 @@ pub fn generate(
         entry_file: None,
         entry: None,
         lambdas: HashMap::new(),
+        local_functions: HashMap::new(),
         delegate_shapes: Vec::new(),
         invokers: HashMap::new(),
         thunks: HashMap::new(),
@@ -167,6 +168,11 @@ enum Role {
     /// whose body the lambda is written in; the id is the lambda node's.
     /// See `delegates`.
     Lambda(EntityID),
+    /// The function a local function compiles to. `symbol` is the member
+    /// whose body it is written in; the id is its declaration node's. It
+    /// takes the boxes of what it captures before its own parameters —
+    /// there is no delegate, the call is direct. See `delegates`.
+    LocalFunction(EntityID),
     /// The stub every call of a delegate of one shape goes through: takes
     /// the delegate and the arguments, jumps to the address the delegate
     /// holds. `symbol` is the entry class; the index names the shape. See
@@ -362,6 +368,10 @@ struct Generator<'a, 'ast> {
     entry: Option<SymbolId>,
     /// Every lambda that became a function, by its key. See `delegates`.
     lambdas: HashMap<FunctionKey, delegates::LambdaInfo<'ast>>,
+    /// Every local function that became a function, by its key: registered
+    /// when the block that declares it is lowered, so a call written above
+    /// the declaration finds it too. See `delegates`.
+    local_functions: HashMap<FunctionKey, delegates::LocalFunctionInfo<'ast>>,
     /// The delegate shapes met so far, indexed by `Role::DelegateInvoker`.
     delegate_shapes: Vec<delegates::DelegateShape>,
     /// The invoker function of each shape.
@@ -395,7 +405,7 @@ struct Generator<'a, 'ast> {
 struct Ctx<'ast> {
     key: FunctionKey,
     file: FileId,
-    locals: Vec<HashMap<&'ast str, Local>>,
+    locals: Vec<HashMap<String, Local>>,
     /// The locals and parameters of this body that some lambda captures:
     /// declared in a box (a one-element `object[]`) the lambda shares,
     /// instead of a slot of their own. See `delegates`.
@@ -1686,6 +1696,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let slot = self.typed_constant(&constant, &ty)?;
                 Some((slot, ty))
             }
+            // a local function is never a constant member access
+            MemberOrigin::LocalFunction(_) => None,
         }
     }
 

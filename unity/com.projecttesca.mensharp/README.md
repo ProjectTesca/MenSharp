@@ -581,11 +581,50 @@ What does not cross a program boundary: a delegate is code addresses of
 the program that made it, so a delegate-typed field, parameter or return of
 *another* behaviour is an error, and delegate-typed fields are not inspector
 variables. What is not there yet, each as an error: anonymous methods
-(`delegate (int x) { ... }` — write a lambda), local functions, a method
+(`delegate (int x) { ... }` — write a lambda), a method
 of the *engine* as a delegate (`Func<string, int> f = int.Parse;` — wrap it,
 `s => int.Parse(s)`), conversions between delegate types of different
 shapes (`Func<object> f = funcOfString;`), and events with `add`/`remove`
 accessors.
+
+## Local functions
+
+A method may declare functions of its own, anywhere a statement goes. They
+work as in C#: called from above their own declaration, recursive and
+mutually recursive, sharing the variables of the method around them, with
+`ref`/`out`, optional and named arguments — and usable as a delegate.
+
+```csharp
+public void Interact()
+{
+    int total = 0;
+    void Add(int by) { total += by; }       // shares `total`, does not copy it
+    Add(2);
+    Add(3);                                 // total == 5
+
+    int Fact(int n) => n <= 1 ? 1 : n * Fact(n - 1);
+    Debug.Log(Fact(5));                     // 120
+
+    bool Even(int n) => n == 0 || Odd(n - 1);
+    bool Odd(int n) => n != 0 && Even(n - 1);
+
+    static int Pure(int x) => x + 1;        // `static`: uses nothing around it
+    Func<int, int> f = Fact;                // as a delegate, closure and all
+}
+```
+
+A local function is a function of its own on the VM, not a delegate: the
+call is direct, with the boxes of the variables it shares handed over in
+front of its arguments. Nothing is allocated to call one — a delegate
+object appears only where you make one (`Func<int, int> f = Fact;`).
+A caller passes on what its callee shares too, so a lambda that calls a
+local function which uses `total` reaches the same `total`.
+
+Local functions are visible throughout their block, above their own
+declaration included; variables are not. So a local function uses the
+variables written *above* it (C# says CS0841 otherwise), and calling one
+before such a variable's declaration has run is an error too — C# rejects
+that as a use before assignment.
 
 ## Nullable value types
 
@@ -703,9 +742,13 @@ wrong thing:
 - conversion operators (`implicit operator` / `explicit operator`);
 - static abstract/virtual interface members (C# 11 generic math);
 - static constructors of generic classes;
-- anonymous methods (`delegate { ... }`), local functions, engine methods as
-  delegates, delegate variance, events with `add`/`remove` accessors — see
-  *Delegates, lambdas and events*;
+- anonymous methods (`delegate { ... }`), engine methods as delegates,
+  delegate variance, events with `add`/`remove` accessors — see *Delegates,
+  lambdas and events*;
+- generic local functions (`T Pick<T>(T a) { ... }`) — a generic method of the
+  type does the same job. `static` local functions that use a variable of the
+  method around them (CS8421), and local functions that use a variable written
+  below them (CS0841), are errors here as they are in C#;
 - the bare declaration shorthand `int[] x = { 1, 2 };` — write
   `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.
 

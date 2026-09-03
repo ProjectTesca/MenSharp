@@ -130,6 +130,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             Role::UnhandledException => "the unhandled exception report".into(),
             Role::Lambda(_) => format!("a lambda in {}", self.display_path(ctx.key.symbol)),
+            Role::LocalFunction(_) => {
+                let name = self
+                    .local_functions
+                    .get(&ctx.key)
+                    .map(|info| info.node.name.value)
+                    .unwrap_or("a local function");
+                format!("{name} in {}", self.display_path(ctx.key.symbol))
+            }
             _ => self
                 .functions
                 .get(&ctx.key)
@@ -309,6 +317,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 | Role::Constructor
                 | Role::DefaultConstructor
                 | Role::Lambda(_)
+                | Role::LocalFunction(_)
         ) && *span != (0..0);
         if is_frame && let Some(index) = self.exception_field("__trace") {
             let string = self.corlib_type("String");

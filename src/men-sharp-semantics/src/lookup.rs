@@ -23,6 +23,8 @@
 
 use std::collections::HashSet;
 
+use men_sharp_parser::ast::EntityID;
+
 use crate::{
     external::{ExternalMember, ExternalMemberKind, ExternalTypeKind, ExternalTypes},
     merge::Declarations,
@@ -54,6 +56,9 @@ pub enum MemberOrigin {
         owner: ExternalTypeId,
         member: ExternalMember,
     },
+    /// A local function, by its declaration node. It has no symbol: it
+    /// belongs to a body, not to a type.
+    LocalFunction(EntityID),
 }
 
 /// A read-only view over everything the earlier phases produced.
