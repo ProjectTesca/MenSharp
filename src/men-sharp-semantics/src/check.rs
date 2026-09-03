@@ -692,6 +692,19 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
+    /// `a[i]`, `text[i]`: every index has to be an `int`.
+    fn require_integer_indices(&mut self, arguments: &[CallArgument<'ast>]) {
+        let int32 = self.corlib("Int32");
+        for argument in arguments {
+            self.require_convertible(
+                &argument.value_type(),
+                &int32,
+                argument.is_integer_literal,
+                argument.span.clone(),
+            );
+        }
+    }
+
     /// A local function in scope, innermost first.
     fn local_function(&self, name: &str) -> Option<&LocalFunctionEntry<'ast>> {
         self.locals
@@ -4865,19 +4878,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     ) -> Meaning<'ast> {
         match &receiver {
             Type::Array { element, .. } => {
-                let int32 = self.corlib("Int32");
-                for argument in &call_arguments {
-                    self.require_convertible(
-                        &argument.value_type(),
-                        &int32,
-                        argument.is_integer_literal,
-                        argument.span.clone(),
-                    );
-                }
+                self.require_integer_indices(&call_arguments);
                 Meaning::Value((**element).clone())
             }
             Type::Error => Meaning::Error,
-            _ if self.system().is_string(&receiver) => Meaning::Value(self.corlib("Char")),
+            // `text[i]`: `string` has an indexer, but no member the lookup
+            // below would find — the code generator lowers it in place
+            _ if self.system().is_string(&receiver) => {
+                self.require_integer_indices(&call_arguments);
+                Meaning::Value(self.corlib("Char"))
+            }
             _ => {
                 // indexers: `this[]` from source, `Item` from metadata
                 let mut candidates = self.system().members_named(&receiver, "this[]");

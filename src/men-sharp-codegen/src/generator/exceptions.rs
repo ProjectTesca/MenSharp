@@ -665,6 +665,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) {
         self.check_not_null(ctx, array, span.clone());
         let length = self.array_length(ctx, array, array_type, span.clone());
+        self.check_index_in_range(ctx, index, length, span);
+    }
+
+    /// `0 <= index < length`, or `IndexOutOfRangeException`.
+    pub(super) fn check_index_in_range(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        index: DataId,
+        length: DataId,
+        span: Range<usize>,
+    ) {
         let ok = self.fresh_label("index_ok");
         let fail = self.fresh_label("index_fail");
         let condition = self.temp("SystemBoolean");

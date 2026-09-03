@@ -699,6 +699,14 @@ foreach (var pair in ages) { Debug.Log($"{pair.Key}: {pair.Value}"); }
 foreach (var key in ages.Keys) { ... }
 ```
 
+`text[i]` reads a character, as in C#, with the same
+`IndexOutOfRangeException` on a bad index. Udon exposes no `String.get_Chars`,
+so each read is a one-character `ToCharArray(i, 1)` — cheap, but an
+allocation all the same, so walk a string with `foreach (char c in text)` or
+take one `text.ToCharArray()` before a loop rather than indexing it inside
+one. Writing through a string (`text[i] = c`) is an error here, as it is in
+C#: a `string` is immutable.
+
 `List<T>` also has the delegate-taking members — `Find`, `FindIndex`,
 `Exists`, `TrueForAll`, `ForEach`, `RemoveAll`, `Sort(Comparison<T>)`,
 `ConvertAll` — see *Delegates* below.

@@ -627,10 +627,69 @@ impl Emulator {
                 self.heap[args[2]] = Value::Boolean(equal == signature.contains("op_Equality"));
                 Ok(())
             }
+            "SystemChar.__IsLetter__SystemChar__SystemBoolean"
+            | "SystemChar.__IsDigit__SystemChar__SystemBoolean"
+            | "SystemChar.__IsWhiteSpace__SystemChar__SystemBoolean"
+            | "SystemChar.__IsLetterOrDigit__SystemChar__SystemBoolean" => {
+                let args = self.pop_arguments(2)?;
+                let value = match &self.heap[args[0]] {
+                    Value::Char(value) => *value,
+                    other => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "expected Char, found {other:?}"
+                        )));
+                    }
+                };
+                let result = match signature {
+                    "SystemChar.__IsLetter__SystemChar__SystemBoolean" => value.is_alphabetic(),
+                    "SystemChar.__IsDigit__SystemChar__SystemBoolean" => value.is_ascii_digit(),
+                    "SystemChar.__IsWhiteSpace__SystemChar__SystemBoolean" => {
+                        value.is_whitespace()
+                    }
+                    _ => value.is_alphanumeric(),
+                };
+                self.heap[args[1]] = Value::Boolean(result);
+                Ok(())
+            }
+            "SystemString.__Substring__SystemInt32__SystemString"
+            | "SystemString.__Substring__SystemInt32_SystemInt32__SystemString" => {
+                let takes_length = signature.contains("SystemInt32_SystemInt32");
+                let args = self.pop_arguments(if takes_length { 4 } else { 3 })?;
+                let text: Vec<char> = self.heap[args[0]].as_str()?.chars().collect();
+                let start = self.heap[args[1]].as_i32()? as usize;
+                if start > text.len() {
+                    return Err(EmulatorError::Exception("startIndex out of range".into()));
+                }
+                let length = if takes_length {
+                    self.heap[args[2]].as_i32()? as usize
+                } else {
+                    text.len() - start
+                };
+                if start + length > text.len() {
+                    return Err(EmulatorError::Exception("length out of range".into()));
+                }
+                let value: String = text[start..start + length].iter().collect();
+                self.heap[*args.last().expect("an out slot")] = Value::Str(Rc::from(value));
+                Ok(())
+            }
             "SystemString.__get_Length__SystemInt32" => {
                 let args = self.pop_arguments(2)?;
                 let s = self.heap[args[0]].as_str()?;
                 self.heap[args[1]] = Value::Int32(s.chars().count() as i32);
+                Ok(())
+            }
+            "SystemString.__ToCharArray__SystemInt32_SystemInt32__SystemCharArray" => {
+                let args = self.pop_arguments(4)?;
+                let text = self.heap[args[0]].as_str()?;
+                let start = self.heap[args[1]].as_i32()? as usize;
+                let length = self.heap[args[2]].as_i32()? as usize;
+                let chars: Vec<Value> = text
+                    .chars()
+                    .skip(start)
+                    .take(length)
+                    .map(Value::Char)
+                    .collect();
+                self.heap[args[3]] = Value::Array(Rc::new(RefCell::new(chars)));
                 Ok(())
             }
             "SystemString.__ToCharArray__SystemCharArray" => {
@@ -661,6 +720,7 @@ impl Emulator {
             }
             "SystemObject.__ToString__SystemString"
             | "SystemBoolean.__ToString__SystemString"
+            | "SystemChar.__ToString__SystemString"
             | "SystemConvert.__ToString__SystemObject__SystemString" => {
                 let args = self.pop_arguments(2)?;
                 let value = self.heap[args[0]].display();

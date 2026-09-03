@@ -1800,6 +1800,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 None => Place::Error,
             };
         }
+        // `text[i] = c`: C# has no setter on `string` either. A read never
+        // reaches here — it is lowered where the element access is read.
+        if self
+            .extern_type_name(&ty)
+            .is_some_and(|name| name == "SystemString")
+        {
+            self.error(
+                ctx,
+                "a `string` cannot be written through: `text[i] = c` is not allowed in C# \
+                 either — build a new string (`Substring`, `+`) or work on a `char[]` \
+                 from `ToCharArray()`",
+                span,
+            );
+            return Place::Error;
+        }
         // an indexer
         match self.bodies.targets.get(&EntityID::from(node)) {
             Some(ResolvedTarget::Call(call)) => {
@@ -2038,6 +2053,43 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .unwrap_or_else(|| candidates[1].clone());
         self.call_extern(ctx, &signature, &[array, out], span);
         out
+    }
+
+    /// `text[index]` — Udon exposes no `String.get_Chars`, so the character
+    /// comes out of a one-element `ToCharArray(index, 1)`. The bounds are
+    /// checked here: the extern would throw too, but that halts the VM,
+    /// while this throws the `IndexOutOfRangeException` C# promises.
+    pub(super) fn string_char_at(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        text: DataId,
+        index: DataId,
+        span: Range<usize>,
+    ) -> DataId {
+        self.check_not_null(ctx, text, span.clone());
+        let length = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemString.__get_Length__SystemInt32",
+            &[text, length],
+            span.clone(),
+        );
+        self.check_index_in_range(ctx, index, length, span.clone());
+        let one = self.int_constant(1);
+        let chars = self.temp("SystemCharArray");
+        self.call_extern(
+            ctx,
+            "SystemString.__ToCharArray__SystemInt32_SystemInt32__SystemCharArray",
+            &[text, index, one, chars],
+            span.clone(),
+        );
+        let zero = self.int_constant(0);
+        let char_type = self.corlib_type("Char");
+        let array_type = Type::Array {
+            element: Box::new(char_type.clone()),
+            rank: 1,
+        };
+        self.array_get(ctx, chars, zero, &array_type, &char_type, span)
     }
 
     pub(super) fn array_get(
@@ -2487,16 +2539,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     let Some(index) = index else {
                         return Piece::Error;
                     };
-                    let out = self.temp("SystemChar");
-                    let char_type = ty.clone();
-                    self.call_extern(
-                        ctx,
-                        "SystemString.__get_Chars__SystemInt32__SystemChar",
-                        &[*slot, index, out],
-                        span.clone(),
-                    );
-                    let _ = char_type;
-                    return Piece::Value(out, Type::Error);
+                    let slot = *slot;
+                    let value = self.string_char_at(ctx, slot, index, span.clone());
+                    return Piece::Value(value, self.corlib_type("Char"));
                 }
                 let PrimaryRight::ElementAccess { arguments, .. } = right else {
                     unreachable!()

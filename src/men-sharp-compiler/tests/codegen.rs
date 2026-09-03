@@ -7006,3 +7006,49 @@ fn a_local_function_reaching_a_variable_that_has_no_value_yet_is_an_error() {
         "{messages:#?}"
     );
 }
+
+#[test]
+fn a_string_can_be_indexed() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static int Result;
+                public static string Word = "hello";
+                public static char At(string text, int index) { return text[index]; }
+                public static void Main()
+                {
+                    Log += Word[0];                          // h
+                    Log += Word[Word.Length - 1];            // o
+                    char c = At("abc", 1);
+                    Log += c;                                // b
+                    if (Word[1] == 'e') Result += 1;         // 1
+                    for (int i = 0; i < Word.Length; i++)
+                    {
+                        if (char.IsLetter(Word[i])) Result += 10;
+                    }                                        // 51
+                    string built = "";
+                    foreach (char ch in Word) built += ch;
+                    if (built == Word) Result += 100;        // 151
+                    Log += Word.Substring(1, 2)[1];          // l
+                    try
+                    {
+                        Log += Word[9];
+                    }
+                    catch (IndexOutOfRangeException)
+                    {
+                        Log += "!";
+                    }
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "hobl!");
+    assert_eq!(int_of(&emulator, "Result"), 151);
+}
