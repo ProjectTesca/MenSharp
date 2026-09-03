@@ -686,15 +686,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         .code
                         .push(Op::JumpIfFalse(Target::Label(else_label)));
                 }
+                // each arm converted to the expression's type: `c ? 1 : 2.5`
+                // is a double, `c ? 1 : null` an `int?`
                 if let Ok(value) = &conditional.then_value
-                    && let Some(slot) = self.lower_expression(ctx, value)
+                    && let Some(slot) = self.owned_value_as(ctx, value, &ty)
                 {
                     self.copy(slot, result);
                 }
                 self.program.code.push(Op::Jump(Target::Label(end_label)));
                 self.program.code.push(Op::Label(else_label));
                 if let Ok(value) = &conditional.else_value
-                    && let Some(slot) = self.lower_expression(ctx, value)
+                    && let Some(slot) = self.owned_value_as(ctx, value, &ty)
                 {
                     self.copy(slot, result);
                 }

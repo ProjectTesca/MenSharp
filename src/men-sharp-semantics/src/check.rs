@@ -2129,6 +2129,26 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     None if matches!(then_type, Type::Null) && matches!(else_type, Type::Null) => {
                         Type::Null
                     }
+                    // C# 9 target typing (§12.18): no natural type, but both
+                    // arms convert to what the context wants — `int? x = c ?
+                    // 1 : null`, `IShape s = c ? circle : square`
+                    None if expected.is_some_and(|target| {
+                        !matches!(target, Type::Error)
+                            && [&then_type, &else_type]
+                                .into_iter()
+                                .zip([
+                                    conditional.then_value.as_ref().ok(),
+                                    conditional.else_value.as_ref().ok(),
+                                ])
+                                .all(|(arm, value)| {
+                                    system.is_implicitly_convertible(arm, target)
+                                        || (value.is_some_and(Self::is_integer_literal)
+                                            && system.numeric_kind(target).is_some())
+                                })
+                    }) =>
+                    {
+                        expected.cloned().unwrap_or(Type::Error)
+                    }
                     None => {
                         let kind = SemanticErrorKind::TypeMismatch {
                             expected: self.display(&then_type),

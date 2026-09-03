@@ -606,6 +606,7 @@ Vector3? target = null;
 target = hit.point;
 if (target is Vector3 point) { ... }
 int? count = door?.OpenCount;             // null when `door` is
+int? pick = found ? index : null;         // a conditional takes the target type (C# 9)
 switch (last) { case null: ...; case 6: ...; }
 ```
 

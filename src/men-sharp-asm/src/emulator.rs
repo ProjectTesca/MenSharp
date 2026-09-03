@@ -71,6 +71,15 @@ impl Value {
         }
     }
 
+    pub fn as_f64(&self) -> Result<f64, EmulatorError> {
+        match self {
+            Value::Double(v) => Ok(*v),
+            other => Err(EmulatorError::TypeError(format!(
+                "expected Double, found {other:?}"
+            ))),
+        }
+    }
+
     pub fn as_u32(&self) -> Result<u32, EmulatorError> {
         match self {
             Value::UInt32(v) => Ok(*v),
@@ -460,6 +469,62 @@ impl Emulator {
                     a || b
                 };
                 self.heap[args[2]] = Value::Boolean(value);
+                Ok(())
+            }
+            "SystemDouble.__op_Addition__SystemDouble_SystemDouble__SystemDouble"
+            | "SystemDouble.__op_Subtraction__SystemDouble_SystemDouble__SystemDouble"
+            | "SystemDouble.__op_Multiplication__SystemDouble_SystemDouble__SystemDouble"
+            | "SystemDouble.__op_Division__SystemDouble_SystemDouble__SystemDouble" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_f64()?;
+                let b = self.heap[args[1]].as_f64()?;
+                let value = if signature.contains("Addition") {
+                    a + b
+                } else if signature.contains("Subtraction") {
+                    a - b
+                } else if signature.contains("Multiplication") {
+                    a * b
+                } else {
+                    a / b
+                };
+                self.heap[args[2]] = Value::Double(value);
+                Ok(())
+            }
+            "SystemDouble.__op_Equality__SystemDouble_SystemDouble__SystemBoolean"
+            | "SystemDouble.__op_Inequality__SystemDouble_SystemDouble__SystemBoolean"
+            | "SystemDouble.__op_LessThan__SystemDouble_SystemDouble__SystemBoolean"
+            | "SystemDouble.__op_GreaterThan__SystemDouble_SystemDouble__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_f64()?;
+                let b = self.heap[args[1]].as_f64()?;
+                let value = if signature.contains("Equality") {
+                    a == b
+                } else if signature.contains("Inequality") {
+                    a != b
+                } else if signature.contains("LessThan") {
+                    a < b
+                } else {
+                    a > b
+                };
+                self.heap[args[2]] = Value::Boolean(value);
+                Ok(())
+            }
+            "SystemConvert.__ToDouble__SystemInt32__SystemDouble"
+            | "SystemConvert.__ToDouble__SystemSingle__SystemDouble"
+            | "SystemConvert.__ToDouble__SystemInt64__SystemDouble" => {
+                let args = self.pop_arguments(2)?;
+                let value = match &self.heap[args[0]] {
+                    Value::Double(value) => *value,
+                    Value::Single(value) => f64::from(*value),
+                    Value::Int32(value) => f64::from(*value),
+                    Value::Int64(value) => *value as f64,
+                    other => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "Convert.ToDouble of {other:?}"
+                        )));
+                    }
+                };
+                self.heap[args[1]] = Value::Double(value);
                 Ok(())
             }
             // ---- Int64 and the numeric conversions nullable lifting uses ----

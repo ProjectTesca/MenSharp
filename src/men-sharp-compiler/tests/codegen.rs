@@ -6724,3 +6724,38 @@ fn nullable_value_types_work() {
     assert_eq!(string_of(&emulator, "Log"), "|16||32|-1NSWZEQR");
     assert_eq!(int_of(&emulator, "Result"), 1131235);
 }
+
+#[test]
+fn a_conditional_takes_the_type_its_context_wants() {
+    let source = r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static int? Pick(bool yes) { return yes ? 1 : null; }
+                public static void Main()
+                {
+                    bool on = Result == 0;
+                    int? a = on ? 5 : null;                     // target-typed: int?
+                    int? b = !on ? 5 : null;
+                    if (a == 5 && b == null) Result += 1;       // 1
+                    long wide = on ? 1 : 2L;                    // natural type long
+                    if (wide == 1) Result += 10;                // 11
+                    double d = on ? 1 : 2.5;                    // 1 converted to double
+                    if (d == 1.0) Result += 100;                // 111
+                    string s = on ? "yes" : null;
+                    Log += s ?? "none";
+                    Log += Pick(false) ?? -1;                   // yes-1
+                    Result += Pick(true) ?? 0;                  // 112
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "yes-1");
+    assert_eq!(int_of(&emulator, "Result"), 112);
+}
