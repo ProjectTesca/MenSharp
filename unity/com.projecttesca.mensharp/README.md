@@ -271,6 +271,16 @@ Udon has no generics, so `GetComponent<T>` is one extern that takes
 `typeof(T)` as an ordinary value; the same goes for `GetComponentInChildren<T>`
 and friends. `typeof(...)` works for any type Udon knows.
 
+`GetComponent<Door>()` with one of *your* behaviours — or an UdonSharp one —
+works too, and so do `GetComponents`, `GetComponentInChildren`,
+`GetComponentInParent` and `TryGetComponent`, on the behaviour itself, on a
+`GameObject` or on any component. Udon cannot name a program as a type, so
+the search asks every UdonBehaviour on the object for its identity (the
+program id MenSharp puts in heap slot 0, or UdonSharp's `__refl_typeid`) and
+returns the ones that are a `Door` — subclasses included, as with any
+`GetComponent`. The cost is one `GetComponents(typeof(UdonBehaviour))` and one
+variable read per behaviour on the object.
+
 VRChat replaces Unity's `Instantiate` with its own, which only clones a
 GameObject and takes nothing else — the position/rotation/parent overloads are
 written in terms of it. VRChat's own rules still apply: the original has to be

@@ -2865,6 +2865,7 @@ fn event_slot_type(dotnet: &str) -> String {
     }
 }
 
+mod components;
 mod exceptions;
 mod expressions;
 mod functions;

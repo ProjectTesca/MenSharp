@@ -5912,3 +5912,100 @@ fn the_source_table_marks_function_starts_and_the_halt() {
         "{meta}"
     );
 }
+
+/// `GetComponent<Door>()` for a program type: the UdonBehaviours on the
+/// object are asked for their identity — `__program_id` against the ids of
+/// `Door` and every subclass for a MenSharp program, `__refl_typeids` /
+/// `__refl_typeid` for an UdonSharp one — through the corlib's searches.
+#[test]
+fn a_program_is_found_on_a_game_object_by_its_id() {
+    let mut sources = vec![
+        SourceCode::foreign(
+            "Assets/Vendor/UCounter.cs",
+            r#"
+            namespace UdonSharp { public class UdonSharpBehaviour { } }
+            public class UCounter : UdonSharp.UdonSharpBehaviour { public int count; }
+            "#,
+        ),
+        SourceCode::new(
+            "Assets/MenSharp/Switch.cs",
+            r#"
+            using MenSharp.Internal;
+            namespace Game
+            {
+                public class Door : MenSharp.MenSharpBehaviour { public int opened; }
+                public class SlidingDoor : Door { }
+                public class Switch : MenSharp.MenSharpBehaviour
+                {
+                    public object target;
+                    public int found;
+                    public void Interact()
+                    {
+                        Door door = Programs.GetComponent<Door>(target);
+                        Door[] doors = Programs.GetComponents<Door>(target);
+                        UCounter counter = Programs.GetComponentInChildren<UCounter>(target, true);
+                        if (door != null) { found = doors.Length; door.opened = 1; }
+                        if (counter != null) { counter.count = 2; }
+                    }
+                }
+            }
+            "#,
+        ),
+    ];
+    sources.extend(Compiler::corlib_sources());
+    let Some(program) = compile_behaviour(sources, "Game.Switch") else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    let meta = program.output.program.to_meta_json().unwrap();
+    // the engine call, with typeof(UdonBehaviour)
+    assert!(
+        text.contains(
+            "UnityEngineComponent.__GetComponents__SystemType__UnityEngineComponentArray"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("UnityEngineComponent.__GetComponentsInChildren__SystemType_SystemBoolean__UnityEngineComponentArray"),
+        "{text}"
+    );
+    assert!(meta.contains("VRC.Udon.UdonBehaviour"), "{meta}");
+    // the identities asked for
+    for name in ["__program_id", "__refl_typeids", "__refl_typeid"] {
+        assert!(
+            meta.contains(&format!("\"value\": \"{name}\"")),
+            "{name} missing:\n{meta}"
+        );
+    }
+    // the ids of Door and of its subclass: FNV-1a of the class path, as the
+    // programs' own heap slot 0 holds it
+    let fnv = |path: &str| {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for byte in path.bytes() {
+            hash ^= u64::from(byte);
+            hash = hash.wrapping_mul(0x0100_0000_01b3);
+        }
+        (hash & 0x7fff_ffff_ffff_ffff) as i64
+    };
+    for path in ["Game.Door", "Game.SlidingDoor"] {
+        let id = fnv(path).to_string();
+        assert!(
+            meta.contains(&format!("\"value\": \"{id}\"")),
+            "{path} id missing:\n{meta}"
+        );
+    }
+    // and not the id of an unrelated program (its own slot 0 aside)
+    let unrelated = format!(
+        "SystemInt64\", \"kind\": \"Int64\", \"value\": \"{}\"",
+        fnv("Game.Switch")
+    );
+    assert!(!meta.contains(&unrelated), "{meta}");
+    // the result is a program reference
+    assert!(text.contains("%VRCUdonUdonBehaviour"), "{text}");
+}

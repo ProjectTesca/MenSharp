@@ -204,13 +204,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// is about — the same convention UdonSharp uses.
     pub(super) fn emit_program_identity(&mut self, entry_path: &[&str]) {
         let name = entry_path.join(".");
-        // FNV-1a over the name: stable across builds, distinct across programs
-        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-        for byte in name.bytes() {
-            hash ^= u64::from(byte);
-            hash = hash.wrapping_mul(0x0100_0000_01b3);
-        }
-        let id = (hash & 0x7fff_ffff_ffff_ffff) as i64;
+        // FNV-1a over the name: stable across builds, distinct across
+        // programs — and what `GetComponent<T>()` looks for (see `components`)
+        let id = super::components::program_id_of(&name);
         self.program.add_data(DataSymbol {
             name: "__program_id".into(),
             udon_type: "SystemInt64".into(),

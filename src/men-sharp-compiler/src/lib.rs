@@ -316,6 +316,10 @@ impl Compiler {
             ),
             SourceCode::new("corlib/List.cs", include_str!("../../../corlib/List.cs")),
             SourceCode::new(
+                "corlib/Programs.cs",
+                include_str!("../../../corlib/Programs.cs"),
+            ),
+            SourceCode::new(
                 "corlib/Dictionary.cs",
                 include_str!("../../../corlib/Dictionary.cs"),
             ),

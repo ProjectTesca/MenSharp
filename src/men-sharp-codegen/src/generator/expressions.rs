@@ -2568,6 +2568,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match &call.origin {
             MemberOrigin::Source(symbol) => {
                 let symbol = *symbol;
+                // the corlib's program-search intrinsics are lowered in place
+                if let Some(piece) =
+                    self.try_program_intrinsic(ctx, call, symbol, &values, span.clone())
+                {
+                    return piece;
+                }
                 // calling into *another* behaviour: Udon has no cross-program
                 // call, only "raise this event by name" — so that is what a
                 // method call becomes
@@ -2708,6 +2714,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             return piece;
                         }
                     }
+                }
+                // `GetComponent<Door>()`: a program is found by asking, not
+                // by engine type — see `components`
+                if let Some(piece) =
+                    self.try_get_component(ctx, call, &receiver, &values, span.clone())
+                {
+                    return piece;
                 }
                 let Some(signature) = self.external_signature(ctx, call, &span) else {
                     return Piece::Error;
