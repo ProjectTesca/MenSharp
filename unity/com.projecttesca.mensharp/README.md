@@ -794,9 +794,15 @@ wrong thing:
   type does the same job. `static` local functions that use a variable of the
   method around them (CS8421), and local functions that use a variable written
   below them (CS0841), are errors here as they are in C#;
+- tuples (`(int, int)`), deconstruction and positional patterns;
+- the index and range operators (`a[^1]`, `a[1..]`);
 - `ulong` literals (`1UL`), and integer literals too big for `long`;
 - nested array braces (`{ { 1, 2 }, { 3, 4 } }`) — jagged and rectangular
   arrays are not there yet.
+
+Target-typed `new()` (`List<int> values = new();`, `Counter c = new(5);`) and
+the null-coalescing assignment (`name ??= "anon";`, which evaluates its right
+side only when the left is null) work as in C#.
 
 `ref`/`out` work everywhere: on engine methods (`Physics.Raycast(ray, out hit)`,
 `int.TryParse`) and on methods you define yourself. Named arguments

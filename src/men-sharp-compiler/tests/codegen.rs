@@ -7226,3 +7226,57 @@ fn target_typed_new_takes_the_type_the_context_wants() {
     assert_eq!(string_of(&emulator, "Log"), "3");
     assert_eq!(int_of(&emulator, "Result"), 40);
 }
+
+#[test]
+fn coalescing_assignment_only_runs_when_it_has_to() {
+    let source = r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Box { public int Count = 1; }
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static Box Made()
+                {
+                    Log += "made";
+                    return new Box();
+                }
+                public static void Main()
+                {
+                    Box a = null;
+                    a ??= Made();                    // runs: Log = "made"
+                    Result += a.Count;               // 1
+                    a ??= Made();                    // does not run again
+                    Result += a.Count;               // 2
+
+                    string name = null;
+                    name ??= "anon";
+                    name ??= "other";
+                    Log += name;                     // madeanon
+
+                    int? count = null;
+                    count ??= 5;
+                    Result += count.Value;           // 7
+                    count ??= 9;
+                    Result += count.Value;           // 12
+
+                    Box[] boxes = new Box[1];
+                    boxes[0] ??= new Box();
+                    Result += boxes[0].Count;        // 13
+
+                    var map = new Dictionary<string, Box>();
+                    map["k"] = null;
+                    map["k"] ??= new Box();
+                    Result += map["k"].Count;        // 14
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "madeanon");
+    assert_eq!(int_of(&emulator, "Result"), 14);
+}

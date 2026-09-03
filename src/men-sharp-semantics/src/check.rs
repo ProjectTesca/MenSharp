@@ -2536,6 +2536,20 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 match assignment.operator.value {
                     AssignmentOperator::Assign | AssignmentOperator::Coalesce => {
                         self.require_convertible(&value_type, &target, literal, value.span());
+                        // `x ??= y` needs an `x` that can be null (CS8330):
+                        // on a plain value type the assignment could never run
+                        if assignment.operator.value == AssignmentOperator::Coalesce
+                            && !matches!(target, Type::Error)
+                            && !self.system().is_reference_type(&target)
+                            && !matches!(target, Type::Nullable(_))
+                            && self.system().nullable_of(&target).is_none()
+                        {
+                            let kind = SemanticErrorKind::InvalidOperator {
+                                left: self.display(&target),
+                                right: None,
+                            };
+                            self.error(kind, assignment.span.clone());
+                        }
                     }
                     compound => {
                         let operator = match compound {

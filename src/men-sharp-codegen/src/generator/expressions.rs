@@ -1449,6 +1449,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.write_place(ctx, place, value, assignment.span.clone());
             return Some(value);
         }
+        if assignment.operator.value == AssignmentOperator::Coalesce {
+            return self.lower_coalesce_assignment(ctx, assignment);
+        }
         let value = self.owned_value(ctx, value_expression)?;
         let value_type = self.type_of(ctx, value_expression);
 
@@ -1489,6 +1492,35 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let place = self.lower_place(ctx, &assignment.target);
         self.write_place(ctx, place, final_value, assignment.span.clone());
         Some(final_value)
+    }
+
+    /// `a ??= b`: `b` runs only when `a` is null, and the place is found
+    /// once, so index expressions on the way to it run once.
+    fn lower_coalesce_assignment(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        assignment: &'ast men_sharp_parser::ast::AssignmentExpression<'ast, 'ast>,
+    ) -> Option<DataId> {
+        let value_expression = assignment.value.as_ref().ok()?;
+        let span = assignment.span.clone();
+        let place = self.lower_place(ctx, &assignment.target);
+        let target_type = place_type(&place)?;
+        let (current, _) = self.read_place(ctx, place.clone(), span.clone())?;
+        let result = self.temp_for(&target_type);
+        self.copy(current, result);
+
+        let assign = self.fresh_label("coalesce_assign");
+        let end = self.fresh_label("coalesce_assign_end");
+        let is_null = self.is_null(ctx, current, span.clone());
+        self.jump_if(is_null, assign);
+        self.program.code.push(Op::Jump(Target::Label(end)));
+        self.program.code.push(Op::Label(assign));
+        if let Some(value) = self.owned_value_as(ctx, value_expression, &target_type) {
+            self.write_place(ctx, place, value, span);
+            self.copy(value, result);
+        }
+        self.program.code.push(Op::Label(end));
+        Some(result)
     }
 
     // --------------------------------------------------------------- places
