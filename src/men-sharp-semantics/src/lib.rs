@@ -44,7 +44,7 @@ pub use check::{
 pub use collect::{
     DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode, collect_file,
 };
-pub use conversions::NumericKind;
+pub use conversions::{ConversionOperator, NumericKind};
 pub use error::{SemanticError, SemanticErrorKind};
 pub use external::{
     ExternalConstant, ExternalMember, ExternalMemberKind, ExternalTypeInfo, ExternalTypeKind,

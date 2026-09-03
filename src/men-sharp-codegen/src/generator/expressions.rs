@@ -740,6 +740,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Some(converted) = self.convert_nullable(ctx, source, from, to, span.clone()) {
             return converted;
         }
+        // `DataToken t = 1;` — a conversion operator from metadata is an
+        // extern like any other
+        if let Some(converted) = self.convert_by_operator(ctx, source, from, to, &span) {
+            return converted;
+        }
         let from_name = self.extern_type_name(from);
         let to_name = self.extern_type_name(to);
         match (from_name, to_name) {
@@ -777,6 +782,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // reference casts and identity: values are untyped objects
             _ => source,
         }
+    }
+
+    /// The `op_Implicit` extern that turns `from` into `to`, applied — with
+    /// whatever standard conversion the operator's parameter needs first.
+    fn convert_by_operator(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        source: DataId,
+        from: &Type,
+        to: &Type,
+        span: &Range<usize>,
+    ) -> Option<DataId> {
+        if from == to {
+            return None;
+        }
+        let operator = self.type_system().implicit_conversion_operator(from, to)?;
+        let owner = self.extern_type_name(&operator.declaring_type)?;
+        let parameter = self.extern_type_name(&operator.parameter_type)?;
+        let result = self.extern_type_name(&operator.return_type)?;
+        let signature = format!("{owner}.__op_Implicit__{parameter}__{result}");
+        if !self.nodes.has_signature(&signature) {
+            return None;
+        }
+        let source = if operator.parameter_type == *from {
+            source
+        } else {
+            self.convert(ctx, source, from, &operator.parameter_type, span.clone())
+        };
+        let out = self.temp(&result);
+        self.call_extern(ctx, &signature, &[source, out], span.clone());
+        Some(out)
     }
 
     fn lower_binary(
@@ -1815,12 +1851,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Some(ResolvedTarget::Call(call)) => {
                 let call = call.clone();
                 let MemberOrigin::Source(symbol) = call.origin else {
-                    self.error(
-                        ctx,
-                        "external indexers are not supported by the Udon backend yet",
-                        span,
-                    );
-                    return Place::Error;
+                    return self.external_indexer_place(ctx, &call, slot, arguments, span);
                 };
                 let mut indices = Vec::new();
                 for argument in arguments {
@@ -1944,6 +1975,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.call_extern(ctx, &signature, &arguments, span);
                 Some((out, ty))
             }
+            Place::ExternalIndexer {
+                receiver,
+                owner,
+                name,
+                indices,
+                ty,
+            } => {
+                let return_name = self.extern_type_name(&ty)?;
+                let parts = self.extern_index_types(ctx, &indices, &span)?;
+                let signature = format!("{owner}.__get_{name}__{}__{return_name}", parts.join("_"));
+                let out = self.temp_for(&ty);
+                let mut arguments = vec![receiver];
+                arguments.extend(indices.iter().map(|(slot, _)| *slot));
+                arguments.push(out);
+                self.call_extern(ctx, &signature, &arguments, span);
+                Some((out, ty))
+            }
             Place::Error => None,
         }
     }
@@ -2019,6 +2067,26 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     };
                 let mut arguments = Vec::new();
                 arguments.extend(receiver);
+                arguments.push(value);
+                self.call_extern(ctx, &signature, &arguments, span);
+            }
+            Place::ExternalIndexer {
+                receiver,
+                owner,
+                name,
+                indices,
+                ty,
+            } => {
+                let Some(value_name) = self.extern_type_name(&ty) else {
+                    return;
+                };
+                let Some(mut parts) = self.extern_index_types(ctx, &indices, &span) else {
+                    return;
+                };
+                parts.push(value_name);
+                let signature = format!("{owner}.__set_{name}__{}__SystemVoid", parts.join("_"));
+                let mut arguments = vec![receiver];
+                arguments.extend(indices.iter().map(|(slot, _)| *slot));
                 arguments.push(value);
                 self.call_extern(ctx, &signature, &arguments, span);
             }
@@ -3644,6 +3712,86 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         slot
     }
 
+    /// The Udon names of an indexer's index types, in order: what the
+    /// `__get_Item`/`__set_Item` extern is named after.
+    fn extern_index_types(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        indices: &[(DataId, Type)],
+        span: &Range<usize>,
+    ) -> Option<Vec<String>> {
+        let mut parts = Vec::with_capacity(indices.len());
+        for (_, ty) in indices {
+            match self.extern_type_name(ty) {
+                Some(part) => parts.push(part),
+                None => {
+                    self.error(
+                        ctx,
+                        "an index type of this indexer cannot be represented on Udon",
+                        span.clone(),
+                    );
+                    return None;
+                }
+            }
+        }
+        Some(parts)
+    }
+
+    /// `list[0]`, `dictionary[key]`, `vector[1]` on a type from metadata:
+    /// the place is a pair of `__get_Item`/`__set_Item` externs, whose names
+    /// spell out the index types.
+    fn external_indexer_place(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        receiver: DataId,
+        arguments: &'ast [Argument<'ast, 'ast>],
+        span: Range<usize>,
+    ) -> Place {
+        let MemberOrigin::External { member, .. } = &call.origin else {
+            self.error(ctx, "this element access cannot be compiled yet", span);
+            return Place::Error;
+        };
+        let name = member.name.replace('.', "");
+        let declaring = self.substitute(&call.declaring_type, &ctx.key.bindings);
+        let Some(owner) = self.extern_type_name(&declaring) else {
+            self.error(
+                ctx,
+                "this indexer's declaring type cannot be represented on Udon",
+                span,
+            );
+            return Place::Error;
+        };
+        let signature = self.substitute_signature(&call.signature, &ctx.key.bindings);
+        let mut indices: Vec<(DataId, Type)> = Vec::new();
+        for (position, argument) in arguments.iter().enumerate() {
+            let parameter = call
+                .parameter_of_argument
+                .get(position)
+                .and_then(|index| signature.parameters.get(*index));
+            let Some(parameter) = parameter else {
+                self.error(ctx, "internal: an index was left unbound", span);
+                return Place::Error;
+            };
+            let ArgumentValue::Expression(expression) = &argument.value else {
+                self.error(ctx, "this index is not supported here", span);
+                return Place::Error;
+            };
+            let target = parameter.parameter_type.clone();
+            let Some(value) = self.owned_value_as(ctx, expression, &target) else {
+                return Place::Error;
+            };
+            indices.push((value, target));
+        }
+        Place::ExternalIndexer {
+            receiver,
+            owner,
+            name,
+            indices,
+            ty: self.substitute(&signature.return_type, &ctx.key.bindings),
+        }
+    }
+
     /// The `{ ... }` elements of an initializer, when it is a collection one.
     fn collection_elements(
         initializer: &'ast Option<men_sharp_parser::ast::Initializer<'ast, 'ast>>,
@@ -4139,7 +4287,8 @@ fn place_type(place: &Place) -> Option<Type> {
         | Place::Accessor { ty, .. }
         | Place::ProgramVariable { ty, .. }
         | Place::ProgramAccessor { ty, .. }
-        | Place::ExternalProperty { ty, .. } => Some(ty.clone()),
+        | Place::ExternalProperty { ty, .. }
+        | Place::ExternalIndexer { ty, .. } => Some(ty.clone()),
         Place::Element { element, .. } => Some(element.clone()),
         Place::Error => None,
     }

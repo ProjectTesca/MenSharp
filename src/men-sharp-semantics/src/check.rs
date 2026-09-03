@@ -4678,8 +4678,18 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         let ty = match (&new_expression.created_type, expected) {
             (Some(created_type), _) => self.resolve_type(created_type),
-            // target-typed `new(...)` takes the context's type
-            (None, Some(expected)) => expected.clone(),
+            // target-typed `new(...)` takes the context's type; it writes no
+            // type of its own, so the code generator reads it from here
+            (None, Some(expected)) => {
+                let expected = match expected {
+                    // `MyStruct? m = new();` makes the value, not the null
+                    Type::Nullable(inner) => (**inner).clone(),
+                    other => other.clone(),
+                };
+                self.expression_types
+                    .insert(EntityID::from(new_expression), expected.clone());
+                expected
+            }
             (None, None) => {
                 self.error(
                     SemanticErrorKind::TypeAnnotationNeeded,

@@ -375,3 +375,4 @@ fn core_library_generics_flow_through_bodies() {
         }
     );
 }
+

@@ -7051,3 +7051,178 @@ fn an_array_can_be_written_with_braces_alone() {
     assert_eq!(string_of(&emulator, "Log"), "b");
     assert_eq!(int_of(&emulator, "Result"), 1178);
 }
+
+#[test]
+fn an_external_indexer_becomes_its_get_item_extern() {
+    // no engine assemblies here, so this borrows a metadata type that has an
+    // indexer and is on Udon's list: `Match.Groups[i]` / `Groups[name]`
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let regex = dir.join("System.Text.RegularExpressions.dll");
+    let Ok(regex_bytes) = std::fs::read(&regex) else {
+        eprintln!("skipped: no System.Text.RegularExpressions.dll");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap(),
+        regex_bytes,
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using System.Text.RegularExpressions;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Result;
+                public static void Main()
+                {
+                    Match found = Regex.Match("ab", "(?<pair>a)(b)");
+                    Result = found.Groups[1].Value + found.Groups["pair"].Value;
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        output.errors
+    );
+    let dump = output.program.dump();
+    for expected in [
+        "SystemTextRegularExpressionsGroupCollection.__get_Item__SystemInt32__\
+         SystemTextRegularExpressionsGroup",
+        "SystemTextRegularExpressionsGroupCollection.__get_Item__SystemString__\
+         SystemTextRegularExpressionsGroup",
+    ] {
+        assert!(dump.contains(expected), "missing {expected} in\n{dump}");
+    }
+}
+
+#[test]
+fn a_conversion_operator_from_metadata_is_applied() {
+    // `DateTime` -> `DateTimeOffset` is a user-defined implicit conversion,
+    // and one of the few whose types are both in the core library
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using System;
+        namespace Game
+        {
+            public class Program
+            {
+                public static void Take(DateTimeOffset moment) { }
+                public static void Main()
+                {
+                    DateTime now = DateTime.UtcNow;
+                    DateTimeOffset moment = now;   // the operator, implicitly
+                    Take(now);                     // and at a call
+                }
+            }
+        }
+        "#,
+    )]);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    assert!(
+        output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        output.errors
+    );
+    let dump = output.program.dump();
+    let expected = "SystemDateTimeOffset.__op_Implicit__SystemDateTime__SystemDateTimeOffset";
+    assert_eq!(
+        dump.matches(expected).count(),
+        2,
+        "expected both conversions in\n{dump}"
+    );
+}
+
+#[test]
+fn target_typed_new_takes_the_type_the_context_wants() {
+    let source = r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Counter
+            {
+                public int Count;
+                public Counter() { Count = 1; }
+                public Counter(int start) { Count = start; }
+            }
+            public struct Point
+            {
+                public int X;
+                public Point(int x) { X = x; }
+            }
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static Counter Field = new();
+                public static int Sum(List<int> values)
+                {
+                    int total = 0;
+                    foreach (int value in values) total += value;
+                    return total;
+                }
+                public static Counter Make() => new(7);
+                public static void Main()
+                {
+                    Counter a = new();
+                    Counter b = new(5);
+                    Result = a.Count + b.Count;              // 6
+                    Result += Field.Count;                   // 7
+                    Result += Make().Count;                  // 14
+                    List<int> values = new() { 1, 2, 3 };
+                    Result += Sum(values);                   // 20
+                    Result += Sum(new List<int> { 4 });      // 24
+                    Point p = new(9);
+                    Result += p.X;                           // 33
+                    Point? maybe = new(2);
+                    Result += maybe.Value.X;                 // 35
+                    Dictionary<string, int> map = new();
+                    map["k"] = 5;
+                    Result += map["k"];                      // 40
+                    Log += new Counter(3).Count;             // 3
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "3");
+    assert_eq!(int_of(&emulator, "Result"), 40);
+}

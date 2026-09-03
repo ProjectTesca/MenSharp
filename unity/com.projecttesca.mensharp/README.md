@@ -727,6 +727,35 @@ classes by identity, as in .NET. `dictionary[missingKey]` throws
 `KeyNotFoundException` and `Add` on a present key `ArgumentException`, and
 `list[i]` outside the count `ArgumentOutOfRangeException`, as in .NET.
 
+## Engine collections: DataList, DataDictionary and JSON
+
+Indexers on types from the SDK and Unity work, and so do the conversion
+operators their metadata declares — which is what makes `DataToken` bearable:
+
+```csharp
+var list = new DataList();
+list.Add(1);                       // int -> DataToken, implicitly
+list.Add("two");
+DataToken first = list[0];
+list[0] = 9;
+
+var map = new DataDictionary();
+map["count"] = 3;                  // the key converts too
+DataToken count = map["count"];
+
+if (VRCJson.TryDeserializeFromJson(json, out DataToken parsed))
+{
+    double n = parsed.DataDictionary["n"].Double;
+}
+
+Vector3 v = new Vector3(1, 2, 3);
+float y = v[1];                    // engine structs index too
+v[1] = 9f;
+```
+
+A conversion operator *written in your own code* (`implicit operator`) is
+still an error; these are the ones the engine and SDK already ship.
+
 ## Structs
 
 Your own structs are values, as in C#: assignment, argument passing, returning

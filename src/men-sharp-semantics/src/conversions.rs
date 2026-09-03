@@ -17,10 +17,19 @@
 
 use crate::{
     external::ExternalTypeKind,
-    lookup::TypeSystem,
+    lookup::{MemberOrigin, TypeSystem},
     symbol::SymbolKind,
-    types::{Type, TypeTarget},
+    types::{MemberSignature, Type, TypeTarget},
 };
+
+/// A conversion operator from metadata: which type declares it, and the
+/// exact types the extern is named after.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ConversionOperator {
+    pub declaring_type: Type,
+    pub parameter_type: Type,
+    pub return_type: Type,
+}
 
 /// The C# numeric types, for the promotion and conversion tables.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,7 +187,69 @@ impl TypeSystem<'_, '_> {
     }
 
     /// C# §10.2: is there an implicit conversion from `from` to `to`?
+    /// C# §10.2: a standard conversion, or one an `op_Implicit` of either
+    /// type provides.
     pub fn is_implicitly_convertible(&self, from: &Type, to: &Type) -> bool {
+        self.is_standard_implicit_conversion(from, to)
+            || self.implicit_conversion_operator(from, to).is_some()
+    }
+
+    /// The `op_Implicit` that turns `from` into `to`, when one does. Only
+    /// operators from metadata: a conversion operator written in source is
+    /// not compiled at all (and says so).
+    pub fn implicit_conversion_operator(&self, from: &Type, to: &Type) -> Option<ConversionOperator> {
+        // §12.6.4.6 looks at the operators of both types
+        let mut candidates: Vec<ConversionOperator> = Vec::new();
+        for owner in [from, to] {
+            if !matches!(owner, Type::Named { .. }) {
+                continue;
+            }
+            for candidate in self.members_named(owner, "op_Implicit") {
+                if !matches!(candidate.origin, MemberOrigin::External { .. }) {
+                    continue;
+                }
+                let Some(MemberSignature::Function(signature)) = &candidate.signature else {
+                    continue;
+                };
+                if signature.parameters.len() != 1 || signature.return_type != *to {
+                    continue;
+                }
+                // a signature the reference set could not resolve: `Error`
+                // stands for "unknown", and everything converts to it —
+                // which would make this operator convert anything at all
+                if matches!(signature.parameters[0].parameter_type, Type::Error) {
+                    continue;
+                }
+                let operator = ConversionOperator {
+                    declaring_type: candidate.declaring_type.clone(),
+                    parameter_type: signature.parameters[0].parameter_type.clone(),
+                    return_type: signature.return_type.clone(),
+                };
+                if !candidates.iter().any(|seen| {
+                    seen.parameter_type == operator.parameter_type
+                        && seen.declaring_type == operator.declaring_type
+                }) {
+                    candidates.push(operator);
+                }
+            }
+        }
+        // the operator that takes exactly what is on hand, else the one that
+        // takes something it converts to on its own — ambiguity is no
+        // conversion, as in C#
+        if let Some(exact) = candidates
+            .iter()
+            .find(|operator| operator.parameter_type == *from)
+        {
+            return Some(exact.clone());
+        }
+        let mut widening = candidates.into_iter().filter(|operator| {
+            self.is_standard_implicit_conversion(from, &operator.parameter_type)
+        });
+        let first = widening.next()?;
+        widening.next().is_none().then_some(first)
+    }
+
+    fn is_standard_implicit_conversion(&self, from: &Type, to: &Type) -> bool {
         // recovery and dynamic swallow everything
         if matches!(from, Type::Error | Type::Dynamic) || matches!(to, Type::Error | Type::Dynamic)
         {

@@ -560,6 +560,18 @@ enum Place {
         name: String,
         ty: Type,
     },
+    /// External indexer (`list[0]`, `dictionary[key]`, `vector[1]`):
+    /// `__get_Item`/`__set_Item` externs, whose names carry the index types.
+    ExternalIndexer {
+        receiver: DataId,
+        owner: String,
+        /// The metadata name — `Item`, unless `[IndexerName]` renamed it.
+        name: String,
+        /// Each index, already converted to its parameter type, with that
+        /// type: the extern's name is built from them.
+        indices: Vec<(DataId, Type)>,
+        ty: Type,
+    },
     Error,
 }
 
@@ -1565,16 +1577,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         parts.join("_")
     }
 
-    /// The same path as [`Generator::symbol_path`], but spelled the way the
-    /// user wrote it — for diagnostics, where a mangled name means nothing.
-    /// A type as the user would write it, for diagnostics.
-    pub(super) fn display_type(&self, ty: &Type) -> String {
+    /// Everything the earlier phases produced, as the checker sees it.
+    pub(super) fn type_system(&self) -> men_sharp_semantics::TypeSystem<'_, 'ast> {
         men_sharp_semantics::TypeSystem {
             declarations: self.declarations,
             signatures: self.signatures,
             external: self.external,
         }
-        .display(ty)
+    }
+
+    /// The same path as [`Generator::symbol_path`], but spelled the way the
+    /// user wrote it — for diagnostics, where a mangled name means nothing.
+    /// A type as the user would write it, for diagnostics.
+    pub(super) fn display_type(&self, ty: &Type) -> String {
+        self.type_system().display(ty)
     }
 
     fn display_path(&self, symbol: SymbolId) -> String {
