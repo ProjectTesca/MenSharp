@@ -60,6 +60,17 @@ impl Value {
         }
     }
 
+    // strict on purpose: the real heap refuses an Int32 slot read as Int64,
+    // and this is what catches a missing numeric promotion
+    pub fn as_i64(&self) -> Result<i64, EmulatorError> {
+        match self {
+            Value::Int64(v) => Ok(*v),
+            other => Err(EmulatorError::TypeError(format!(
+                "expected Int64, found {other:?}"
+            ))),
+        }
+    }
+
     pub fn as_u32(&self) -> Result<u32, EmulatorError> {
         match self {
             Value::UInt32(v) => Ok(*v),
@@ -436,6 +447,75 @@ impl Emulator {
                 let b = self.heap[args[1]].as_u32()?;
                 let wanted = (a == b) != signature.contains("op_Inequality");
                 self.heap[args[2]] = Value::Boolean(wanted);
+                Ok(())
+            }
+            "SystemBoolean.__op_LogicalAnd__SystemBoolean_SystemBoolean__SystemBoolean"
+            | "SystemBoolean.__op_LogicalOr__SystemBoolean_SystemBoolean__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_bool()?;
+                let b = self.heap[args[1]].as_bool()?;
+                let value = if signature.contains("LogicalAnd") {
+                    a && b
+                } else {
+                    a || b
+                };
+                self.heap[args[2]] = Value::Boolean(value);
+                Ok(())
+            }
+            // ---- Int64 and the numeric conversions nullable lifting uses ----
+            "SystemInt64.__op_Addition__SystemInt64_SystemInt64__SystemInt64"
+            | "SystemInt64.__op_Subtraction__SystemInt64_SystemInt64__SystemInt64"
+            | "SystemInt64.__op_Multiplication__SystemInt64_SystemInt64__SystemInt64" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_i64()?;
+                let b = self.heap[args[1]].as_i64()?;
+                let value = if signature.contains("Addition") {
+                    a.wrapping_add(b)
+                } else if signature.contains("Subtraction") {
+                    a.wrapping_sub(b)
+                } else {
+                    a.wrapping_mul(b)
+                };
+                self.heap[args[2]] = Value::Int64(value);
+                Ok(())
+            }
+            "SystemInt64.__op_Equality__SystemInt64_SystemInt64__SystemBoolean"
+            | "SystemInt64.__op_Inequality__SystemInt64_SystemInt64__SystemBoolean"
+            | "SystemInt64.__op_LessThan__SystemInt64_SystemInt64__SystemBoolean"
+            | "SystemInt64.__op_GreaterThan__SystemInt64_SystemInt64__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_i64()?;
+                let b = self.heap[args[1]].as_i64()?;
+                let value = if signature.contains("Equality") {
+                    a == b
+                } else if signature.contains("Inequality") {
+                    a != b
+                } else if signature.contains("LessThan") {
+                    a < b
+                } else {
+                    a > b
+                };
+                self.heap[args[2]] = Value::Boolean(value);
+                Ok(())
+            }
+            "SystemConvert.__ToInt64__SystemInt32__SystemInt64"
+            | "SystemConvert.__ToInt64__SystemObject__SystemInt64" => {
+                let args = self.pop_arguments(2)?;
+                let value = match &self.heap[args[0]] {
+                    Value::Int64(value) => *value,
+                    other => i64::from(other.as_i32()?),
+                };
+                self.heap[args[1]] = Value::Int64(value);
+                Ok(())
+            }
+            "SystemConvert.__ToInt32__SystemInt64__SystemInt32"
+            | "SystemConvert.__ToInt32__SystemObject__SystemInt32" => {
+                let args = self.pop_arguments(2)?;
+                let value = match &self.heap[args[0]] {
+                    Value::Int64(value) => *value as i32,
+                    other => other.as_i32()?,
+                };
+                self.heap[args[1]] = Value::Int32(value);
                 Ok(())
             }
             "SystemConvert.__ToUInt32__SystemObject__SystemUInt32" => {

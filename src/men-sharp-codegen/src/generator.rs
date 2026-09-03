@@ -495,6 +495,13 @@ enum Place {
         ty: Type,
         name: String,
     },
+    /// A computed, read-only value (`x.HasValue`, `x.Value`): already in a
+    /// slot; assignment is rejected naming `what` it was.
+    ReadOnly {
+        slot: DataId,
+        ty: Type,
+        what: String,
+    },
     /// `object[element_index]` — field (or auto-property store) of an object.
     Field {
         object: DataId,
@@ -1988,7 +1995,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     "SystemObjectArray".into()
                 }
             }
-            Type::Nullable(inner) => self.heap_type(inner),
+            // a `T?` of a value type: the boxed value or null (see `nullable`);
+            // a reference annotation is the type itself
+            Type::Nullable(inner) => {
+                if self.nullable_inner(ty).is_some() {
+                    "SystemObject".into()
+                } else {
+                    self.heap_type(inner)
+                }
+            }
             _ => "SystemObject".into(),
         }
     }
@@ -2489,7 +2504,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             | Some(MemberSignature::Event(ty)) => ty.clone(),
             _ => Type::Error,
         };
-        if self.is_delegate_type(&ty) {
+        // ... and a `T?` is a boxed value or null in an `object` slot, which
+        // the inspector has no editor for either (Unity does not serialize
+        // nullable fields at all)
+        if self.is_delegate_type(&ty) || self.nullable_inner(&ty).is_some() {
             return false;
         }
         self.declarations.table.symbol(member).accessibility == Accessibility::Public
@@ -2971,6 +2989,7 @@ mod exceptions;
 mod expressions;
 mod functions;
 mod network;
+mod nullable;
 mod patterns;
 mod programs;
 mod runtime;

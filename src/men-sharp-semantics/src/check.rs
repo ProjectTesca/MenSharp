@@ -36,8 +36,9 @@ use men_sharp_parser::ast::{
     Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator, Block,
     ConstructorInitializerKind, EntityID, Expression, ForInitializer, FunctionBody,
     InitializerValue, InterpolationPart, LambdaBody, LambdaExpression, LambdaParameters,
-    LiteralExpression, LocalVariableDeclaration, Pattern, PrimaryExpression, PrimaryLeft,
-    PrimaryRight, Statement, SwitchLabel, UnaryOperator, UsingResource, VariableDesignation,
+    LiteralExpression, LocalVariableDeclaration, MemberSeparator, Pattern, PrimaryExpression,
+    PrimaryLeft, PrimaryRight, Statement, SwitchLabel, UnaryOperator, UsingResource,
+    VariableDesignation,
 };
 
 use crate::symbol::SyntaxRef;
@@ -2318,12 +2319,42 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         for right in primary.chain {
             meaning = self.apply_primary_right(meaning, right);
         }
-        self.value_of(
+        let ty = self.value_of(
             meaning,
             primary.span.clone(),
             expected,
             Some(EntityID::from(primary)),
-        )
+        );
+        // `a?.b` with a value-typed `b` is a `b?`: null when `a` is
+        let conditional = primary.chain.iter().any(|right| match right {
+            PrimaryRight::Member { separator, .. } => {
+                separator.value == MemberSeparator::NullConditionalDot
+            }
+            PrimaryRight::ElementAccess {
+                null_conditional, ..
+            } => *null_conditional,
+            _ => false,
+        });
+        if conditional
+            && matches!(ty, Type::Named { .. })
+            && !self.system().is_reference_type(&ty)
+            && self.system().nullable_of(&ty).is_none()
+        {
+            return Type::Nullable(Box::new(ty));
+        }
+        ty
+    }
+
+    /// The `T` of a `T?` that is a `Nullable<T>` — a value type's — in
+    /// either spelling. `None` for a reference annotation (`string?`).
+    fn nullable_value(&self, ty: &Type) -> Option<Type> {
+        let system = self.system();
+        match ty {
+            Type::Nullable(inner) => (matches!(**inner, Type::Named { .. })
+                && !system.is_reference_type(inner))
+            .then(|| (**inner).clone()),
+            other => system.nullable_of(other),
+        }
     }
 
     fn value_of(
@@ -2896,9 +2927,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 .unwrap_or(Meaning::Error)
             }
             Meaning::Value(ty) => {
-                // `?.` and `.` are treated alike for now
+                // a reference annotation (`string?`) has the members of the
+                // type; a `Nullable<T>` has its own (`HasValue`, `Value`) —
+                // and the lookup roots add `T`'s after them
                 let receiver = match ty {
-                    Type::Nullable(inner) => *inner,
+                    Type::Nullable(inner) if self.system().is_reference_type(&inner) => *inner,
                     other => other,
                 };
                 if matches!(receiver, Type::Error) {
@@ -4482,6 +4515,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         if matches!(operand, Type::Error | Type::Dynamic) {
             return operand;
         }
+        // a lifted operator (§12.4.8): `-x` on an `int?` is an `int?`
+        if let Some(inner) = self.nullable_value(&operand) {
+            let underlying = self.unary_type(operator, inner, span, node);
+            return match underlying {
+                Type::Error => Type::Error,
+                underlying => Type::Nullable(Box::new(underlying)),
+            };
+        }
 
         let system = self.system();
         match operator {
@@ -4589,6 +4630,37 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let system = self.system();
         use BinaryOperator::*;
 
+        // lifted operators (§12.4.8): on `T?` operands the operator of `T`
+        // applies to the values; arithmetic gives a `T?` (null when either
+        // side is), comparisons a bool (false when either side is null,
+        // except that `==` holds between two nulls)
+        let concatenation =
+            operator == Add && (system.is_string(&left) || system.is_string(&right));
+        if !matches!(operator, Coalesce | LogicalAnd | LogicalOr) && !concatenation {
+            let lifted_left = self.nullable_value(&left);
+            let lifted_right = self.nullable_value(&right);
+            if lifted_left.is_some() || lifted_right.is_some() {
+                let inner_left = lifted_left.unwrap_or_else(|| left.clone());
+                let inner_right = lifted_right.unwrap_or_else(|| right.clone());
+                if matches!(operator, Equal | NotEqual)
+                    && (matches!(inner_left, Type::Null) || matches!(inner_right, Type::Null))
+                {
+                    return self.corlib("Boolean");
+                }
+                let underlying =
+                    self.binary_type(operator, inner_left, inner_right, literal, span, node);
+                return match (operator, underlying) {
+                    (_, Type::Error) => Type::Error,
+                    (
+                        Equal | NotEqual | LessThan | GreaterThan | LessThanEqual
+                        | GreaterThanEqual,
+                        _,
+                    ) => self.corlib("Boolean"),
+                    (_, underlying) => Type::Nullable(Box::new(underlying)),
+                };
+            }
+        }
+
         match operator {
             LogicalAnd | LogicalOr => {
                 if system.is_bool(&left) && system.is_bool(&right) {
@@ -4598,7 +4670,27 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             Coalesce => {
                 return match left {
                     Type::Null => right,
-                    Type::Nullable(inner) => *inner,
+                    Type::Nullable(inner) => {
+                        // `x ?? fallback`: the underlying type when the
+                        // fallback fits it, else the fallback's own type
+                        // when `x` fits that
+                        if system.is_implicitly_convertible(&right, &inner)
+                            || (literal && system.numeric_kind(&inner).is_some())
+                        {
+                            *inner
+                        } else if system
+                            .is_implicitly_convertible(&Type::Nullable(inner.clone()), &right)
+                        {
+                            right
+                        } else {
+                            let kind = SemanticErrorKind::TypeMismatch {
+                                expected: self.display(&inner),
+                                found: self.display(&right),
+                            };
+                            self.error(kind, span);
+                            Type::Error
+                        }
+                    }
                     other => other,
                 };
             }
@@ -4924,6 +5016,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         span: &Range<usize>,
         node: EntityID,
     ) -> Type {
+        if let Some(inner) = self.nullable_value(&operand) {
+            let underlying = self.postfix_step_type(increment, inner, span, node);
+            return match underlying {
+                Type::Error => Type::Error,
+                underlying => Type::Nullable(Box::new(underlying)),
+            };
+        }
         let system = self.system();
         if matches!(operand, Type::Error | Type::Dynamic)
             || system.numeric_kind(&operand).is_some()

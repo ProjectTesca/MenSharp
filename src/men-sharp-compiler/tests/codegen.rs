@@ -6622,11 +6622,105 @@ fn what_a_delegate_cannot_do_is_an_error() {
         "`onHit` is a delegate, which cannot cross into another program",
         "`Watch` takes or returns a delegate, which cannot cross into another program",
         "an event with `add`/`remove` accessors is not supported",
-        "`?.` producing a value type",
     ] {
         assert!(
             messages.iter().any(|message| message.contains(expected)),
             "missing {expected:?} in {messages:#?}"
         );
     }
+}
+
+#[test]
+fn nullable_value_types_work() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public struct Point
+            {
+                public int X;
+                public int Y;
+                public Point(int x, int y) { X = x; Y = y; }
+                public static Point operator +(Point a, Point b) { return new Point(a.X + b.X, a.Y + b.Y); }
+            }
+            public class Box
+            {
+                public int Count = 3;
+                public Box Next;
+            }
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static int? Twice(int? v) { return v * 2; }
+                public static void Main()
+                {
+                    int? a = null;
+                    int? b = 5;
+                    if (!a.HasValue) Result += 1;                       // 1
+                    if (b.HasValue) Result += 2;                        // 3
+                    Result += b.Value;                                  // 8
+                    Result += a.GetValueOrDefault();                    // 8
+                    Result += a.GetValueOrDefault(10);                  // 18
+                    Result += a ?? 100;                                 // 118
+                    int? c = a + b;
+                    if (c == null) Result += 1000;                      // 1118
+                    int? d = b + 1;
+                    Result += d.Value;                                  // 1124
+                    if (a == null) Result += 10000;                     // 11124
+                    if (b != null) Result += 20000;                     // 31124
+                    if (b == 5) Result += 100000;                       // 131124
+                    if (a < 3) Result += 7;                             // null: false
+                    if (b > 3) Result += 1000000;                       // 1131124
+                    b++;
+                    Result += b.Value;                                  // 1131130
+                    b += 10;
+                    Result += (int)b;                                   // 1131146
+                    int? e = -b;
+                    Result += e.Value;                                  // 1131130
+                    long? wide = b;
+                    if (wide == 16) Result += 3;                        // 1131133
+                    Log += a.ToString() + "|" + b.ToString();           // |16
+                    Log += "|" + a;                                     // |16|
+                    Log += "|" + (Twice(b) ?? -1) + "|" + (Twice(a) ?? -1);   // |16||32|-1
+                    object boxed = b;
+                    if (boxed is int v) Result += v;                    // 1131149
+                    int? back = (int?)boxed;
+                    Result += back.Value;                               // 1131165
+                    switch (a) { case null: Log += "N"; break; case 1: Log += "1"; break; }
+                    switch (b) { case null: Log += "N"; break; case 16: Log += "S"; break; default: Log += "D"; break; }
+                    if (b is int w && w == 16) Log += "W";
+                    if (a is null) Log += "Z";
+                    Point? p = null;
+                    Point? q = new Point(1, 2);
+                    if (p == null) Result += 1;                         // 1131166
+                    Point sum = q.Value + new Point(3, 4);
+                    Result += sum.X * 10 + sum.Y;                       // 1131212
+                    Point? r = p ?? q;
+                    Result += r.Value.X;                                // 1131213
+                    Box none = null;
+                    Box some = new Box();
+                    int? n1 = none?.Count;
+                    int? n2 = some?.Count;
+                    if (n1 == null && n2 == 3) Result += 5;             // 1131218
+                    Result += some.Next?.Count ?? 7;                    // 1131225
+                    int? def = default;
+                    if (def == null) Result += 1;                       // 1131226
+                    int?[] arr = new int?[2];
+                    arr[1] = 9;
+                    if (arr[0] == null) Result += arr[1].Value;         // 1131235
+                    try { Result += a.Value; } catch (InvalidOperationException) { Log += "E"; }
+                    int? x = null;
+                    int? y = null;
+                    if (x == y) Log += "Q";
+                    if (x != b) Log += "R";
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "|16||32|-1NSWZEQR");
+    assert_eq!(int_of(&emulator, "Result"), 1131235);
 }

@@ -584,8 +584,37 @@ variables. What is not there yet, each as an error: anonymous methods
 (`delegate (int x) { ... }` — write a lambda), local functions, a method
 of the *engine* as a delegate (`Func<string, int> f = int.Parse;` — wrap it,
 `s => int.Parse(s)`), conversions between delegate types of different
-shapes (`Func<object> f = funcOfString;`), events with `add`/`remove`
-accessors, and `?.` whose result is a number, bool or struct.
+shapes (`Func<object> f = funcOfString;`), and events with `add`/`remove`
+accessors.
+
+## Nullable value types
+
+`int?`, `float?`, `Vector3?`, `MyStruct?` — `Nullable<T>` — work as in C#:
+`HasValue`, `Value` (which throws `InvalidOperationException` on a null),
+`GetValueOrDefault()`, `??`, `?.` producing one, lifted operators, patterns
+and `switch`, boxing and unboxing:
+
+```csharp
+int? last = null;
+if (last == null) { ... }                 // or !last.HasValue, or `last is null`
+last = 5;
+int? next = last + 1;                     // 6; null if `last` were null
+if (last > 3) { ... }                     // false when null
+int value = last ?? 0;                    // the value, or the fallback
+last++;
+Vector3? target = null;
+target = hit.point;
+if (target is Vector3 point) { ... }
+int? count = door?.OpenCount;             // null when `door` is
+switch (last) { case null: ...; case 6: ...; }
+```
+
+On the VM a `T?` is what .NET boxes it to: the value itself, or null, in an
+`object` slot — so a `T?` costs no allocation, `x.HasValue` is one null
+test, and `x.Value` one copy. Nullable-typed fields are not inspector
+variables (Unity does not serialize them either). `string?` and other
+annotations on reference types are just the type; no flow analysis is done
+for them yet.
 
 ## Enums and switch
 

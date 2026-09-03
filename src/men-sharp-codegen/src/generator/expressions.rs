@@ -735,6 +735,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         to: &Type,
         span: Range<usize>,
     ) -> DataId {
+        if let Some(converted) = self.convert_nullable(ctx, source, from, to, span.clone()) {
+            return converted;
+        }
         let from_name = self.extern_type_name(from);
         let to_name = self.extern_type_name(to);
         match (from_name, to_name) {
@@ -823,6 +826,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return Some(result);
         }
 
+        if binary.operator.value == Coalesce {
+            return self.lower_coalesce(ctx, binary, whole);
+        }
+
         let left_type = self.type_of(ctx, &binary.left);
         let left = self.lower_expression(ctx, &binary.left)?;
         let right_expression = binary.right.as_ref().ok()?;
@@ -893,6 +900,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Option<DataId> {
         use BinaryOperator::*;
 
+        // `x + 1`, `x == null`, `a < b` on a `T?`: lifted over null — but
+        // `"n=" + x` is string concatenation, which prints a null as ""
+        let concatenation = operator == Add
+            && self.extern_type_name(result_type).as_deref() == Some("SystemString");
+        if !concatenation
+            && (self.nullable_inner(left.1).is_some() || self.nullable_inner(right.1).is_some())
+        {
+            return self.lift_binary(ctx, operator, left, right, result_type, span, node);
+        }
         // `a + b`, `a - b`, `a == b` on delegates: the corlib helpers
         if self.is_delegate_type(left.1) || self.is_delegate_type(right.1) {
             return self.delegate_operator(ctx, operator, left, right, span);
@@ -942,6 +958,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return Some(out);
         }
+
+        // binary numeric promotion (§12.4.7): `long == int`, `float * int`
+        // — both operands are brought to the wider type first, as an extern
+        // takes two slots of exactly its own type
+        let (left, right) =
+            self.promote_numeric_operands(ctx, operator, left, right, result_type, span.clone());
+        let left = (left.0, &left.1);
+        let right = (right.0, &right.1);
 
         let name = match operator {
             Add => "op_Addition",
@@ -1118,6 +1142,71 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// The rank of a numeric type in binary promotion; `None` for anything
+    /// that is not a primitive number.
+    fn numeric_rank(&self, ty: &Type) -> Option<u8> {
+        Some(match self.extern_type_name(ty)?.as_str() {
+            "SystemByte" | "SystemSByte" | "SystemInt16" | "SystemUInt16" | "SystemChar" => 0,
+            "SystemInt32" => 1,
+            "SystemUInt32" => 2,
+            "SystemInt64" => 3,
+            "SystemUInt64" => 4,
+            "SystemSingle" => 5,
+            "SystemDouble" => 6,
+            _ => return None,
+        })
+    }
+
+    /// Both operands of a numeric operator converted to the promoted type:
+    /// the result type for arithmetic, the wider operand for comparisons.
+    /// A shift keeps its `int` count. Operands that are not both numeric
+    /// come back as they were.
+    fn promote_numeric_operands(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        operator: BinaryOperator,
+        left: (DataId, &Type),
+        right: (DataId, &Type),
+        result_type: &Type,
+        span: Range<usize>,
+    ) -> ((DataId, Type), (DataId, Type)) {
+        use BinaryOperator::*;
+        let as_is = ((left.0, left.1.clone()), (right.0, right.1.clone()));
+        let (Some(left_rank), Some(right_rank)) =
+            (self.numeric_rank(left.1), self.numeric_rank(right.1))
+        else {
+            return as_is;
+        };
+        if matches!(operator, LeftShift | RightShift) {
+            return as_is;
+        }
+        // one type on both sides: its own operator applies (Udon has
+        // `char == char`, and no promotion is needed)
+        if self.extern_type_name(left.1) == self.extern_type_name(right.1) {
+            return as_is;
+        }
+        let comparison = matches!(
+            operator,
+            Equal | NotEqual | LessThan | GreaterThan | LessThanEqual | GreaterThanEqual
+        );
+        let target = if !comparison && self.numeric_rank(result_type).is_some() {
+            result_type.clone()
+        } else if left_rank >= right_rank {
+            left.1.clone()
+        } else {
+            right.1.clone()
+        };
+        // a small type (byte, short, char) computes as an int
+        let target = if self.numeric_rank(&target) == Some(0) {
+            self.corlib_type("Int32")
+        } else {
+            target
+        };
+        let promoted_left = self.convert(ctx, left.0, left.1, &target, span.clone());
+        let promoted_right = self.convert(ctx, right.0, right.1, &target, span);
+        ((promoted_left, target.clone()), (promoted_right, target))
+    }
+
     /// A value as a `string`, via the type's own `ToString` extern.
     fn stringify(
         &mut self,
@@ -1161,6 +1250,69 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         out
     }
 
+    /// `!x`, `-x`, `+x` on an evaluated operand: the user's operator when
+    /// the checker bound one, else the type's own extern.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn apply_unary(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        operator: UnaryOperator,
+        operand: DataId,
+        operand_type: &Type,
+        result_type: &Type,
+        span: Range<usize>,
+        node: Option<EntityID>,
+    ) -> Option<DataId> {
+        if let Some(result) =
+            self.user_operator_call(ctx, node, &[(operand, operand_type)], span.clone())
+        {
+            return result;
+        }
+        match operator {
+            UnaryOperator::Not => {
+                let out = self.temp("SystemBoolean");
+                self.call_extern(
+                    ctx,
+                    "SystemBoolean.__op_UnaryNegation__SystemBoolean__SystemBoolean",
+                    &[operand, out],
+                    span,
+                );
+                Some(out)
+            }
+            UnaryOperator::Minus => {
+                let name = self.extern_type_name(result_type)?;
+                let out = self.temp_for(result_type);
+                // Udon's spelling for primitives, .NET's for engine types
+                let candidates = [
+                    format!("{name}.__op_UnaryMinus__{name}__{name}"),
+                    format!("{name}.__op_UnaryNegation__{name}__{name}"),
+                ];
+                let Some(signature) = candidates
+                    .iter()
+                    .find(|signature| self.nodes.has_signature(signature))
+                else {
+                    self.error(
+                        ctx,
+                        "unary `-` is not available on Udon for this operand type",
+                        span,
+                    );
+                    return None;
+                };
+                self.call_extern(ctx, signature, &[operand, out], span);
+                Some(out)
+            }
+            UnaryOperator::Plus => Some(operand),
+            _ => {
+                self.error(
+                    ctx,
+                    "this operator is not supported by the Udon backend yet",
+                    span,
+                );
+                None
+            }
+        }
+    }
+
     fn lower_unary(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -1168,13 +1320,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         whole: &'ast Expression<'ast, 'ast>,
     ) -> Option<DataId> {
         let operand_expression = unary.operand.as_ref().ok()?;
-        if matches!(
-            unary.operator.value,
-            UnaryOperator::Not
-                | UnaryOperator::Minus
-                | UnaryOperator::Plus
-                | UnaryOperator::BitwiseNot
-        ) && self.bodies.targets.contains_key(&EntityID::from(unary))
+        // (`!`, `-`, `+` bind their user operators in apply_unary)
+        if matches!(unary.operator.value, UnaryOperator::BitwiseNot)
+            && self.bodies.targets.contains_key(&EntityID::from(unary))
         {
             let operand = self.lower_expression(ctx, operand_expression)?;
             let operand_type = self.type_of(ctx, operand_expression);
@@ -1188,42 +1336,31 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
         }
         match unary.operator.value {
-            UnaryOperator::Not => {
+            UnaryOperator::Not | UnaryOperator::Minus | UnaryOperator::Plus => {
                 let operand = self.lower_expression(ctx, operand_expression)?;
-                let out = self.temp("SystemBoolean");
-                self.call_extern(
-                    ctx,
-                    "SystemBoolean.__op_UnaryNegation__SystemBoolean__SystemBoolean",
-                    &[operand, out],
-                    unary.span.clone(),
-                );
-                Some(out)
-            }
-            UnaryOperator::Minus => {
-                let operand = self.lower_expression(ctx, operand_expression)?;
-                let ty = self.type_of(ctx, whole);
-                let name = self.extern_type_name(&ty)?;
-                let out = self.temp_for(&ty);
-                // Udon's spelling for primitives, .NET's for engine types
-                let candidates = [
-                    format!("{name}.__op_UnaryMinus__{name}__{name}"),
-                    format!("{name}.__op_UnaryNegation__{name}__{name}"),
-                ];
-                let Some(signature) = candidates
-                    .iter()
-                    .find(|signature| self.nodes.has_signature(signature))
-                else {
-                    self.error(
+                let operand_type = self.type_of(ctx, operand_expression);
+                let result_type = self.type_of(ctx, whole);
+                // `-x` on an `int?`: lifted over null
+                if let Some(inner) = self.nullable_inner(&operand_type) {
+                    return self.lift_unary(
                         ctx,
-                        "unary `-` is not available on Udon for this operand type",
+                        unary.operator.value,
+                        operand,
+                        &inner,
                         unary.span.clone(),
+                        Some(EntityID::from(unary)),
                     );
-                    return None;
-                };
-                self.call_extern(ctx, signature, &[operand, out], unary.span.clone());
-                Some(out)
+                }
+                self.apply_unary(
+                    ctx,
+                    unary.operator.value,
+                    operand,
+                    &operand_type,
+                    &result_type,
+                    unary.span.clone(),
+                    Some(EntityID::from(unary)),
+                )
             }
-            UnaryOperator::Plus => self.lower_expression(ctx, operand_expression),
             UnaryOperator::PreIncrement | UnaryOperator::PreDecrement => {
                 let one = self.int_constant(1);
                 let operator = if unary.operator.value == UnaryOperator::PreIncrement {
@@ -1603,6 +1740,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             MemberOrigin::External {
                 member: external, ..
             } => {
+                // `x.HasValue` / `x.Value` on a `T?`
+                if let Some(place) =
+                    self.try_nullable_member(ctx, &receiver, &external.name, span.clone())
+                {
+                    return place;
+                }
                 let Some(owner) = self.extern_type_name(&declaring) else {
                     self.error(ctx, "this type is not available on Udon", span);
                     return Place::Error;
@@ -1721,7 +1864,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> Option<(DataId, Type)> {
         match place {
-            Place::Slot(slot, ty) | Place::SelfReference { slot, ty, .. } => Some((slot, ty)),
+            Place::Slot(slot, ty)
+            | Place::SelfReference { slot, ty, .. }
+            | Place::ReadOnly { slot, ty, .. } => Some((slot, ty)),
             Place::Field { object, index, ty } => {
                 let value = self.get_element(ctx, object, index, &ty, span);
                 Some((value, ty))
@@ -1795,6 +1940,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 format!("`{name}` is read-only: it is what this behaviour is attached to"),
                 span,
             ),
+            Place::ReadOnly { what, .. } => {
+                self.error(ctx, format!("`{what}` cannot be assigned to"), span)
+            }
             Place::Field { object, index, .. } => self.set_element(ctx, object, index, value, span),
             Place::Element {
                 array,
@@ -2012,15 +2160,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         match piece {
             Piece::Value(slot, ty) => {
-                if !self.is_reference_type(&ty) {
-                    self.error(
-                        ctx,
-                        "`?.` producing a value type (a nullable number, bool, struct) is not \
-                         supported by the Udon backend yet",
-                        primary.span.clone(),
-                    );
-                    return Piece::Error;
-                }
+                // a value-typed result becomes a `T?`: null when the chain was
+                let ty = if matches!(ty, Type::Named { .. })
+                    && !self.is_reference_type(&ty)
+                    && self.nullable_inner(&ty).is_none()
+                {
+                    Type::Nullable(Box::new(ty))
+                } else {
+                    ty
+                };
                 let result = self.temp_for(&ty);
                 let end = self.fresh_label("chain_end");
                 self.copy(slot, result);
@@ -2800,6 +2948,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         return Piece::Error;
                     }
                     return self.invoke_delegate(ctx, call, receiver, values, Vec::new(), span);
+                }
+                // `x.GetValueOrDefault()`, `x.ToString()`, ... on a `T?`
+                if let Some(piece) = self.try_nullable_call(
+                    ctx,
+                    *owner,
+                    &member_name,
+                    &receiver,
+                    &values,
+                    &return_type,
+                    span.clone(),
+                ) {
+                    return piece;
                 }
                 // `Equals`/`GetHashCode`/`ToString` on `object` or on a type
                 // of the user's: the override the runtime type selects — the
@@ -3809,6 +3969,7 @@ fn place_type(place: &Place) -> Option<Type> {
     match place {
         Place::Slot(_, ty)
         | Place::SelfReference { ty, .. }
+        | Place::ReadOnly { ty, .. }
         | Place::Field { ty, .. }
         | Place::Accessor { ty, .. }
         | Place::ProgramVariable { ty, .. }

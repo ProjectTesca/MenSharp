@@ -194,9 +194,16 @@ impl TypeSystem<'_, '_> {
         if matches!(from, Type::Null) {
             return matches!(to, Type::Nullable(_))
                 || self.is_reference_type(to)
-                || self.is_nullable_of(to).is_some();
+                || self.nullable_of(to).is_some();
         }
 
+        // S? -> T? when S -> T (`int?` to `long?`)
+        if let (Type::Nullable(from_inner), Type::Nullable(to_inner)) = (from, to)
+            && !self.is_reference_type(from_inner)
+            && !self.is_reference_type(to_inner)
+        {
+            return self.is_implicitly_convertible(from_inner, to_inner);
+        }
         // T -> T? (written form or the underlying Nullable<T>)
         if let Type::Nullable(inner) = to {
             if self.is_reference_type(inner) {
@@ -205,7 +212,7 @@ impl TypeSystem<'_, '_> {
             }
             return self.is_implicitly_convertible(from, inner);
         }
-        if let Some(inner) = self.is_nullable_of(to) {
+        if let Some(inner) = self.nullable_of(to) {
             return self.is_implicitly_convertible(from, &inner);
         }
         // `string?` (annotation on a reference type) flows into `string`
@@ -278,7 +285,7 @@ impl TypeSystem<'_, '_> {
     }
 
     /// `Nullable<T>` in its named form.
-    fn is_nullable_of(&self, ty: &Type) -> Option<Type> {
+    pub fn nullable_of(&self, ty: &Type) -> Option<Type> {
         let Type::Named {
             target: TypeTarget::External(id),
             arguments,
