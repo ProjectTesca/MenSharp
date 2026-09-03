@@ -71,6 +71,93 @@ namespace System.Collections.Generic
             size--;
         }
 
+        // ---- the delegate-taking members: `Predicate<T>`, `Action<T>`,
+        // `Comparison<T>`, `Converter<T, TOut>` are delegates of the real
+        // corlib, called like any M# delegate
+
+        public T Find(Predicate<T> predicate)
+        {
+            for (int i = 0; i < size; i++)
+            {
+                if (predicate(items[i])) { return items[i]; }
+            }
+            return default(T);
+        }
+
+        public int FindIndex(Predicate<T> predicate)
+        {
+            for (int i = 0; i < size; i++)
+            {
+                if (predicate(items[i])) { return i; }
+            }
+            return -1;
+        }
+
+        public bool Exists(Predicate<T> predicate)
+        {
+            return FindIndex(predicate) >= 0;
+        }
+
+        public bool TrueForAll(Predicate<T> predicate)
+        {
+            for (int i = 0; i < size; i++)
+            {
+                if (!predicate(items[i])) { return false; }
+            }
+            return true;
+        }
+
+        public void ForEach(Action<T> action)
+        {
+            for (int i = 0; i < size; i++)
+            {
+                action(items[i]);
+            }
+        }
+
+        public int RemoveAll(Predicate<T> predicate)
+        {
+            int kept = 0;
+            for (int i = 0; i < size; i++)
+            {
+                if (!predicate(items[i]))
+                {
+                    items[kept] = items[i];
+                    kept++;
+                }
+            }
+            int removed = size - kept;
+            size = kept;
+            return removed;
+        }
+
+        // A stable insertion sort: fine for the list sizes a world script
+        // keeps, and free of the recursion .NET's introsort would need.
+        public void Sort(Comparison<T> comparison)
+        {
+            for (int i = 1; i < size; i++)
+            {
+                T key = items[i];
+                int j = i - 1;
+                while (j >= 0 && comparison(items[j], key) > 0)
+                {
+                    items[j + 1] = items[j];
+                    j--;
+                }
+                items[j + 1] = key;
+            }
+        }
+
+        public List<TOut> ConvertAll<TOut>(Converter<T, TOut> converter)
+        {
+            var result = new List<TOut>();
+            for (int i = 0; i < size; i++)
+            {
+                result.Add(converter(items[i]));
+            }
+            return result;
+        }
+
         // What `foreach` calls. The real one is a nested struct,
         // `List<T>.Enumerator`; until M# has value types (and nested types
         // that see the outer `T`) it is a class beside the list, so a

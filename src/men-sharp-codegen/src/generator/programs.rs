@@ -566,6 +566,26 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if !self.require_public_member(ctx, symbol, &span) {
             return Piece::Error;
         }
+        // a delegate is code addresses of the program that made it: it
+        // means nothing to another program
+        let crosses_delegate = self.is_delegate_type(&call.signature.return_type)
+            || call
+                .signature
+                .parameters
+                .iter()
+                .any(|parameter| self.is_delegate_type(&parameter.parameter_type));
+        if crosses_delegate {
+            let name = self.declarations.table.symbol(symbol).name;
+            self.error(
+                ctx,
+                format!(
+                    "`{name}` takes or returns a delegate, which cannot cross into another \
+                     program: a delegate is code addresses of the program that made it"
+                ),
+                span,
+            );
+            return Piece::Error;
+        }
         let Some(layout) = self.export_layout(symbol) else {
             self.error(
                 ctx,
@@ -653,8 +673,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             } => self.is_foreign_behaviour_class(*class),
             _ => true,
         };
+        if self.is_delegate_type(&ty) {
+            self.error(
+                ctx,
+                format!(
+                    "`{name}` is a delegate, which cannot cross into another program: a \
+                     delegate is code addresses of the program that made it. Call a method \
+                     of the other behaviour instead (`other.Method(...)`)"
+                ),
+                span,
+            );
+            return Place::Error;
+        }
         let by_name = match member.kind {
-            SymbolKind::Field => true,
+            SymbolKind::Field | SymbolKind::Event => true,
             SymbolKind::Property => !foreign && self.is_auto_property(symbol),
             _ => false,
         };

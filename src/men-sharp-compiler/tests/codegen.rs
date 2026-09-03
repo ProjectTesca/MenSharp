@@ -6236,3 +6236,397 @@ fn a_behaviour_outside_the_mensharp_sources_is_an_error() {
         program.output.errors
     );
 }
+
+#[test]
+fn lambdas_delegates_and_closures_work() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public delegate int Op(int a);
+            public class Counter
+            {
+                public int Count;
+                public void Bump(int by) { Count += by; }
+                public virtual int Twice(int x) { return x * 2; }
+            }
+            public class Program
+            {
+                public static int Result;
+                public static int Captured;
+                public static string Trace = "";
+                public static int Twice(int x) { return x * 2; }
+                public static int Apply(Func<int, int> f, int x) { return f(x); }
+                public static void Main()
+                {
+                    Func<int, int> f = x => x + 1;
+                    Result = f(2);                       // 3
+                    Result += f.Invoke(3);               // 7
+                    Op o = y => y * 3;
+                    Result += o(4);                      // 19
+                    Result += o.Invoke(1);               // 22
+                    Func<int, int> g = Twice;
+                    Result += g(5);                      // 32
+                    Result += Apply(v => v * 100, 1);    // 132
+                    Predicate<int> p = v => v > 3;
+                    if (p(5)) Result += 1000;            // 1132
+                    Action none = () => { Trace += "!"; };
+                    none();
+                    none();
+
+                    int captured = 10;
+                    Action bump = () => { captured++; };
+                    bump();
+                    bump();
+                    Captured = captured;                 // 12
+
+                    // instance method groups and closures over objects
+                    var counter = new Counter();
+                    Action<int> add = counter.Bump;
+                    add(5);
+                    add(6);
+                    Func<int, int> twice = counter.Twice;
+                    Result += twice(counter.Count);      // 1132 + 22 = 1154
+
+                    // a closure made per iteration keeps its own variable
+                    Func<int>[] makers = new Func<int>[3];
+                    for (int i = 0; i < 3; i++)
+                    {
+                        int square = i * i;
+                        makers[i] = () => square + i;
+                    }
+                    // i is shared (one variable for the loop), square is not
+                    Result += makers[0]() + makers[1]() + makers[2]();  // 1154 + (0+3)+(1+3)+(4+3) = 1168
+
+                    // nested lambdas capturing through two levels
+                    int outer = 1;
+                    Func<Func<int>> make = () => { int inner = 2; return () => outer + inner; };
+                    Func<int> made = make();
+                    outer = 5;
+                    Result += made();                    // 1168 + 7 = 1175
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "Result"), 1175);
+    assert_eq!(int_of(&emulator, "Captured"), 12);
+    assert_eq!(string_of(&emulator, "Trace"), "!!");
+}
+
+#[test]
+fn delegates_recurse_and_carry_generics_and_by_ref_parameters() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public delegate void Splitter(int value, out int high, out int low);
+            public delegate T Picker<T>(T a, T b);
+            public class Holder<T>
+            {
+                public Func<T, T> Step;
+                public T Value;
+                public Holder(T start, Func<T, T> step) { Value = start; Step = step; }
+                public void Advance() { Value = Step(Value); }
+            }
+            public class Program
+            {
+                public static int Result;
+                public static int Errors;
+                public static string Words = "";
+                public static T Best<T>(T a, T b, Func<T, T, bool> better) { return better(a, b) ? a : b; }
+                public static void Each(int[] items, Action<int> action)
+                {
+                    foreach (int item in items) action(item);
+                }
+                public static void Main()
+                {
+                    // recursion through a delegate the lambda itself captures
+                    Func<int, int> fact = null;
+                    fact = n => n <= 1 ? 1 : n * fact(n - 1);
+                    Result = fact(5);                                   // 120
+
+                    // generic methods and classes taking delegates
+                    Result += Best(3, 9, (a, b) => a > b);              // 129
+                    Words = Best("pear", "fig", (a, b) => a.Length < b.Length);
+                    Picker<string> longer = (a, b) => a.Length >= b.Length ? a : b;
+                    Words += longer("x", "yyy");                        // figyyy
+                    var holder = new Holder<int>(1, v => v * 3);
+                    holder.Advance();
+                    holder.Advance();
+                    Result += holder.Value;                             // 138
+
+                    // out parameters through a delegate of our own
+                    Splitter split = (int value, out int high, out int low) => { high = value / 10; low = value % 10; };
+                    int h, l;
+                    split(47, out h, out l);
+                    Result += h * 100 + l;                              // 545
+
+                    // a lambda as an argument, called from a loop
+                    int sum = 0;
+                    Each(new int[] { 1, 2, 3 }, v => { sum += v; });
+                    Result += sum;                                      // 551
+
+                    // a null delegate throws NullReferenceException
+                    Action nothing = null;
+                    try { nothing(); } catch (NullReferenceException) { Errors++; }
+                    Func<int> alsoNothing = null;
+                    try { Result += alsoNothing(); } catch (Exception) { Errors++; }
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "Result"), 551);
+    assert_eq!(int_of(&emulator, "Errors"), 2);
+    assert_eq!(string_of(&emulator, "Words"), "figyyy");
+}
+
+#[test]
+fn lambdas_reach_this_fields_and_behaviour_fields() {
+    let source = r#"
+        using System;
+        using MenSharp;
+        namespace Game
+        {
+            public class Tally
+            {
+                public int Total;
+                public Func<int, int> Scale = x => x * 2;
+                public Action<int> Adder()
+                {
+                    return amount => { Total += Scale(amount); };
+                }
+            }
+            public class Program : MenSharpBehaviour
+            {
+                public int hits;
+                public string log = "";
+                public Action onHit;
+                public void Register()
+                {
+                    string prefix = "hit";
+                    onHit = () => { hits++; log += prefix + hits; };
+                }
+                public void Fire()
+                {
+                    if (onHit != null) onHit();
+                    var tally = new Tally();
+                    Action<int> add = tally.Adder();
+                    add(5);
+                    add(6);
+                    hits += tally.Total;
+                }
+            }
+        }
+    "#;
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let Some(program) = compile_behaviour(sources, "Game.Program") else {
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let assembled = program.output.program.assemble().unwrap();
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    for event in ["Register", "Fire", "Fire"] {
+        emulator.run(&assembled, event).unwrap_or_else(|error| {
+            panic!(
+                "emulator error: {error:?}\n{}",
+                program.output.program.dump()
+            )
+        });
+    }
+    // two hits, each adding the tally 2*5 + 2*6 = 22
+    assert_eq!(int_of(&emulator, "hits"), 2 + 22 * 2);
+    assert_eq!(string_of(&emulator, "log"), "hit1hit24");
+}
+
+#[test]
+fn delegates_combine_remove_compare_and_raise_events() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public delegate void Handler(int a);
+            public class Door
+            {
+                public event Action Opened;
+                public static event Handler Any;
+                public int Times;
+                public void Open() { Times++; Opened?.Invoke(); Any?.Invoke(Times); }
+            }
+            public class Node
+            {
+                public string Name = "n";
+                public Node Next;
+            }
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                static void A() { Log += "a"; }
+                static void B() { Log += "b"; }
+                public static void Main()
+                {
+                    Action a = A;
+                    Action b = B;
+                    Action c = a + b;
+                    c();                                    // ab
+                    c += a;
+                    c();                                    // ababa
+                    c -= a;
+                    c();                                    // ababaab
+                    c = c - b;
+                    c();                                    // ababaaba
+                    c -= a;
+                    if (c == null) Log += "0";              // ababaaba0
+                    Action none = null;
+                    none += a;
+                    none();                                 // ababaaba0a
+
+                    Action a2 = A;
+                    if (a == a2) Result += 1;
+                    if (a != b) Result += 10;
+                    Action lam = () => { };
+                    Action lam2 = () => { };
+                    if (lam != lam2) Result += 100;
+                    if ((a + b) == (a + b)) Result += 1000; // 1111
+
+                    var door = new Door();
+                    door.Opened += () => { Result += 10000; };
+                    int seen = 0;
+                    Handler h = t => { seen += t; };
+                    Door.Any += h;
+                    door.Open();
+                    door.Open();                            // 21111, seen 3
+                    Door.Any -= h;
+                    door.Open();                            // 31111
+                    Result += seen;                         // 31114
+
+                    var quiet = new Door();
+                    quiet.Open();                           // no subscribers: nothing raised
+                    Result += quiet.Times;                  // 31115
+
+                    Node missing = null;
+                    string name = missing?.Name;
+                    if (name == null) Result += 1;          // 31116
+                    var node = new Node();
+                    if (node?.Name == "n") Result += 2;     // 31118
+                    if (node.Next?.Next?.Name == null) Result += 4;  // 31122
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "ababaaba0a");
+    assert_eq!(int_of(&emulator, "Result"), 31122);
+}
+
+#[test]
+fn list_methods_take_delegates() {
+    let source = r#"
+        using System;
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Result;
+                public static string Order = "";
+                public static void Main()
+                {
+                    var list = new List<int>();
+                    list.Add(5);
+                    list.Add(1);
+                    list.Add(4);
+                    list.Add(2);
+                    list.Sort((x, y) => x - y);
+                    list.ForEach(v => { Order += v; });            // 1245
+                    Result += list.Find(v => v > 3);               // 4
+                    Result += list.FindIndex(v => v == 5) * 10;    // 34
+                    if (list.Exists(v => v == 2)) Result += 100;   // 134
+                    if (!list.TrueForAll(v => v > 1)) Result += 1000;   // 1134
+                    Result += list.RemoveAll(v => v % 2 == 0) * 10000;  // 21134
+                    var strings = list.ConvertAll(v => "<" + v + ">");
+                    Order += strings[0] + strings[1];              // 1245<1><5>
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Order"), "1245<1><5>");
+    assert_eq!(int_of(&emulator, "Result"), 21134);
+}
+
+/// What a delegate cannot do on Udon is an error at the use, not a program
+/// that jumps into another program's addresses or dereferences a null.
+#[test]
+fn what_a_delegate_cannot_do_is_an_error() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::new(
+                "Assets/MenSharp/Panel.cs",
+                r#"
+                using System;
+                namespace Game
+                {
+                    public class Other : MenSharp.MenSharpBehaviour
+                    {
+                        public Action onHit;
+                        public int number;
+                        public void Watch(Action callback) { }
+                    }
+                    public class Panel : MenSharp.MenSharpBehaviour
+                    {
+                        public Other other;
+                        public event Action Custom { add { } remove { } }
+                        public void Interact()
+                        {
+                            Func<string, int> parse = int.Parse;
+                            other.onHit = () => { };
+                            other.Watch(() => { });
+                            Custom += () => { };
+                            int? count = other?.number;
+                        }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Panel",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    for expected in [
+        "an engine method cannot become a delegate on Udon yet",
+        "`onHit` is a delegate, which cannot cross into another program",
+        "`Watch` takes or returns a delegate, which cannot cross into another program",
+        "an event with `add`/`remove` accessors is not supported",
+        "`?.` producing a value type",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "missing {expected:?} in {messages:#?}"
+        );
+    }
+}

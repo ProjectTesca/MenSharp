@@ -252,10 +252,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         slot: DataId,
         ty: Type,
     ) {
-        ctx.locals
-            .last_mut()
-            .expect("a scope is open")
-            .insert(name, (slot, ty));
+        self.bind_local(ctx, name, slot, ty);
     }
 
     fn bool_constant(&mut self, value: bool) -> DataId {

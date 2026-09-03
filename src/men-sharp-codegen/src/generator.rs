@@ -110,6 +110,14 @@ pub fn generate(
         entry_chain: Vec::new(),
         marker: behaviour_marker(declarations),
         entry_file: None,
+        entry: None,
+        lambdas: HashMap::new(),
+        delegate_shapes: Vec::new(),
+        invokers: HashMap::new(),
+        thunks: HashMap::new(),
+        thunk_queue: VecDeque::new(),
+        multicast_thunks: HashMap::new(),
+        thunk_addresses: HashMap::new(),
         current_frame: None,
         frame_markers: Vec::new(),
         external_callers: HashSet::new(),
@@ -155,6 +163,15 @@ enum Role {
     /// do whenever the declaring class is itself instantiated, or reached
     /// through `base.`, making the stub dispatch to itself forever.
     Dispatcher,
+    /// The function a lambda expression compiles to. `symbol` is the member
+    /// whose body the lambda is written in; the id is the lambda node's.
+    /// See `delegates`.
+    Lambda(EntityID),
+    /// The stub every call of a delegate of one shape goes through: takes
+    /// the delegate and the arguments, jumps to the address the delegate
+    /// holds. `symbol` is the entry class; the index names the shape. See
+    /// `delegates`.
+    DelegateInvoker(u32),
     /// The dispatch stub of a virtual/abstract/interface property or indexer
     /// getter (`symbol` is the property).
     GetterDispatcher,
@@ -341,6 +358,24 @@ struct Generator<'a, 'ast> {
     marker: Option<SymbolId>,
     /// The file the entry class was declared in, once `run` has found it.
     entry_file: Option<FileId>,
+    /// The entry class itself.
+    entry: Option<SymbolId>,
+    /// Every lambda that became a function, by its key. See `delegates`.
+    lambdas: HashMap<FunctionKey, delegates::LambdaInfo<'ast>>,
+    /// The delegate shapes met so far, indexed by `Role::DelegateInvoker`.
+    delegate_shapes: Vec<delegates::DelegateShape>,
+    /// The invoker function of each shape.
+    invokers: HashMap<delegates::DelegateShape, FunctionKey>,
+    /// The thunk that enters `(target, shape)` from an invoker, once made.
+    thunks: HashMap<(FunctionKey, u32), LabelId>,
+    /// Thunks registered but not emitted yet.
+    thunk_queue: VecDeque<delegates::Thunk>,
+    /// Per shape index: the thunk that calls a multicast delegate's list
+    /// in turn, once made.
+    multicast_thunks: HashMap<u32, LabelId>,
+    /// The `SystemUInt32` constant holding each thunk's code address: what
+    /// a delegate carries in element 0.
+    thunk_addresses: HashMap<LabelId, DataId>,
     /// The function whose body is being compiled right now; every temp
     /// allocated while set joins that function's frame.
     current_frame: Option<FunctionKey>,
@@ -360,7 +395,11 @@ struct Generator<'a, 'ast> {
 struct Ctx<'ast> {
     key: FunctionKey,
     file: FileId,
-    locals: Vec<HashMap<&'ast str, (DataId, Type)>>,
+    locals: Vec<HashMap<&'ast str, Local>>,
+    /// The locals and parameters of this body that some lambda captures:
+    /// declared in a box (a one-element `object[]`) the lambda shares,
+    /// instead of a slot of their own. See `delegates`.
+    boxed: Vec<String>,
     this_slot: Option<DataId>,
     this_type: Option<Type>,
     /// What `break`/`continue` bind to, innermost last — and the `try`
@@ -374,12 +413,23 @@ struct Ctx<'ast> {
 }
 
 impl Ctx<'_> {
-    fn lookup(&self, name: &str) -> Option<(DataId, Type)> {
+    fn lookup(&self, name: &str) -> Option<Local> {
         self.locals
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
     }
+}
+
+/// Where a local variable or parameter lives.
+#[derive(Clone)]
+struct Local {
+    /// Its own slot — or, when `boxed`, the slot holding its box.
+    slot: DataId,
+    ty: Type,
+    /// Captured by a lambda: the value is element 0 of the `object[]` in
+    /// `slot`, which the lambda's closure shares.
+    boxed: bool,
 }
 
 /// What a primary-expression step produced.
@@ -550,6 +600,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.entry_chain = self.behaviour_chain(entry);
         }
         self.entry_file = Some(self.declaration_site(entry).0);
+        self.entry = Some(entry);
 
         // static fields of the entry class become exported, observable slots;
         // on a behaviour, instance fields (and auto-properties) do too — the
@@ -737,6 +788,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 while let Some(key) = self.queue.pop_front() {
                     self.compile_function(&key);
                 }
+                // a thunk emits no new function, so this never re-fills the
+                // queue — but the invoker it jumps from may still be queued
+                self.emit_thunks();
                 if !self.ensure_dispatcher_impls() {
                     break;
                 }
@@ -872,6 +926,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         while let Some(key) = self.queue.pop_front() {
             self.compile_function(&key);
         }
+        self.emit_thunks();
 
         self.resolve_frame_markers(init_label);
     }
@@ -1129,6 +1184,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 key: key.clone(),
                 file,
                 locals: vec![HashMap::new()],
+                boxed: Vec::new(),
                 this_slot: None,
                 this_type: None,
                 loop_stack: Vec::new(),
@@ -1208,6 +1264,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             },
             file,
             locals: vec![HashMap::new()],
+            boxed: Vec::new(),
             this_slot: None,
             this_type: None,
             loop_stack: Vec::new(),
@@ -1897,6 +1954,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // a scalar slot may hold is the concrete UdonBehaviour, the one
             // thing a `this` reference resolves into
             Type::Named { .. } if self.is_program_reference(ty) => BEHAVIOUR_HEAP_TYPE.into(),
+            // a delegate is an `object[]` of the compiler's own making
+            Type::Named { .. } if self.is_delegate_type(ty) => "SystemObjectArray".into(),
             Type::Named {
                 target: TypeTarget::External(id),
                 arguments,
@@ -2090,7 +2149,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             let kind = member_symbol.kind;
             let stores_value = match kind {
-                SymbolKind::Field => true,
+                SymbolKind::Field | SymbolKind::Event => true,
                 SymbolKind::Property => self.is_auto_property(member),
                 _ => false,
             };
@@ -2146,7 +2205,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let members: Vec<SymbolId> = entry.members.to_vec();
         for member in members {
             let symbol = self.declarations.table.symbol(member);
-            if symbol.kind != SymbolKind::Field || !symbol.is_static {
+            if !matches!(symbol.kind, SymbolKind::Field | SymbolKind::Event) || !symbol.is_static {
                 continue;
             }
             self.ensure_static(member, export);
@@ -2248,7 +2307,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     continue;
                 }
                 let stores_value = match symbol.kind {
-                    SymbolKind::Field => true,
+                    SymbolKind::Field | SymbolKind::Event => true,
                     SymbolKind::Property => self.is_auto_property(member),
                     _ => false,
                 };
@@ -2422,6 +2481,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.has_attribute(member, "NonSerialized") {
             return false;
         }
+        // a delegate is this program's own code addresses: nothing the
+        // inspector could set, nothing another program could use
+        let ty = match self.signatures.members.get(&member) {
+            Some(MemberSignature::Field(ty))
+            | Some(MemberSignature::Property(ty))
+            | Some(MemberSignature::Event(ty)) => ty.clone(),
+            _ => Type::Error,
+        };
+        if self.is_delegate_type(&ty) {
+            return false;
+        }
         self.declarations.table.symbol(member).accessibility == Accessibility::Public
             || self.has_attribute(member, "SerializeField")
     }
@@ -2555,7 +2625,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return slot;
         }
         let ty = match self.signatures.members.get(&field) {
-            Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => ty.clone(),
+            Some(MemberSignature::Field(ty))
+            | Some(MemberSignature::Property(ty))
+            | Some(MemberSignature::Event(ty)) => ty.clone(),
             _ => Type::Error,
         };
         let udon_type = self.heap_type(&ty);
@@ -2570,7 +2642,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .declarations
             .first()
             .and_then(|site| match &site.syntax {
-                SyntaxRef::Field { declarator, .. } => declarator.initializer.as_ref(),
+                SyntaxRef::Field { declarator, .. } | SyntaxRef::Event { declarator, .. } => {
+                    declarator.initializer.as_ref()
+                }
                 SyntaxRef::Property(property) => property.initializer.as_ref(),
                 _ => None,
             })
@@ -2892,6 +2966,7 @@ fn event_slot_type(dotnet: &str) -> String {
 }
 
 mod components;
+mod delegates;
 mod exceptions;
 mod expressions;
 mod functions;

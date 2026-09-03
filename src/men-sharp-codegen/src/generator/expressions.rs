@@ -228,10 +228,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             {
                 self.copy(lowered, slot);
             }
-            ctx.locals
-                .last_mut()
-                .expect("a scope is open")
-                .insert(declarator.name.value, (slot, ty));
+            self.bind_local(ctx, declarator.name.value, slot, ty);
         }
     }
 
@@ -376,10 +373,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             &element_type,
             statement.span.clone(),
         );
-        ctx.locals
-            .last_mut()
-            .expect("scope")
-            .insert(name.value, (variable, element_type.clone()));
+        self.bind_local(ctx, name.value, variable, element_type.clone());
 
         ctx.loop_stack.push(BreakFrame::Loop {
             continue_target: continue_label,
@@ -463,10 +457,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // so the body cannot reach into the enumerator's own slot
         let variable = self.temp_for(&element_type);
         self.copy(current, variable);
-        ctx.locals
-            .last_mut()
-            .expect("scope")
-            .insert(name.value, (variable, element_type));
+        self.bind_local(ctx, name.value, variable, element_type);
 
         // `continue` goes straight back to `MoveNext()`
         ctx.loop_stack.push(BreakFrame::Loop {
@@ -649,8 +640,38 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match expression {
             Expression::Primary(primary) => match self.lower_primary(ctx, primary) {
                 Piece::Value(slot, _) => Some(slot),
+                // a method group where a value is wanted: the checker
+                // recorded the method it converts to — a delegate to it
+                piece @ (Piece::Pending { .. } | Piece::Base { .. }) => {
+                    let conversion = self.bodies.targets.get(&EntityID::from(*primary)).cloned();
+                    match conversion {
+                        Some(ResolvedTarget::Call(call)) => {
+                            let ty = self.type_of(ctx, expression);
+                            let non_virtual = matches!(piece, Piece::Base { .. });
+                            self.method_group_delegate(
+                                ctx,
+                                &call,
+                                piece.receiver(),
+                                non_virtual,
+                                &ty,
+                                expression.span(),
+                            )
+                        }
+                        _ => None,
+                    }
+                }
                 _ => None,
             },
+            Expression::Lambda(lambda) => self.lower_lambda(ctx, lambda, expression),
+            Expression::AnonymousMethod(method) => {
+                self.error(
+                    ctx,
+                    "anonymous methods (`delegate (...) { ... }`) are not supported by the Udon \
+                     backend yet: write a lambda (`(...) => { ... }`) instead",
+                    method.span.clone(),
+                );
+                None
+            }
             Expression::Binary(binary) => self.lower_binary(ctx, binary, expression),
             Expression::Unary(unary) => self.lower_unary(ctx, unary, expression),
             Expression::Assignment(assignment) => self.lower_assignment(ctx, assignment),
@@ -872,6 +893,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Option<DataId> {
         use BinaryOperator::*;
 
+        // `a + b`, `a - b`, `a == b` on delegates: the corlib helpers
+        if self.is_delegate_type(left.1) || self.is_delegate_type(right.1) {
+            return self.delegate_operator(ctx, operator, left, right, span);
+        }
         if let Some(result) = self.user_operator_call(ctx, node, &[left, right], span.clone()) {
             return result;
         }
@@ -1366,7 +1391,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             PrimaryLeft::Identifier { name, span, .. } => {
                 match self.bodies.targets.get(&EntityID::from(left)) {
                     Some(ResolvedTarget::Local) => match ctx.lookup(name.value) {
-                        Some((slot, ty)) => Place::Slot(slot, ty),
+                        Some(local) => self.local_place(&local),
                         None => Place::Error,
                     },
                     Some(ResolvedTarget::Member(member)) => {
@@ -1454,9 +1479,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 // fields (and auto-property stores) of the behaviour entry
                 // class are the program's named, exported heap slots
+                if matches!(member.kind, SymbolKind::Event) && !self.is_field_like_event(symbol) {
+                    self.error(
+                        ctx,
+                        "an event with `add`/`remove` accessors is not supported by the Udon \
+                         backend yet: declare it field-like (`public event Action Name;`)",
+                        span,
+                    );
+                    return Place::Error;
+                }
                 if self.is_entry_member(symbol)
-                    && matches!(member.kind, SymbolKind::Field | SymbolKind::Property)
-                    && (member.kind == SymbolKind::Field || self.is_auto_property(symbol))
+                    && matches!(
+                        member.kind,
+                        SymbolKind::Field | SymbolKind::Event | SymbolKind::Property
+                    )
+                    && (member.kind != SymbolKind::Property || self.is_auto_property(symbol))
                 {
                     let export = self.is_public_variable(symbol);
                     let slot = self.ensure_static(symbol, export);
@@ -1482,11 +1519,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     return Place::Error;
                 }
                 match member.kind {
-                    SymbolKind::Field if member.is_static => {
+                    SymbolKind::Field | SymbolKind::Event if member.is_static => {
                         let slot = self.ensure_static(symbol, false);
                         Place::Slot(slot, member_type)
                     }
-                    SymbolKind::Field => {
+                    SymbolKind::Field | SymbolKind::Event => {
                         let Some(layout) = self.layout_of(&declaring) else {
                             self.error(ctx, "no layout for this receiver", span);
                             return Place::Error;
@@ -1942,10 +1979,63 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
 
         let mut piece = self.lower_left(ctx, &primary.left);
+        // `a?.b`, `a?[i]`: a null `a` makes the whole chain null (or does
+        // nothing, for a call), instead of dereferencing it
+        let mut null_label: Option<LabelId> = None;
         for right in primary.chain {
+            let conditional = match right {
+                PrimaryRight::Member { separator, .. } => {
+                    separator.value == men_sharp_parser::ast::MemberSeparator::NullConditionalDot
+                }
+                PrimaryRight::ElementAccess {
+                    null_conditional, ..
+                } => *null_conditional,
+                _ => false,
+            };
+            if conditional && let Piece::Value(slot, _) = &piece {
+                let slot = *slot;
+                let label = *null_label.get_or_insert_with(|| self.fresh_label("chain_null"));
+                let null = self.constant("SystemObject", "null", HeapInit::Null);
+                let is_null = self.temp("SystemBoolean");
+                self.call_extern(
+                    ctx,
+                    "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean",
+                    &[slot, null, is_null],
+                    right.span(),
+                );
+                self.jump_if(is_null, label);
+            }
             piece = self.apply_right(ctx, piece, right);
         }
-        piece
+        let Some(null_label) = null_label else {
+            return piece;
+        };
+        match piece {
+            Piece::Value(slot, ty) => {
+                if !self.is_reference_type(&ty) {
+                    self.error(
+                        ctx,
+                        "`?.` producing a value type (a nullable number, bool, struct) is not \
+                         supported by the Udon backend yet",
+                        primary.span.clone(),
+                    );
+                    return Piece::Error;
+                }
+                let result = self.temp_for(&ty);
+                let end = self.fresh_label("chain_end");
+                self.copy(slot, result);
+                self.program.code.push(Op::Jump(Target::Label(end)));
+                self.program.code.push(Op::Label(null_label));
+                let null = self.constant("SystemObject", "null", HeapInit::Null);
+                self.copy(null, result);
+                self.program.code.push(Op::Label(end));
+                Piece::Value(result, ty)
+            }
+            other => {
+                self.program.code.push(Op::Label(null_label));
+                other
+            }
+        }
     }
 
     fn lower_left(&mut self, ctx: &mut Ctx<'ast>, left: &'ast PrimaryLeft<'ast, 'ast>) -> Piece {
@@ -1968,7 +2058,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             PrimaryLeft::Identifier { name, span, .. } => {
                 match self.bodies.targets.get(&EntityID::from(left)) {
                     Some(ResolvedTarget::Local) => match ctx.lookup(name.value) {
-                        Some((slot, ty)) => Piece::Value(slot, ty),
+                        Some(local) => {
+                            let (slot, ty) = self.read_local(ctx, &local, span.clone());
+                            Piece::Value(slot, ty)
+                        }
                         None => {
                             self.error(ctx, "internal: local without a slot", span.clone());
                             Piece::Error
@@ -2633,6 +2726,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match &call.origin {
             MemberOrigin::Source(symbol) => {
                 let symbol = *symbol;
+                // `op(1)` / `op.Invoke(1)` on a delegate of the compilation's
+                // own: the delegate's symbol stands for its `Invoke`
+                if self.declarations.table.symbol(symbol).kind == SymbolKind::Delegate {
+                    return self.invoke_delegate(ctx, call, receiver, values, source_by_ref, span);
+                }
                 // the corlib's program-search intrinsics are lowered in place
                 if let Some(piece) =
                     self.try_program_intrinsic(ctx, call, symbol, &values, span.clone())
@@ -2663,86 +2761,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         span,
                     );
                 }
-                if !call.is_extension
-                    && self.has_no_instance_to_read_from(ctx, symbol, call.is_static, &receiver)
-                {
-                    self.no_instance_error(ctx, symbol, span);
+                let Some((this, key)) = self.source_call_target(
+                    ctx,
+                    call,
+                    symbol,
+                    &receiver,
+                    non_virtual,
+                    span.clone(),
+                ) else {
                     return Piece::Error;
-                }
-                let mut this = if call.is_static || call.is_extension {
-                    None
-                } else {
-                    receiver.as_ref().map(|(slot, _)| *slot).or(ctx.this_slot)
-                };
-                if !call.is_static
-                    && !call.is_extension
-                    && let Some((slot, receiver_type)) = &receiver
-                    && Some(*slot) != ctx.this_slot
-                    && self.has_type_id(receiver_type)
-                    && !self.is_source_struct(receiver_type)
-                {
-                    self.check_not_null(ctx, *slot, span.clone());
-                }
-                // a behaviour needs no dispatcher: there is one instance, so
-                // the most derived override is known here
-                let symbol = if !call.is_static
-                    && !non_virtual
-                    && self.is_virtual(symbol)
-                    && self.is_entry_member(symbol)
-                {
-                    self.entry_override(symbol)
-                } else {
-                    symbol
-                };
-                let key = if !call.is_static
-                    && !non_virtual
-                    && self.is_virtual(symbol)
-                    && !self.is_entry_member(symbol)
-                {
-                    // a struct or sealed receiver has no subtypes: bind the
-                    // implementation directly (the "static dispatch" a
-                    // monomorphized `T : IShape` allows); otherwise the stub
-                    // that compares type ids at runtime
-                    let receiver_type = receiver
-                        .as_ref()
-                        .map(|(_, ty)| self.substitute(ty, &ctx.key.bindings));
-                    let bindings =
-                        self.bindings_for(ctx, symbol, &call.declaring_type, &call.type_arguments);
-                    let direct = receiver_type.as_ref().and_then(|receiver_type| {
-                        self.direct_implementation(receiver_type, symbol, &bindings, Role::Method)
-                    });
-                    match direct {
-                        Some(key) => {
-                            // a default interface body runs on a *boxed* copy
-                            // of a struct (§18.6.9): its writes stay in the box
-                            if self.is_interface_member(key.symbol)
-                                && let (Some(slot), Some(struct_type)) = (this, &receiver_type)
-                                && self.is_source_struct(struct_type)
-                            {
-                                this =
-                                    Some(self.clone_struct(ctx, slot, struct_type, span.clone()));
-                            }
-                            key
-                        }
-                        None => self.dispatcher_for(
-                            ctx,
-                            symbol,
-                            &call.declaring_type,
-                            &call.type_arguments,
-                            Role::Method,
-                        ),
-                    }
-                } else {
-                    FunctionKey {
-                        symbol,
-                        role: Role::Method,
-                        bindings: self.bindings_for(
-                            ctx,
-                            symbol,
-                            &call.declaring_type,
-                            &call.type_arguments,
-                        ),
-                    }
                 };
                 // the inserted extension receiver shifts every argument right
                 let by_ref: Vec<(usize, Place)> = source_by_ref
@@ -2755,8 +2782,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     None => Piece::Error,
                 }
             }
-            MemberOrigin::External { member, .. } => {
+            MemberOrigin::External { member, owner } => {
                 let member_name = member.name.clone();
+                // `f(1)` / `f.Invoke(1)` on a `Func`/`Action`/...: no extern,
+                // the delegate is the compiler's own
+                if member_name == "Invoke"
+                    && self.external.type_info(*owner).kind
+                        == men_sharp_semantics::ExternalTypeKind::Delegate
+                {
+                    if !write_backs.is_empty() {
+                        self.error(
+                            ctx,
+                            "`ref`/`out` parameters of an external delegate type are not \
+                             supported by the Udon backend yet: declare a delegate of your own",
+                            span,
+                        );
+                        return Piece::Error;
+                    }
+                    return self.invoke_delegate(ctx, call, receiver, values, Vec::new(), span);
+                }
                 // `Equals`/`GetHashCode`/`ToString` on `object` or on a type
                 // of the user's: the override the runtime type selects — the
                 // reference-identity extern only when nothing overrides
@@ -2843,6 +2887,102 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// The function instance a call into source binds to, and the `this`
+    /// it takes: the most derived override on a behaviour, the direct
+    /// implementation on a sealed receiver, the dispatch stub otherwise.
+    /// `None` after reporting an instance member with no instance.
+    pub(super) fn source_call_target(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        symbol: SymbolId,
+        receiver: &Option<(DataId, Type)>,
+        non_virtual: bool,
+        span: Range<usize>,
+    ) -> Option<(Option<DataId>, FunctionKey)> {
+        if !call.is_extension
+            && self.has_no_instance_to_read_from(ctx, symbol, call.is_static, receiver)
+        {
+            self.no_instance_error(ctx, symbol, span);
+            return None;
+        }
+        let mut this = if call.is_static || call.is_extension {
+            None
+        } else {
+            receiver.as_ref().map(|(slot, _)| *slot).or(ctx.this_slot)
+        };
+        if !call.is_static
+            && !call.is_extension
+            && let Some((slot, receiver_type)) = receiver
+            && Some(*slot) != ctx.this_slot
+            && self.has_type_id(receiver_type)
+            && !self.is_source_struct(receiver_type)
+        {
+            self.check_not_null(ctx, *slot, span.clone());
+        }
+        // a behaviour needs no dispatcher: there is one instance, so
+        // the most derived override is known here
+        let symbol = if !call.is_static
+            && !non_virtual
+            && self.is_virtual(symbol)
+            && self.is_entry_member(symbol)
+        {
+            self.entry_override(symbol)
+        } else {
+            symbol
+        };
+        let key = if !call.is_static
+            && !non_virtual
+            && self.is_virtual(symbol)
+            && !self.is_entry_member(symbol)
+        {
+            // a struct or sealed receiver has no subtypes: bind the
+            // implementation directly (the "static dispatch" a
+            // monomorphized `T : IShape` allows); otherwise the stub
+            // that compares type ids at runtime
+            let receiver_type = receiver
+                .as_ref()
+                .map(|(_, ty)| self.substitute(ty, &ctx.key.bindings));
+            let bindings =
+                self.bindings_for(ctx, symbol, &call.declaring_type, &call.type_arguments);
+            let direct = receiver_type.as_ref().and_then(|receiver_type| {
+                self.direct_implementation(receiver_type, symbol, &bindings, Role::Method)
+            });
+            match direct {
+                Some(key) => {
+                    // a default interface body runs on a *boxed* copy
+                    // of a struct (§18.6.9): its writes stay in the box
+                    if self.is_interface_member(key.symbol)
+                        && let (Some(slot), Some(struct_type)) = (this, &receiver_type)
+                        && self.is_source_struct(struct_type)
+                    {
+                        this = Some(self.clone_struct(ctx, slot, struct_type, span.clone()));
+                    }
+                    key
+                }
+                None => self.dispatcher_for(
+                    ctx,
+                    symbol,
+                    &call.declaring_type,
+                    &call.type_arguments,
+                    Role::Method,
+                ),
+            }
+        } else {
+            FunctionKey {
+                symbol,
+                role: Role::Method,
+                bindings: self.bindings_for(
+                    ctx,
+                    symbol,
+                    &call.declaring_type,
+                    &call.type_arguments,
+                ),
+            }
+        };
+        Some((this, key))
+    }
+
     /// The heap slot to push for a `ref`/`out` argument of an extern call, and
     /// the place to copy the slot back into afterwards when it is a stand-in.
     ///
@@ -2892,11 +3032,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // variable, and its slot is the reference
             ArgumentValue::Declaration { name, .. } => {
                 let slot = self.temp_for(parameter_type);
-                ctx.locals
-                    .last_mut()
-                    .expect("a scope is open")
-                    .insert(name.value, (slot, parameter_type.clone()));
-                Some((slot, None))
+                self.bind_local(ctx, name.value, slot, parameter_type.clone());
+                // a captured `out` variable lives in its box: the extern
+                // writes the slot, which is then written home
+                let place = ctx.lookup(name.value).map(|local| self.local_place(&local));
+                match place {
+                    Some(Place::Slot(..)) | None => Some((slot, None)),
+                    Some(place) => Some((slot, Some(place))),
+                }
             }
             ArgumentValue::Missing => None,
         }
@@ -2942,11 +3085,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // writes it through the place like any other
             ArgumentValue::Declaration { name, .. } => {
                 let slot = self.temp_for(parameter_type);
-                ctx.locals
-                    .last_mut()
-                    .expect("a scope is open")
-                    .insert(name.value, (slot, parameter_type.clone()));
-                Some((slot, Place::Slot(slot, parameter_type.clone())))
+                self.bind_local(ctx, name.value, slot, parameter_type.clone());
+                let place = ctx
+                    .lookup(name.value)
+                    .map(|local| self.local_place(&local))
+                    .unwrap_or(Place::Error);
+                Some((slot, place))
             }
             ArgumentValue::Missing => None,
         }

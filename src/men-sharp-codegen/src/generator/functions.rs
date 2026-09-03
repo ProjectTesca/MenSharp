@@ -9,6 +9,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// The instantiated parameter/return shape for a function instance:
     /// parameter types (setter value last) and the return type.
     pub(super) fn function_shape(&self, key: &FunctionKey) -> (Vec<Type>, Type) {
+        match key.role {
+            Role::Lambda(_) => return self.lambda_shape(key),
+            Role::DelegateInvoker(index) => return self.invoker_shape(index),
+            _ => {}
+        }
         let member = self.signatures.members.get(&key.symbol);
         // a dispatch stub has the shape of what it dispatches to
         let role = match key.role {
@@ -84,6 +89,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     pub(super) fn function_has_this(&self, key: &FunctionKey) -> bool {
+        match key.role {
+            // a lambda's `this` is the enclosing member's, handed over in
+            // the closure — when that member has one at all
+            Role::Lambda(_) => return self.lambdas.get(key).is_some_and(|info| info.has_this),
+            Role::DelegateInvoker(_) => return false,
+            _ => {}
+        }
         // the behaviour entry class has exactly one instance — the program
         // itself — so its members carry no `this` and its fields are globals
         if self.is_entry_member(key.symbol) {
@@ -107,6 +119,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::StructEquals => name.push_str("_equals"),
             Role::StructHashCode => name.push_str("_hashcode"),
             Role::Dispatcher => name.push_str("_dispatch"),
+            Role::Lambda(_) => name.push_str("_lambda"),
+            Role::DelegateInvoker(index) => name = format!("fn_delegate_invoke_{index}"),
             Role::GetterDispatcher => name.push_str("_get_dispatch"),
             Role::SetterDispatcher => name.push_str("_set_dispatch"),
             Role::TypeTest => name.push_str("_is"),
@@ -237,6 +251,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             key: key.clone(),
             file,
             locals: vec![HashMap::new()],
+            boxed: self
+                .bodies
+                .captured_locals
+                .get(&key.symbol)
+                .cloned()
+                .unwrap_or_default(),
             this_slot: has_this.then(|| parameters[0]),
             this_type: has_this.then(|| self.this_type_of(key)),
             loop_stack: Vec::new(),
@@ -263,6 +283,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // bind parameter names
         let value_parameters = &parameters[usize::from(has_this)..];
         match (key.role, &syntax) {
+            (Role::Lambda(_), _) => self.emit_lambda_body(&mut ctx, key),
+            (Role::DelegateInvoker(_), _) => self.emit_invoker_body(&mut ctx),
             (Role::DefaultConstructor, _) => {
                 // the implicit constructor: field initializers, then `base()`
                 self.emit_field_initializers(&mut ctx);
@@ -356,7 +378,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     && let (Some(&slot), Some(ty)) =
                         (value_parameters.first(), parameter_types.first())
                 {
-                    ctx.locals[0].insert("value", (slot, ty.clone()));
+                    self.bind_local(&mut ctx, "value", slot, ty.clone());
                 }
                 self.emit_accessor_body(&mut ctx, &declaration.body, key.role);
             }
@@ -379,7 +401,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         parameter_types.get(index_count),
                     )
                 {
-                    ctx.locals[0].insert("value", (slot, ty.clone()));
+                    self.bind_local(&mut ctx, "value", slot, ty.clone());
                 }
                 self.emit_accessor_body(&mut ctx, &declaration.body, key.role);
             }
@@ -437,7 +459,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if let Ok(name) = &parameter.name
                 && let (Some(&slot), Some(ty)) = (slots.get(index), types.get(index))
             {
-                ctx.locals[0].insert(name.value, (slot, ty.clone()));
+                self.bind_local(ctx, name.value, slot, ty.clone());
             }
         }
     }
@@ -534,10 +556,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             }
             _ => {
-                let Some((value, _)) = ctx.lookup("value") else {
+                let Some(local) = ctx.lookup("value") else {
                     self.error(ctx, "internal: setter without a value", span);
                     return;
                 };
+                let (value, _) = self.read_local(ctx, &local, span.clone());
                 self.set_element(ctx, this, index, value, span);
             }
         }
@@ -569,10 +592,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 continue;
             };
             let initializer = match &site.syntax {
-                SyntaxRef::Field { declarator, .. } => match &declarator.initializer {
-                    Some(InitializerValue::Expression(value)) => Some(value),
-                    _ => None,
-                },
+                SyntaxRef::Field { declarator, .. } | SyntaxRef::Event { declarator, .. } => {
+                    match &declarator.initializer {
+                        Some(InitializerValue::Expression(value)) => Some(value),
+                        _ => None,
+                    }
+                }
                 SyntaxRef::Property(property) => match &property.initializer {
                     Some(InitializerValue::Expression(value)) => Some(value),
                     _ => None,
@@ -1548,6 +1573,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             key: key.clone(),
             file: FileId(0),
             locals: Vec::new(),
+            boxed: Vec::new(),
             this_slot: None,
             this_type: None,
             loop_stack: Vec::new(),
@@ -1598,6 +1624,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 key: key.clone(),
                 file: FileId(0),
                 locals: vec![HashMap::new()],
+                boxed: Vec::new(),
                 this_slot: Some(this_slot),
                 this_type: None,
                 loop_stack: Vec::new(),

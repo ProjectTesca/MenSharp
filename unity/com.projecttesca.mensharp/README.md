@@ -528,6 +528,65 @@ program synchronously calls back into the *same* method that is still
 running. UdonSharp silently corrupts the method's variables in that case;
 MenSharp logs an error naming the method and aborts the event instead.
 
+## Delegates, lambdas and events
+
+Delegates are ordinary values: `Func<>`/`Action<>`/`Predicate<>` and the
+other delegate types of .NET, or `delegate` types of your own. Lambdas,
+method groups, closures over locals and `this`, multicast `+=`/`-=`,
+field-like events and `?.Invoke()` all work as in C#:
+
+```csharp
+public delegate int Op(int a);
+
+public event Action Opened;                 // field-like events
+private Func<int, int> scale = x => x * 2;  // a lambda in a field
+
+public void Interact()
+{
+    Op triple = a => a * 3;
+    Func<int, int> twice = Twice;           // a method group, yours or an object's
+    int captured = 0;
+    Action bump = () => { captured++; };    // a closure: the variable is shared
+    bump(); bump();                         // captured == 2
+
+    Opened += () => Debug.Log("opened");
+    Opened += OnOpened;
+    Opened -= OnOpened;
+    Opened?.Invoke();                       // nothing happens while nobody listens
+
+    var list = new List<int> { 3, 1, 2 };
+    list.Sort((a, b) => a - b);
+    list.RemoveAll(v => v > 2);
+    list.ForEach(v => Debug.Log(v));
+}
+```
+
+What a delegate is on the VM: an `object[]` holding the code address of a
+small entry stub and what that stub hands the target — the receiver of a
+method, or the `this` and the captured variables of a lambda. Calling one
+jumps to that address through the same indirect jump every `return` uses,
+so there is no lookup table and no string dispatch. A captured variable
+lives in a one-element `object[]` shared by the lambda and the method that
+declared it, so writes on either side are seen by the other, and a lambda
+made inside a loop body keeps that iteration's variable, as C# promises.
+Recursion through a delegate (`fact = n => n * fact(n - 1)`) is handled by
+the same frame saving as any other recursion.
+
+Two delegates are equal when they call the same method on the same object,
+or are the same closure (the same lambda made in the same activation), and
+`-=` removes by that equality — which is why `Opened -= OnOpened` works and
+`Opened -= () => ...` removes nothing, exactly as in C#.
+
+What does not cross a program boundary: a delegate is code addresses of
+the program that made it, so a delegate-typed field, parameter or return of
+*another* behaviour is an error, and delegate-typed fields are not inspector
+variables. What is not there yet, each as an error: anonymous methods
+(`delegate (int x) { ... }` — write a lambda), local functions, a method
+of the *engine* as a delegate (`Func<string, int> f = int.Parse;` — wrap it,
+`s => int.Parse(s)`), conversions between delegate types of different
+shapes (`Func<object> f = funcOfString;`), events with `add`/`remove`
+accessors, and `?.` whose result is a number, bool or struct.
+
 ## Enums and switch
 
 Your own enums, engine enums (`KeyCode`, `VideoError`, ...), engine constants
@@ -571,6 +630,10 @@ foreach (var pair in ages) { Debug.Log($"{pair.Key}: {pair.Value}"); }
 foreach (var key in ages.Keys) { ... }
 ```
 
+`List<T>` also has the delegate-taking members — `Find`, `FindIndex`,
+`Exists`, `TrueForAll`, `ForEach`, `RemoveAll`, `Sort(Comparison<T>)`,
+`ConvertAll` — see *Delegates* below.
+
 Both collections are source ports compiled with your code (Udon exposes
 neither the real ones nor `KeyValuePair`), so they cost no externs beyond
 array access, `GetHashCode` and `Equals` — which dispatch on the boxed key,
@@ -610,6 +673,9 @@ wrong thing:
 - conversion operators (`implicit operator` / `explicit operator`);
 - static abstract/virtual interface members (C# 11 generic math);
 - static constructors of generic classes;
+- anonymous methods (`delegate { ... }`), local functions, engine methods as
+  delegates, delegate variance, events with `add`/`remove` accessors — see
+  *Delegates, lambdas and events*;
 - the bare declaration shorthand `int[] x = { 1, 2 };` — write
   `= new int[] { 1, 2 }` (or `new[] { ... }`), which works, as does `default`.
 

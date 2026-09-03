@@ -421,12 +421,35 @@ impl Emulator {
                 self.heap[args[1]] = Value::Boolean(!a);
                 Ok(())
             }
-            // ---- UInt32 (vtable/index math) ----
+            // ---- UInt32 (vtable/index math, delegate addresses) ----
             "SystemUInt32.__op_Addition__SystemUInt32_SystemUInt32__SystemUInt32" => {
                 let args = self.pop_arguments(3)?;
                 let a = self.heap[args[0]].as_u32()?;
                 let b = self.heap[args[1]].as_u32()?;
                 self.heap[args[2]] = Value::UInt32(a.wrapping_add(b));
+                Ok(())
+            }
+            "SystemUInt32.__op_Equality__SystemUInt32_SystemUInt32__SystemBoolean"
+            | "SystemUInt32.__op_Inequality__SystemUInt32_SystemUInt32__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_u32()?;
+                let b = self.heap[args[1]].as_u32()?;
+                let wanted = (a == b) != signature.contains("op_Inequality");
+                self.heap[args[2]] = Value::Boolean(wanted);
+                Ok(())
+            }
+            "SystemConvert.__ToUInt32__SystemObject__SystemUInt32" => {
+                let args = self.pop_arguments(2)?;
+                let value = match &self.heap[args[0]] {
+                    Value::UInt32(value) => *value,
+                    Value::Int32(value) => *value as u32,
+                    other => {
+                        return Err(EmulatorError::Exception(format!(
+                            "Convert.ToUInt32 of {other:?}"
+                        )));
+                    }
+                };
+                self.heap[args[1]] = Value::UInt32(value);
                 Ok(())
             }
             // ---- String ----

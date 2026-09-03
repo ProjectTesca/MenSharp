@@ -33,7 +33,7 @@ use super::*;
 impl<'a, 'ast> Generator<'a, 'ast> {
     // ------------------------------------------------------------- state
 
-    fn exception_state(&mut self) -> ExceptionState {
+    pub(super) fn exception_state(&mut self) -> ExceptionState {
         if let Some(state) = self.exception_state {
             return state;
         }
@@ -129,6 +129,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 format!("{class}.{name}")
             }
             Role::UnhandledException => "the unhandled exception report".into(),
+            Role::Lambda(_) => format!("a lambda in {}", self.display_path(ctx.key.symbol)),
             _ => self
                 .functions
                 .get(&ctx.key)
@@ -307,6 +308,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 | Role::Setter
                 | Role::Constructor
                 | Role::DefaultConstructor
+                | Role::Lambda(_)
         ) && *span != (0..0);
         if is_frame && let Some(index) = self.exception_field("__trace") {
             let string = self.corlib_type("String");
@@ -594,10 +596,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if let Some(name) = &clause.name {
                 let local = self.temp_for(&caught_type);
                 self.copy(saved, local);
-                ctx.locals
-                    .last_mut()
-                    .expect("a scope is open")
-                    .insert(name.value, (local, caught_type));
+                self.bind_local(ctx, name.value, local, caught_type);
             }
             if let Some(filter) = &clause.filter
                 && let Ok(condition) = &filter.condition

@@ -27,7 +27,7 @@
 //!
 //! [`check_file`] is one file's pure function, fanned out per file by the driver.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::ops::Range;
 
 use crate::FileId;
@@ -80,6 +80,15 @@ pub struct BodyCheck {
     /// as such (a library's errors are not the user's), but compiling one
     /// is an error at the use. See [`uncompilable_foreign_members`].
     pub uncompilable: HashMap<SymbolId, String>,
+    /// For every lambda: the locals and parameters of the enclosing bodies
+    /// it reads or writes, by name, in a fixed order — what the code
+    /// generator hands the lambda's function when the delegate is made.
+    /// Keyed by the lambda node.
+    pub captures: HashMap<EntityID, Vec<String>>,
+    /// Per member: every local or parameter name some lambda inside it
+    /// captures — the variables that have to live in a box the lambda can
+    /// share, rather than in the member's own slots.
+    pub captured_locals: HashMap<SymbolId, Vec<String>>,
 }
 
 impl BodyCheck {
@@ -91,6 +100,8 @@ impl BodyCheck {
         self.constructor_chains.extend(other.constructor_chains);
         self.errors.extend(other.errors);
         self.uncompilable.extend(other.uncompilable);
+        self.captures.extend(other.captures);
+        self.captured_locals.extend(other.captured_locals);
     }
 }
 
@@ -256,6 +267,10 @@ pub fn check_file(
         static_context: true,
         return_type: Type::Void,
         lambda_probe_returns: None,
+        lambda_stack: Vec::new(),
+        current_member: None,
+        captures: HashMap::new(),
+        captured_locals: HashMap::new(),
         expression_types: HashMap::new(),
         targets: HashMap::new(),
         enumerations: HashMap::new(),
@@ -297,6 +312,16 @@ pub fn check_file(
         constructor_chains: checker.constructor_chains,
         errors: checker.resolver.out.errors,
         uncompilable: HashMap::new(),
+        captures: checker
+            .captures
+            .into_iter()
+            .map(|(lambda, names)| (lambda, names.into_iter().collect()))
+            .collect(),
+        captured_locals: checker
+            .captured_locals
+            .into_iter()
+            .map(|(member, names)| (member, names.into_iter().collect()))
+            .collect(),
     }
 }
 
@@ -413,6 +438,15 @@ struct Checker<'a, 'ast> {
     /// When probing a lambda body for its return type, `return` statements push
     /// here instead of being validated against `return_type`.
     lambda_probe_returns: Option<Vec<Type>>,
+    /// The lambdas being checked, outermost first, each with the number of
+    /// local scopes that were open when it began: a local found below that
+    /// depth is captured from outside the lambda.
+    lambda_stack: Vec<(EntityID, usize)>,
+    /// The member whose body is being checked.
+    current_member: Option<SymbolId>,
+    /// See [`BodyCheck::captures`] and [`BodyCheck::captured_locals`].
+    captures: HashMap<EntityID, BTreeSet<String>>,
+    captured_locals: HashMap<SymbolId, BTreeSet<String>>,
     expression_types: HashMap<EntityID, Type>,
     targets: HashMap<EntityID, ResolvedTarget>,
     enumerations: HashMap<EntityID, ForeachEnumeration>,
@@ -500,6 +534,35 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
     fn local(&self, name: &str) -> Option<&Type> {
         self.locals.iter().rev().find_map(|scope| scope.get(name))
+    }
+
+    /// A local or parameter was named: when its declaration lies outside a
+    /// lambda being checked, that lambda — and every lambda between —
+    /// captures it.
+    fn note_local_use(&mut self, name: &str) {
+        let Some(depth) = self
+            .locals
+            .iter()
+            .rposition(|scope| scope.contains_key(name))
+        else {
+            return;
+        };
+        let mut captured = false;
+        for (lambda, base) in &self.lambda_stack {
+            if depth < *base {
+                self.captures
+                    .entry(*lambda)
+                    .or_default()
+                    .insert(name.to_string());
+                captured = true;
+            }
+        }
+        if captured && let Some(member) = self.current_member {
+            self.captured_locals
+                .entry(member)
+                .or_default()
+                .insert(name.to_string());
+        }
     }
 
     /// `this` inside the innermost enclosing type: its own generic parameters
@@ -1201,6 +1264,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         else {
             return;
         };
+        let saved_member = self.current_member.replace(symbol);
+        self.check_member_inner(node, symbol);
+        self.current_member = saved_member;
+    }
+
+    fn check_member_inner(&mut self, node: &MemberNode<'ast>, symbol: SymbolId) {
         let member_signature = self.signatures.members.get(&symbol).cloned();
 
         match node.syntax {
@@ -1950,7 +2019,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         &subpattern.name.span,
                         Some(EntityID::from(subpattern)),
                     );
-                    let member_type = self.value_of(meaning, subpattern.name.span.clone(), None);
+                    let member_type =
+                        self.value_of(meaning, subpattern.name.span.clone(), None, None);
                     if let Ok(pattern) = &subpattern.pattern {
                         self.check_pattern(pattern, &member_type);
                     }
@@ -2248,7 +2318,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         for right in primary.chain {
             meaning = self.apply_primary_right(meaning, right);
         }
-        self.value_of(meaning, primary.span.clone(), expected)
+        self.value_of(
+            meaning,
+            primary.span.clone(),
+            expected,
+            Some(EntityID::from(primary)),
+        )
     }
 
     fn value_of(
@@ -2256,6 +2331,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         meaning: Meaning<'ast>,
         span: Range<usize>,
         expected: Option<&Type>,
+        // the primary node, where a method group's conversion to a delegate
+        // is recorded for the code generator
+        node: Option<EntityID>,
     ) -> Type {
         match meaning {
             Meaning::Value(ty) => ty,
@@ -2268,35 +2346,50 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 Type::Error
             }
             Meaning::Group(group) => {
-                // a method group converts to a delegate type
+                // a method group converts to a delegate type: to the
+                // candidate whose parameters the delegate's convert to — the
+                // one taking exactly the delegate's types when there is one
                 if let Some(expected) = expected
                     && let Some(delegate) = self.delegate_signature(expected)
                 {
                     let system = self.system();
-                    let compatible =
-                        group
-                            .candidates
-                            .iter()
-                            .any(|candidate| match &candidate.signature {
-                                Some(MemberSignature::Function(function)) => {
-                                    function.parameters.len() == delegate.parameters.len()
-                                        && function.parameters.iter().zip(&delegate.parameters).all(
-                                            |(method, target)| {
-                                                system.is_implicitly_convertible(
-                                                    &target.parameter_type,
-                                                    &method.parameter_type,
-                                                )
-                                            },
-                                        )
-                                        && (delegate.return_type == Type::Void
-                                            || system.is_implicitly_convertible(
-                                                &function.return_type,
-                                                &delegate.return_type,
-                                            ))
-                                }
-                                _ => false,
-                            });
-                    if compatible {
+                    let fits = |candidate: &MemberCandidate, exact: bool| match &candidate.signature
+                    {
+                        Some(MemberSignature::Function(function)) => {
+                            candidate.arity as usize == group.explicit_arguments.len()
+                                && function.parameters.len() == delegate.parameters.len()
+                                && function.parameters.iter().zip(&delegate.parameters).all(
+                                    |(method, target)| {
+                                        if exact {
+                                            method.parameter_type == target.parameter_type
+                                        } else {
+                                            system.is_implicitly_convertible(
+                                                &target.parameter_type,
+                                                &method.parameter_type,
+                                            )
+                                        }
+                                    },
+                                )
+                                && (delegate.return_type == Type::Void
+                                    || system.is_implicitly_convertible(
+                                        &function.return_type,
+                                        &delegate.return_type,
+                                    ))
+                        }
+                        _ => false,
+                    };
+                    let chosen = group
+                        .candidates
+                        .iter()
+                        .position(|candidate| fits(candidate, true))
+                        .or_else(|| {
+                            group
+                                .candidates
+                                .iter()
+                                .position(|candidate| fits(candidate, false))
+                        });
+                    if let Some(index) = chosen {
+                        self.record_group_conversion(&group, index, node);
                         return expected.clone();
                     }
                     self.error(SemanticErrorKind::NoMatchingOverload, group.span);
@@ -2315,6 +2408,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         .map(|parameter| parameter.parameter_type.clone())
                         .collect();
                     if let Some(ty) = self.func_or_action(&parameters, &function.return_type) {
+                        self.record_group_conversion(&group, 0, node);
                         return ty;
                     }
                 }
@@ -2344,6 +2438,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if generics.is_none()
                     && let Some(ty) = self.local(name.value).cloned()
                 {
+                    self.note_local_use(name.value);
                     self.targets
                         .insert(EntityID::from(left), ResolvedTarget::Local);
                     return Meaning::Value(ty);
@@ -2714,7 +2809,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             PrimaryRight::ElementAccess {
                 arguments, span, ..
             } => {
-                let receiver = self.value_of(meaning, span.clone(), None);
+                let receiver = self.value_of(meaning, span.clone(), None, None);
                 self.index(
                     receiver,
                     arguments.arguments,
@@ -2723,7 +2818,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 )
             }
             PrimaryRight::Postfix { operator, span } => {
-                let ty = self.value_of(meaning, span.clone(), None);
+                let ty = self.value_of(meaning, span.clone(), None, None);
                 use men_sharp_parser::ast::PostfixOperator;
                 match operator.value {
                     PostfixOperator::Increment | PostfixOperator::Decrement => {
@@ -2808,6 +2903,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 };
                 if matches!(receiver, Type::Error) {
                     return Meaning::Error;
+                }
+                // `op.Invoke(...)` on a delegate of the compilation's own
+                if name == "Invoke"
+                    && let Some(candidate) = self.source_delegate_invoke(&receiver)
+                {
+                    return Meaning::Group(MethodGroup {
+                        candidates: vec![candidate],
+                        explicit_arguments,
+                        via_type: false,
+                        name,
+                        receiver: None,
+                        allow_extensions: false,
+                        receiver_display: self.display(&receiver),
+                        span: span.clone(),
+                    });
                 }
 
                 let candidates = self.system().members_named(&receiver, name);
@@ -2904,7 +3014,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     .system()
                     .members_named(&ty, "Invoke")
                     .into_iter()
-                    .find(|candidate| candidate.kind == SymbolKind::Method);
+                    .find(|candidate| candidate.kind == SymbolKind::Method)
+                    .or_else(|| self.source_delegate_invoke(&ty));
                 match invoke {
                     Some(candidate) => {
                         let receiver_display = self.display(&ty);
@@ -3628,6 +3739,57 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
     // -------------------------------------------------------------- lambdas
 
+    /// A method group became a delegate: which method, for the code
+    /// generator — recorded on the expression node as a call whose
+    /// arguments are the delegate's parameters, in order.
+    fn record_group_conversion(
+        &mut self,
+        group: &MethodGroup<'ast>,
+        index: usize,
+        node: Option<EntityID>,
+    ) {
+        let Some(node) = node else {
+            return;
+        };
+        let candidate = &group.candidates[index];
+        let Some(MemberSignature::Function(signature)) = candidate.signature.clone() else {
+            return;
+        };
+        let call = ResolvedCall {
+            origin: candidate.origin.clone(),
+            is_static: candidate.is_static,
+            is_extension: false,
+            declaring_type: candidate.declaring_type.clone(),
+            parameter_of_argument: (0..signature.parameters.len()).collect(),
+            signature,
+            type_arguments: group.explicit_arguments.clone(),
+            params_expansion: None,
+        };
+        self.targets.insert(node, ResolvedTarget::Call(call));
+    }
+
+    /// `Invoke` on a delegate type of the compilation's own: the delegate
+    /// declares no members, its signature *is* the method.
+    fn source_delegate_invoke(&self, ty: &Type) -> Option<MemberCandidate> {
+        let Type::Named {
+            target: TypeTarget::Source(symbol),
+            ..
+        } = ty
+        else {
+            return None;
+        };
+        let signature = self.delegate_signature(ty)?;
+        Some(MemberCandidate {
+            origin: MemberOrigin::Source(*symbol),
+            kind: SymbolKind::Method,
+            is_static: false,
+            accessibility: crate::symbol::Accessibility::Public,
+            arity: 0,
+            signature: Some(MemberSignature::Function(signature)),
+            declaring_type: ty.clone(),
+        })
+    }
+
     /// The `Invoke` shape of a delegate type: what a lambda checks against.
     fn delegate_signature(&self, ty: &Type) -> Option<FunctionSignature> {
         match ty {
@@ -3712,6 +3874,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 scope.insert(name, parameter.parameter_type.clone());
             }
         }
+        self.lambda_stack
+            .push((EntityID::from(lambda), self.locals.len()));
         self.locals.push(scope);
 
         let result = match &lambda.body {
@@ -3731,6 +3895,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         };
 
         self.locals.pop();
+        self.lambda_stack.pop();
         self.return_type = saved_return;
         self.lambda_probe_returns = saved_probe;
         self.resolver.out.errors.truncate(error_mark);
@@ -3777,6 +3942,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
         }
 
+        self.lambda_stack
+            .push((EntityID::from(lambda), self.locals.len()));
         self.locals.push(scope);
         let saved_return = std::mem::replace(&mut self.return_type, delegate.return_type.clone());
 
@@ -3797,6 +3964,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         self.return_type = saved_return;
         self.locals.pop();
+        self.lambda_stack.pop();
     }
 
     /// A lambda in a non-argument position: against the context's expected type,
@@ -4443,7 +4611,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     || left == right
                     || system.is_implicitly_convertible(&left, &right)
                     || system.is_implicitly_convertible(&right, &left);
-                if comparable && !self.has_user_operator(operator, &left, &right) {
+                // delegates compare by what they call (`Delegate.op_Equality`
+                // is not an extern, and Multicast's would tie with it)
+                let delegate = self.delegate_signature(&left).is_some()
+                    || self.delegate_signature(&right).is_some();
+                if comparable && (delegate || !self.has_user_operator(operator, &left, &right)) {
                     return self.corlib("Boolean");
                 }
                 if let Some(result) = self.user_defined_binary(operator, &left, &right, &span, node)
@@ -4457,6 +4629,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             Add if system.is_string(&left) || system.is_string(&right) => {
                 // string concatenation accepts anything on the other side
                 return self.corlib("String");
+            }
+            // `Delegate.Combine` / `Remove`: one delegate type on both sides,
+            // or `null` on one
+            Add | Subtract
+                if self.delegate_signature(&left).is_some()
+                    || self.delegate_signature(&right).is_some() =>
+            {
+                let (delegate, other) = if self.delegate_signature(&left).is_some() {
+                    (left.clone(), &right)
+                } else {
+                    (right.clone(), &left)
+                };
+                if *other == delegate || matches!(other, Type::Null) {
+                    return delegate;
+                }
             }
             _ => {}
         }
