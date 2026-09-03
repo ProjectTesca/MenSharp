@@ -707,6 +707,22 @@ into the heap, it runs when the program starts — so on a *behaviour* field it
 overwrites what the inspector holds. Leave such a field bare (`public int[]
 steps;`) when the inspector is meant to fill it.
 
+`a[^1]` counts back from the end and `a[1..3]` takes a slice, on arrays and
+strings:
+
+```csharp
+int[] numbers = { 1, 2, 3, 4, 5 };
+int last = numbers[^1];          // 5
+numbers[^1] = 50;                // writes too
+int[] middle = numbers[1..4];    // a new array: 2, 3, 4
+int[] tail = numbers[3..];       // to the end
+string end = word[^2..];         // and on strings
+```
+
+A slice **copies** — Udon has no `Span<T>` — so `middle[0] = 9` leaves
+`numbers` alone, and slicing in a loop allocates each time. A range that runs
+backwards or past the end throws `ArgumentOutOfRangeException`, as in C#.
+
 `text[i]` reads a character, as in C#, with the same
 `IndexOutOfRangeException` on a bad index. Udon exposes no `String.get_Chars`,
 so each read is a one-character `ToCharArray(i, 1)` — cheap, but an
@@ -795,7 +811,9 @@ wrong thing:
   method around them (CS8421), and local functions that use a variable written
   below them (CS0841), are errors here as they are in C#;
 - tuples (`(int, int)`), deconstruction and positional patterns;
-- the index and range operators (`a[^1]`, `a[1..]`);
+- `Index` and `Range` as values (`Index i = ^1;`): `^i` and `i..j` work where
+  they are written, on arrays and strings, and nowhere else — Udon has no
+  such types to pass around, and no `Span<T>` for a slice that does not copy;
 - `ulong` literals (`1UL`), and integer literals too big for `long`;
 - nested array braces (`{ { 1, 2 }, { 3, 4 } }`) — jagged and rectangular
   arrays are not there yet.

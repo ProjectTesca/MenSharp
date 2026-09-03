@@ -7280,3 +7280,69 @@ fn coalescing_assignment_only_runs_when_it_has_to() {
     assert_eq!(string_of(&emulator, "Log"), "madeanon");
     assert_eq!(int_of(&emulator, "Result"), 14);
 }
+
+#[test]
+fn indexes_from_the_end_and_ranges_slice() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static int[] Numbers = { 1, 2, 3, 4, 5 };
+                public static string Word = "hello";
+                public static int Last(int[] values) { return values[^1]; }
+                public static void Main()
+                {
+                    Result += Numbers[^1];               // 5
+                    Result += Numbers[^5];               // 6
+                    Result += Last(Numbers);             // 11
+                    int two = 2;
+                    Result += Numbers[^two];             // 15
+                    Numbers[^1] = 50;
+                    Result += Numbers[4];                // 65
+
+                    int[] middle = Numbers[1..4];        // 2 3 4
+                    Result += middle.Length;             // 68
+                    Result += middle[0] + middle[2];     // 74
+                    int[] tail = Numbers[3..];           // 4 50
+                    Result += tail[1];                   // 124
+                    int[] head = Numbers[..2];           // 1 2
+                    Result += head.Length;               // 126
+                    int[] all = Numbers[..];
+                    Result += all.Length;                // 131
+                    int[] none = Numbers[2..2];
+                    Result += none.Length;               // 131
+                    int[] fromEnd = Numbers[^2..^1];     // 4
+                    Result += fromEnd[0];                // 135
+
+                    Log += Word[^1];                     // o
+                    Log += Word[1..3];                   // el
+                    Log += Word[^2..];                   // lo
+                    Log += Word[..1];                    // h
+
+                    // the copy is its own array
+                    middle[0] = 99;
+                    Result += Numbers[1];                // 137
+
+                    try
+                    {
+                        int[] bad = Numbers[3..1];
+                        Result += bad.Length;
+                    }
+                    catch (ArgumentOutOfRangeException)
+                    {
+                        Log += "!";
+                    }
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "oelloh!");
+    assert_eq!(int_of(&emulator, "Result"), 137);
+}

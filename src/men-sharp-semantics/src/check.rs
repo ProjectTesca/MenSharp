@@ -4985,8 +4985,97 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         span: &Range<usize>,
         node: Option<EntityID>,
     ) -> Meaning<'ast> {
+        // `a[^1]` and `a[1..3]`: Udon has no `Index`/`Range` values, so
+        // these are read as syntax where they are written and lowered in
+        // place — on arrays and strings, the two C# gives them to natively
+        if let [argument] = arguments
+            && argument.name.is_none()
+            && argument.modifier.is_none()
+            && let ArgumentValue::Expression(expression) = &argument.value
+        {
+            match expression {
+                Expression::Range(range) => return self.check_slice(&receiver, range, span),
+                Expression::Unary(unary)
+                    if unary.operator.value == UnaryOperator::IndexFromEnd =>
+                {
+                    self.check_index_from_end(unary);
+                    if !self.is_indexable_from_end(&receiver) {
+                        let kind = SemanticErrorKind::NotIndexable {
+                            type_name: self.display(&receiver),
+                        };
+                        self.error(kind, unary.span.clone());
+                        return Meaning::Error;
+                    }
+                    let call_arguments = vec![CallArgument {
+                        shape: ArgumentShape::Value(self.corlib("Int32")),
+                        name: None,
+                        expression: None,
+                        modifier: None,
+                        is_integer_literal: false,
+                        out_declaration: None,
+                        span: argument.span.clone(),
+                    }];
+                    return self.index_with(receiver, call_arguments, span, node);
+                }
+                _ => {}
+            }
+        }
         let call_arguments = self.check_arguments(arguments);
         self.index_with(receiver, call_arguments, span, node)
+    }
+
+    /// `^k`: an `int` counted back from the end. Only where the compiler
+    /// knows the length without asking a member — arrays and strings.
+    fn check_index_from_end(
+        &mut self,
+        unary: &'ast men_sharp_parser::ast::UnaryExpression<'ast, 'ast>,
+    ) {
+        self.expression_types
+            .insert(EntityID::from(unary), self.corlib("Int32"));
+        if let Ok(operand) = &unary.operand {
+            let literal = Self::is_integer_literal(operand);
+            let int32 = self.corlib("Int32");
+            let ty = self.check_expression_expecting(operand, Some(&int32));
+            self.require_convertible(&ty, &int32, literal, operand.span());
+        }
+    }
+
+    /// An array or a string: what `^i` and `i..j` are lowered for.
+    fn is_indexable_from_end(&self, receiver: &Type) -> bool {
+        matches!(receiver, Type::Array { rank: 1, .. } | Type::Error)
+            || self.system().is_string(receiver)
+    }
+
+    /// `a[1..^1]`: a slice, whose type is the sliced type itself.
+    fn check_slice(
+        &mut self,
+        receiver: &Type,
+        range: &'ast men_sharp_parser::ast::RangeExpression<'ast, 'ast>,
+        span: &Range<usize>,
+    ) -> Meaning<'ast> {
+        for endpoint in [&range.start, &range.end].into_iter().flatten() {
+            match endpoint {
+                Expression::Unary(unary)
+                    if unary.operator.value == UnaryOperator::IndexFromEnd =>
+                {
+                    self.check_index_from_end(unary);
+                }
+                other => {
+                    let literal = Self::is_integer_literal(other);
+                    let int32 = self.corlib("Int32");
+                    let ty = self.check_expression_expecting(other, Some(&int32));
+                    self.require_convertible(&ty, &int32, literal, other.span());
+                }
+            }
+        }
+        if !self.is_indexable_from_end(receiver) {
+            let kind = SemanticErrorKind::NotIndexable {
+                type_name: self.display(receiver),
+            };
+            self.error(kind, span.clone());
+            return Meaning::Error;
+        }
+        Meaning::Value(receiver.clone())
     }
 
     fn index_with(

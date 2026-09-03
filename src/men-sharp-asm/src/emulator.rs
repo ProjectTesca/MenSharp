@@ -690,6 +690,47 @@ impl Emulator {
                 self.heap[*args.last().expect("an out slot")] = Value::Str(Rc::from(value));
                 Ok(())
             }
+            "SystemArray.__Copy__SystemArray_SystemInt32_SystemArray_SystemInt32_SystemInt32__SystemVoid" => {
+                let args = self.pop_arguments(5)?;
+                let source = match &self.heap[args[0]] {
+                    Value::Array(values) => values.clone(),
+                    other => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "expected an array, found {other:?}"
+                        )));
+                    }
+                };
+                let source_index = self.heap[args[1]].as_i32()? as usize;
+                let destination = match &self.heap[args[2]] {
+                    Value::Array(values) => values.clone(),
+                    other => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "expected an array, found {other:?}"
+                        )));
+                    }
+                };
+                let destination_index = self.heap[args[3]].as_i32()? as usize;
+                let length = self.heap[args[4]].as_i32()? as usize;
+                let taken: Vec<Value> = source
+                    .borrow()
+                    .iter()
+                    .skip(source_index)
+                    .take(length)
+                    .cloned()
+                    .collect();
+                if taken.len() != length {
+                    return Err(EmulatorError::Exception("Array.Copy out of range".into()));
+                }
+                let mut into = destination.borrow_mut();
+                for (offset, value) in taken.into_iter().enumerate() {
+                    let at = destination_index + offset;
+                    if at >= into.len() {
+                        return Err(EmulatorError::Exception("Array.Copy out of range".into()));
+                    }
+                    into[at] = value;
+                }
+                Ok(())
+            }
             "SystemString.__get_Length__SystemInt32" => {
                 let args = self.pop_arguments(2)?;
                 let s = self.heap[args[0]].as_str()?;

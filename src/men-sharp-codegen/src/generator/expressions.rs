@@ -1846,13 +1846,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some((slot, ty)) = receiver else {
             return Place::Error;
         };
+        // `a[1..2] = x`: a slice is a fresh array, not a place (CS0131)
+        if let Some(Expression::Range(range)) = Self::single_index_expression(arguments) {
+            self.error(
+                ctx,
+                "a slice cannot be assigned to: `a[i..j]` makes a copy, so writing to it would change nothing",
+                range.span.clone(),
+            );
+            return Place::Error;
+        }
         if let Type::Array { element, rank: 1 } = &ty {
-            let index = arguments
-                .first()
-                .and_then(|argument| match &argument.value {
-                    ArgumentValue::Expression(expression) => self.lower_expression(ctx, expression),
-                    _ => None,
-                });
+            let index = Self::single_index_expression(arguments).and_then(|expression| {
+                self.index_value(ctx, slot, &ty, expression, span.clone())
+            });
             return match index {
                 Some(index) => Place::Element {
                     array: slot,
@@ -2148,6 +2154,181 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .unwrap_or_else(|| candidates[1].clone());
         self.call_extern(ctx, &signature, &[array, out], span);
         out
+    }
+
+    /// The single `[...]` argument, when it is written as one expression.
+    fn single_index_expression(
+        arguments: &'ast [Argument<'ast, 'ast>],
+    ) -> Option<&'ast Expression<'ast, 'ast>> {
+        let [argument] = arguments else {
+            return None;
+        };
+        match &argument.value {
+            ArgumentValue::Expression(expression) => Some(expression),
+            _ => None,
+        }
+    }
+
+    /// `^k` as written in an index position, if that is what this is.
+    fn index_from_end(
+        expression: &'ast Expression<'ast, 'ast>,
+    ) -> Option<&'ast men_sharp_parser::ast::UnaryExpression<'ast, 'ast>> {
+        match expression {
+            Expression::Unary(unary)
+                if unary.operator.value == men_sharp_parser::ast::UnaryOperator::IndexFromEnd =>
+            {
+                Some(unary)
+            }
+            _ => None,
+        }
+    }
+
+    /// How long the thing being indexed is: an array's length, a string's.
+    fn indexable_length(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        receiver: DataId,
+        receiver_type: &Type,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        if matches!(receiver_type, Type::Array { rank: 1, .. }) {
+            return Some(self.array_length(ctx, receiver, receiver_type, span));
+        }
+        if self
+            .extern_type_name(receiver_type)
+            .is_some_and(|name| name == "SystemString")
+        {
+            let length = self.temp("SystemInt32");
+            self.call_extern(
+                ctx,
+                "SystemString.__get_Length__SystemInt32",
+                &[receiver, length],
+                span,
+            );
+            return Some(length);
+        }
+        self.error(ctx, "internal: this receiver has no length", span);
+        None
+    }
+
+    /// One index as written: `^k` counts back from the end, anything else
+    /// is the index itself.
+    pub(super) fn index_value(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        receiver: DataId,
+        receiver_type: &Type,
+        expression: &'ast Expression<'ast, 'ast>,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        let Some(unary) = Self::index_from_end(expression) else {
+            return self.lower_expression(ctx, expression);
+        };
+        let operand = unary.operand.as_ref().ok()?;
+        let from_end = self.lower_expression(ctx, operand)?;
+        let length = self.indexable_length(ctx, receiver, receiver_type, span.clone())?;
+        let int32 = self.corlib_type("Int32");
+        self.emit_binary_operator(
+            ctx,
+            BinaryOperator::Subtract,
+            (length, &int32),
+            (from_end, &int32),
+            &int32,
+            span,
+            None,
+        )
+    }
+
+    /// `a[i..j]` — a new array or string holding the range. The endpoints
+    /// are checked here: the externs would throw, and that halts the VM,
+    /// where C# throws `ArgumentOutOfRangeException`.
+    fn lower_slice(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        receiver: DataId,
+        receiver_type: &Type,
+        range: &'ast men_sharp_parser::ast::RangeExpression<'ast, 'ast>,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        let is_string = self
+            .extern_type_name(receiver_type)
+            .is_some_and(|name| name == "SystemString");
+        if is_string {
+            self.check_not_null(ctx, receiver, span.clone());
+        }
+        let length = self.indexable_length(ctx, receiver, receiver_type, span.clone())?;
+        let int32 = self.corlib_type("Int32");
+
+        // each endpoint: written, counted from the end, or left out
+        let mut endpoint = |generator: &mut Self,
+                            written: &'ast Option<Expression<'ast, 'ast>>,
+                            default: DataId|
+         -> Option<DataId> {
+            let Some(expression) = written else {
+                return Some(default);
+            };
+            generator.index_value(ctx, receiver, receiver_type, expression, span.clone())
+        };
+        let zero = self.int_constant(0);
+        let start = endpoint(self, &range.start, zero)?;
+        let end = endpoint(self, &range.end, length)?;
+
+        // `0 <= start <= end <= length` — an empty slice at either end is
+        // fine, which is why this is not the array bounds check
+        let ok = self.fresh_label("slice_ok");
+        let fail = self.fresh_label("slice_fail");
+        let flag = self.temp("SystemBoolean");
+        let zero = self.int_constant(0);
+        for (name, left, right) in [
+            ("op_GreaterThanOrEqual", start, zero),
+            ("op_LessThanOrEqual", end, length),
+            ("op_LessThanOrEqual", start, end),
+        ] {
+            let signature =
+                format!("SystemInt32.__{name}__SystemInt32_SystemInt32__SystemBoolean");
+            self.call_extern(ctx, &signature, &[left, right, flag], span.clone());
+            self.program.code.push(Op::Push(flag));
+            self.program.code.push(Op::JumpIfFalse(Target::Label(fail)));
+        }
+        self.program.code.push(Op::Jump(Target::Label(ok)));
+        self.program.code.push(Op::Label(fail));
+        self.throw_new(
+            ctx,
+            &["System", "ArgumentOutOfRangeException"],
+            None,
+            span.clone(),
+        );
+        self.program.code.push(Op::Label(ok));
+
+        let taken = self.emit_binary_operator(
+            ctx,
+            BinaryOperator::Subtract,
+            (end, &int32),
+            (start, &int32),
+            &int32,
+            span.clone(),
+            None,
+        )?;
+
+        if is_string {
+            let out = self.temp("SystemString");
+            self.call_extern(
+                ctx,
+                "SystemString.__Substring__SystemInt32_SystemInt32__SystemString",
+                &[receiver, start, taken, out],
+                span,
+            );
+            return Some(out);
+        }
+        let out = self.allocate_array(ctx, receiver_type, taken, span.clone());
+        let zero = self.int_constant(0);
+        self.call_extern(
+            ctx,
+            "SystemArray.__Copy__SystemArray_SystemInt32_SystemArray_SystemInt32_SystemInt32__SystemVoid",
+            &[receiver, start, out, zero, taken],
+            span,
+        );
+        Some(out)
     }
 
     /// `text[index]` — Udon exposes no `String.get_Chars`, so the character
@@ -2612,6 +2793,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             PrimaryRight::ElementAccess { span, .. } => {
                 let receiver = piece.receiver();
+                // `a[1..^1]`: a slice, made here — Udon has no `Range` value
+                if let Some((slot, ty)) = &receiver {
+                    let PrimaryRight::ElementAccess { arguments, .. } = right else {
+                        unreachable!()
+                    };
+                    if let Some(Expression::Range(range)) =
+                        Self::single_index_expression(arguments.arguments)
+                    {
+                        let (slot, ty) = (*slot, ty.clone());
+                        return match self.lower_slice(ctx, slot, &ty, range, span.clone()) {
+                            Some(value) => Piece::Value(value, ty),
+                            None => Piece::Error,
+                        };
+                    }
+                }
                 // string indexing is special-cased by the checker
                 if let Some((slot, ty)) = &receiver
                     && self
@@ -2621,20 +2817,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     let PrimaryRight::ElementAccess { arguments, .. } = right else {
                         unreachable!()
                     };
-                    let index =
-                        arguments
-                            .arguments
-                            .first()
-                            .and_then(|argument| match &argument.value {
-                                ArgumentValue::Expression(expression) => {
-                                    self.lower_expression(ctx, expression)
-                                }
-                                _ => None,
-                            });
+                    let slot = *slot;
+                    let ty = ty.clone();
+                    let index = Self::single_index_expression(arguments.arguments)
+                        .and_then(|expression| {
+                            self.index_value(ctx, slot, &ty, expression, span.clone())
+                        });
                     let Some(index) = index else {
                         return Piece::Error;
                     };
-                    let slot = *slot;
                     let value = self.string_char_at(ctx, slot, index, span.clone());
                     return Piece::Value(value, self.corlib_type("Char"));
                 }
