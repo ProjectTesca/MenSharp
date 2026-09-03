@@ -6193,3 +6193,46 @@ fn integer_values_convert_where_a_float_is_expected() {
     // f, total, V(1, 2), the two array elements, Half(3), One's return, Sum's two
     assert!(conversions >= 10, "{conversions} conversions:\n{text}");
 }
+
+/// A behaviour placed where MenSharp does not look for sources — outside
+/// Assets/MenSharp, in no assembly of its own — is read as a library and
+/// would be fed to UdonSharp's C# 7.3 pass: an error saying where it
+/// belongs, not a silently missing program.
+#[test]
+fn a_behaviour_outside_the_mensharp_sources_is_an_error() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", SELF_REFERENCE_BASE),
+            SourceCode::foreign(
+                "Assets/MyGimmick/Door.cs",
+                r#"
+                public class Door : MenSharp.MenSharpBehaviour
+                {
+                    public void Interact() { }
+                }
+                "#,
+            ),
+        ],
+        "Door",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<&str> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.as_str())
+        .collect();
+    assert!(
+        messages.iter().any(|message| message
+            .contains("`Door` inherits MenSharpBehaviour but is outside the MenSharp sources")),
+        "{messages:?}"
+    );
+    assert_eq!(
+        program.output.errors[0].file,
+        men_sharp_semantics::FileId(1),
+        "{:?}",
+        program.output.errors
+    );
+}

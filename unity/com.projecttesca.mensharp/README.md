@@ -252,11 +252,18 @@ program, calls into it do nothing; MenSharp warns about such a reference when
 it transfers values.
 
 For Unity to compile `public UCounter counter` in your M# source, your sources
-must be able to *see* the UdonSharp class: if the asset has an assembly
-definition, add it to `Assets/MenSharp/MenSharp.Scripts.asmdef`'s references;
-if it lives in Assembly-CSharp (no asmdef of its own), delete
-`MenSharp.Scripts.asmdef` so your sources live there too — it is written only
-once, when the folder is created, and stays deleted.
+must be able to *see* the UdonSharp class. They can: `Assets/MenSharp` has no
+assembly definition, so your sources are part of Assembly-CSharp, which sees
+every assembly in the project — an asset dropped into `Assets` (Assembly-CSharp
+too) and one with an assembly definition alike. UdonSharp is kept from reading
+your sources (its own compiler pass is C# 7.3) by an entry MenSharp adds to
+UdonSharp's scanning blacklist. If you prefer your sources in an assembly of
+their own, **MenSharp > Create Assembly Definition for Assets/MenSharp** writes
+one; then an UdonSharp asset without an asmdef can no longer be named from
+them, only reached by string. A `MenSharpBehaviour` placed anywhere else —
+outside `Assets/MenSharp`, in a folder without an assembly definition — is an
+error naming the two places it belongs, since nothing there would check it
+and UdonSharp's own compiler would read it.
 
 ## Distributing a package
 

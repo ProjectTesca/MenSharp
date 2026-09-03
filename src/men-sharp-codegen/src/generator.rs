@@ -513,6 +513,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return;
         };
 
+        // a behaviour declared in a library file: outside the MenSharp
+        // sources, so nothing checks it and UdonSharp's own compiler reads
+        // it — not a program to emit, an error to fix
+        if is_behaviour_class(self.declarations, self.signatures, entry) {
+            let (file, span) = self.declaration_site(entry);
+            if self.declarations.is_foreign(file) {
+                let name = entry_path.join(".");
+                self.errors.push(CodegenError {
+                    message: format!(
+                        "`{name}` inherits MenSharpBehaviour but is outside the MenSharp \
+                         sources: not under Assets/MenSharp, and not in an assembly \
+                         definition that references ProjectTesca.MenSharp.Runtime. Move it \
+                         to Assets/MenSharp, or give its folder an assembly definition \
+                         (MenSharp > Create Package…, or MenSharp > Create Assembly Definition)"
+                    ),
+                    file,
+                    span,
+                });
+                return;
+            }
+        }
+
         // a MenSharpBehaviour subclass gets the behaviour treatment: its
         // instance members become the program's surface
         if is_behaviour_class(self.declarations, self.signatures, entry) {

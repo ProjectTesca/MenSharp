@@ -32,12 +32,16 @@ public static class MenSharpCompiler
         if (!Directory.Exists(SourceRoot))
         {
             Directory.CreateDirectory(SourceRoot);
-            CreateAssemblyDefinition();
             AssetDatabase.Refresh();
             Debug.Log(
                 $"MenSharp: created {SourceRoot}. Put your .cs sources there (classes "
                 + "inheriting MenSharpBehaviour become programs) and compile again.");
             return;
+        }
+        // UdonSharp must not read these sources (its Roslyn pass is C# 7.3)
+        if (MenSharpUdonSharpIsolation.Ensure(true))
+        {
+            // UdonSharp picks the setting up on its next pass; nothing to wait for
         }
 
         // MenSharp sources are the scripts of every assembly referencing the
@@ -234,22 +238,23 @@ public static class MenSharpCompiler
         return process.ExitCode == 0;
     }
 
-    /// An assembly definition keeps these sources out of Assembly-CSharp —
-    /// which keeps them out of *UdonSharp's* compilation pass (U# compiles
-    /// every Assembly-CSharp script and cannot resolve MenSharpBehaviour).
-    /// Unity still compiles them normally, so IDE completion keeps working.
-    ///
-    /// Written once, when the source folder is first created. Deleting it is
-    /// a choice this code respects: an assembly definition cannot reference
-    /// Assembly-CSharp, so a project whose UdonSharp assets live there (no
-    /// asmdef of their own) needs the M# sources there too, to name them.
+    /// An optional assembly definition for Assets/MenSharp. Not needed:
+    /// UdonSharp is kept away from these sources by its scanning blacklist
+    /// (see MenSharpUdonSharpIsolation), and living in Assembly-CSharp is
+    /// what lets them name the UdonSharp assets dropped into Assets — an
+    /// assembly definition cannot reference Assembly-CSharp. For a project
+    /// that wants the sources in an assembly of their own anyway (compile
+    /// times, layering), this writes one, referencing the runtime.
+    [MenuItem("MenSharp/Create Assembly Definition for Assets/MenSharp")]
     private static void CreateAssemblyDefinition()
     {
         string path = SourceRoot + "/MenSharp.Scripts.asmdef";
         if (File.Exists(path))
         {
+            Debug.Log($"MenSharp: {path} already exists.");
             return;
         }
+        Directory.CreateDirectory(SourceRoot);
         File.WriteAllText(path, @"{
     ""name"": ""MenSharp.Scripts"",
     ""rootNamespace"": """",
