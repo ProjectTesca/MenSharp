@@ -8688,3 +8688,104 @@ fn a_format_a_type_cannot_apply_is_an_error() {
         "{messages:#?}\n{program}"
     );
 }
+
+#[test]
+fn collections_and_iterators_pass_as_sequences() {
+    let Some(emulator) = run(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+
+                // one loop that takes anything enumerable
+                static string Join<T>(IEnumerable<T> items)
+                {
+                    string text = "";
+                    foreach (T item in items) { text += item + ","; }
+                    return text;
+                }
+
+                static int Total(IEnumerable<int> numbers)
+                {
+                    int sum = 0;
+                    foreach (int n in numbers) { sum += n; }
+                    return sum;
+                }
+
+                static IEnumerable<int> Squares(int count)
+                {
+                    for (int i = 1; i <= count; i++) { yield return i * i; }
+                }
+
+                public static void Main()
+                {
+                    List<int> numbers = new List<int>();
+                    numbers.Add(1);
+                    numbers.Add(2);
+                    numbers.Add(3);
+                    Log += Join<int>(numbers);
+                    Log += Total(numbers) + ";";
+
+                    // the pattern-based foreach still binds to the concrete
+                    // enumerator, interface or no interface
+                    int direct = 0;
+                    foreach (int n in numbers) { direct += n; }
+                    Log += direct + ";";
+
+                    List<string> words = new List<string>();
+                    words.Add("a");
+                    words.Add("b");
+                    Log += Join<string>(words);
+
+                    Dictionary<string, int> ages = new Dictionary<string, int>();
+                    ages["ann"] = 30;
+                    ages["bob"] = 40;
+                    Log += Join<string>(ages.Keys);
+                    Log += Total(ages.Values) + ";";
+                    foreach (KeyValuePair<string, int> pair in ages) { Log += pair.Key + "=" + pair.Value + ";"; }
+
+                    // an iterator is a sequence too, and it stays lazy
+                    Log += Join<int>(Squares(4));
+                    Log += Total(Squares(3)) + ";";
+
+                    // ... and a sequence variable can hold any of them
+                    IEnumerable<int> sequence = numbers;
+                    Log += Total(sequence) + ";";
+                    sequence = Squares(2);
+                    Log += Total(sequence) + ";";
+
+                    // an array is a sequence too, as in C#
+                    int[] fixedNumbers = new int[] { 4, 5, 6 };
+                    Log += Total(fixedNumbers) + ";";
+                    Log += Join<string>(new string[] { "p", "q" });
+                    sequence = fixedNumbers;
+                    Log += Total(sequence) + ";";
+                    foreach (int n in sequence) { Log += n; }
+                    Log += ";";
+                    // ... while `foreach` over the array itself still walks
+                    // it by index, with nothing allocated
+                    int byIndex = 0;
+                    foreach (int n in fixedNumbers) { byIndex += n; }
+                    Log += byIndex + ";";
+
+                    // a string is a sequence of characters, the same way
+                    IEnumerable<char> letters = "hey";
+                    foreach (char c in letters) { Log += c; }
+                    Log += ";" + Join<char>("ok");
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "1,2,3,6;6;a,b,ann,bob,70;ann=30;bob=40;1,4,9,16,14;6;5;15;p,q,15;456;15;hey;o,k,"
+    );
+}

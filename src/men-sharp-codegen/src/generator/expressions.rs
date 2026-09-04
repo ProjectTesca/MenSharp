@@ -762,6 +762,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Some(converted) = self.convert_by_operator(ctx, source, from, to, &span) {
             return converted;
         }
+        // `Total(numbers)` where `numbers` is an `int[]`: an array becomes a
+        // sequence by being wrapped in one
+        if let Some(wrapped) = self.sequence_of_array(ctx, source, from, to, &span) {
+            return wrapped;
+        }
         let from_name = self.extern_type_name(from);
         let to_name = self.extern_type_name(to);
         match (from_name, to_name) {

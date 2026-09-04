@@ -514,6 +514,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ty: &Type,
         span: Range<usize>,
     ) -> Option<DataId> {
+        self.new_corlib_object_with(ctx, ty, &[], span)
+    }
+
+    /// ... with constructor arguments.
+    pub(super) fn new_corlib_object_with(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        ty: &Type,
+        arguments: &[DataId],
+        span: Range<usize>,
+    ) -> Option<DataId> {
         let Type::Named {
             target: TypeTarget::Source(class),
             ..
@@ -532,15 +543,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .find(|&member| {
                 matches!(
                     self.signatures.members.get(&member),
-                    Some(MemberSignature::Function(function)) if function.parameters.is_empty()
+                    Some(MemberSignature::Function(function))
+                        if function.parameters.len() == arguments.len()
                 )
             });
         let Some(constructor) = constructor else {
             self.error(
                 ctx,
                 format!(
-                    "internal: `{}` has no parameterless constructor",
-                    self.display_type(ty)
+                    "internal: `{}` has no constructor taking {} argument(s)",
+                    self.display_type(ty),
+                    arguments.len()
                 ),
                 span,
             );
@@ -552,8 +565,49 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             role: Role::Constructor,
             bindings,
         };
-        self.call_function(ctx, &key, Some(object), &[], &[], span);
+        self.call_function(ctx, &key, Some(object), arguments, &[], span);
         Some(object)
+    }
+
+    /// `T[]` where `IEnumerable<T>` is wanted: the array in an
+    /// `ArrayEnumerable<T>`, which is what makes it a sequence at run time.
+    /// `None` when this is not that conversion.
+    pub(super) fn sequence_of_array(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        source: DataId,
+        from: &Type,
+        to: &Type,
+        span: &Range<usize>,
+    ) -> Option<DataId> {
+        if !self
+            .type_system()
+            .is_source_type_path(to, &["System", "Collections", "Generic", "IEnumerable"])
+        {
+            return None;
+        }
+        // a string enumerates as its characters, which on Udon means the
+        // array `ToCharArray` hands back
+        let (items, element) = if self.type_system().is_string(from) {
+            let characters = self.temp("SystemCharArray");
+            self.call_extern(
+                ctx,
+                "SystemString.__ToCharArray__SystemCharArray",
+                &[source, characters],
+                span.clone(),
+            );
+            (characters, self.corlib_type("Char"))
+        } else if let Type::Array { element, rank: 1 } = from {
+            (source, (**element).clone())
+        } else {
+            return None;
+        };
+        let class = self.find_symbol(&["MenSharp", "Internal", "ArrayEnumerable"])?;
+        let ty = Type::Named {
+            target: TypeTarget::Source(class),
+            arguments: vec![element],
+        };
+        self.new_corlib_object_with(ctx, &ty, &[items], span.clone())
     }
 
     // ------------------------------------------------------ resume thunks

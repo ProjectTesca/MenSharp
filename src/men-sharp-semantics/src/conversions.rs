@@ -145,6 +145,29 @@ impl TypeSystem<'_, '_> {
         )
     }
 
+    /// Is `ty` the source type declared at this namespace-and-name path?
+    pub fn is_source_type_path(&self, ty: &Type, path: &[&str]) -> bool {
+        let Type::Named {
+            target: TypeTarget::Source(symbol),
+            ..
+        } = ty
+        else {
+            return false;
+        };
+        let table = &self.declarations.table;
+        let mut parts = Vec::new();
+        let mut current = Some(*symbol);
+        while let Some(id) = current {
+            let entry = table.symbol(id);
+            if !entry.name.is_empty() {
+                parts.push(entry.name);
+            }
+            current = entry.parent;
+        }
+        parts.reverse();
+        parts == path
+    }
+
     pub fn is_enum_type(&self, ty: &Type) -> bool {
         match ty {
             Type::Named {
@@ -307,6 +330,16 @@ impl TypeSystem<'_, '_> {
             return !matches!(from, Type::Pointer(_) | Type::Void);
         }
 
+        // a string is a sequence of its characters, materialised the same way
+        if self.is_string(from)
+            && let Type::Named { arguments, .. } = to
+            && arguments.len() == 1
+            && self.is_system_type(&arguments[0], "Char")
+            && self.is_source_type_path(to, &["System", "Collections", "Generic", "IEnumerable"])
+        {
+            return true;
+        }
+
         // reference conversion: `to` somewhere in `from`'s base/interface closure
         if matches!(from, Type::Named { .. }) && matches!(to, Type::Named { .. }) {
             return self.inheritance_closure_contains(from, to);
@@ -315,6 +348,22 @@ impl TypeSystem<'_, '_> {
         // arrays convert to System.Array (and through it, above, to object)
         if matches!(from, Type::Array { .. }) && self.is_system_type(to, "Array") {
             return true;
+        }
+
+        // ... and to the mini-corlib's own `IEnumerable<T>`, which the
+        // compiler materialises by wrapping the array (see the code
+        // generator's `sequence_of_array`)
+        if let Type::Array { element, rank: 1 } = from
+            && let Type::Named {
+                target: TypeTarget::Source(_),
+                arguments,
+            } = to
+            && arguments.len() == 1
+            && self.is_source_type_path(to, &["System", "Collections", "Generic", "IEnumerable"])
+        {
+            return **element == arguments[0]
+                || (self.is_reference_type(element)
+                    && self.is_implicitly_convertible(element, &arguments[0]));
         }
 
         // a single-dimensional array implements the generic collection interfaces

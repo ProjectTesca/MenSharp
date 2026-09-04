@@ -30,6 +30,40 @@ namespace System.Collections.Generic
 
 namespace MenSharp.Internal
 {
+    /// A `T[]` seen as a sequence: what the compiler wraps an array in when
+    /// one is passed where `IEnumerable<T>` is wanted. `foreach` over an
+    /// array never comes here — it walks the array by index.
+    public class ArrayEnumerable<T> : System.Collections.Generic.IEnumerable<T>
+    {
+        private readonly T[] items;
+
+        public ArrayEnumerable(T[] items) { this.items = items; }
+
+        public System.Collections.Generic.IEnumerator<T> GetEnumerator()
+        {
+            return new ArrayEnumerator<T>(items);
+        }
+    }
+
+    public class ArrayEnumerator<T> : System.Collections.Generic.IEnumerator<T>
+    {
+        private readonly T[] items;
+        private int index;
+        private T current;
+
+        public ArrayEnumerator(T[] items) { this.items = items; index = 0; }
+
+        public bool MoveNext()
+        {
+            if (items == null || index >= items.Length) { return false; }
+            current = items[index];
+            index++;
+            return true;
+        }
+
+        public T Current { get { return current; } }
+    }
+
     public static class Iterators
     {
         /// The iterator whose body is running its next step: the body reads

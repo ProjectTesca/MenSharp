@@ -681,11 +681,37 @@ above) work. It suspends the same way an `async` method does, so the same
 things hold: nothing is hoisted or rewritten, and any code that works in a
 method works in an iterator.
 
-`yield` inside a `try`/`catch`/`finally` block is not supported yet, and
-`IEnumerable<T>` here is the compiler's own interface with `GetEnumerator`
-only: an iterator's result can be enumerated and passed around, not
-`.ToList()`ed or LINQ-ed. (`foreach (Transform child in transform)` above
-needs the engine's non-generic enumerator, which Udon does not expose — walk
+`yield` inside a `try`/`catch`/`finally` block is not supported yet.
+
+## Sequences: IEnumerable&lt;T&gt;
+
+`IEnumerable<T>` is a real interface here, so one loop takes anything:
+
+```csharp
+private int Total(IEnumerable<int> numbers)
+{
+    int sum = 0;
+    foreach (int n in numbers) { sum += n; }
+    return sum;
+}
+
+Total(list);                       // List<int>
+Total(new int[] { 1, 2, 3 });      // an array
+Total(Squares(4));                 // an iterator
+Total(ages.Values);                // a Dictionary's values
+```
+
+`List<T>`, `Dictionary<K, V>` (and its `Keys` and `Values`), every iterator,
+arrays and `string` (as `IEnumerable<char>`) all satisfy it. Arrays and
+strings are wrapped when they cross into a sequence, exactly where the
+conversion happens; `foreach` over an array or a string directly still walks
+it by index with nothing allocated, and `foreach` over a `List<T>` still
+binds to its concrete enumerator, so the common loops cost no dispatch.
+
+It is the compiler's own `IEnumerable<T>`, with `GetEnumerator` on it and
+nothing else: a sequence can be enumerated and passed around, not `.ToList()`ed
+or LINQ-ed. (`foreach (Transform child in transform)` needs the engine's
+non-generic enumerator, which Udon does not expose — walk
 `transform.childCount`/`GetChild(i)` instead.)
 
 ## Delegates, lambdas and events

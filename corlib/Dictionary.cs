@@ -44,7 +44,7 @@ namespace System.Collections.Generic
         }
     }
 
-    public class Dictionary<TKey, TValue>
+    public class Dictionary<TKey, TValue> : IEnumerable<KeyValuePair<TKey, TValue>>
     {
         // buckets[b] holds (entry index + 1); 0 marks an empty bucket
         private int[] buckets;
@@ -263,6 +263,11 @@ namespace System.Collections.Generic
             return new DictionaryEnumerator<TKey, TValue>(hashes, keys, values, count);
         }
 
+        IEnumerator<KeyValuePair<TKey, TValue>> IEnumerable<KeyValuePair<TKey, TValue>>.GetEnumerator()
+        {
+            return new DictionaryEnumerator<TKey, TValue>(hashes, keys, values, count);
+        }
+
         // for the collections' enumerators: the live entry arrays
         public DictionaryKeyEnumerator<TKey, TValue> KeyEnumerator()
         {
@@ -275,7 +280,7 @@ namespace System.Collections.Generic
         }
     }
 
-    public class DictionaryEnumerator<TKey, TValue>
+    public class DictionaryEnumerator<TKey, TValue> : IEnumerator<KeyValuePair<TKey, TValue>>
     {
         private int[] hashes;
         private TKey[] keys;
@@ -311,7 +316,7 @@ namespace System.Collections.Generic
         public KeyValuePair<TKey, TValue> Current => current;
     }
 
-    public class DictionaryKeyCollection<TKey, TValue>
+    public class DictionaryKeyCollection<TKey, TValue> : IEnumerable<TKey>
     {
         private Dictionary<TKey, TValue> dictionary;
 
@@ -326,9 +331,14 @@ namespace System.Collections.Generic
         {
             return dictionary.KeyEnumerator();
         }
+
+        IEnumerator<TKey> IEnumerable<TKey>.GetEnumerator()
+        {
+            return dictionary.KeyEnumerator();
+        }
     }
 
-    public class DictionaryKeyEnumerator<TKey, TValue>
+    public class DictionaryKeyEnumerator<TKey, TValue> : IEnumerator<TKey>
     {
         private int[] hashes;
         private TKey[] keys;
@@ -362,7 +372,7 @@ namespace System.Collections.Generic
         public TKey Current => current;
     }
 
-    public class DictionaryValueCollection<TKey, TValue>
+    public class DictionaryValueCollection<TKey, TValue> : IEnumerable<TValue>
     {
         private Dictionary<TKey, TValue> dictionary;
 
@@ -377,9 +387,14 @@ namespace System.Collections.Generic
         {
             return dictionary.ValueEnumerator();
         }
+
+        IEnumerator<TValue> IEnumerable<TValue>.GetEnumerator()
+        {
+            return dictionary.ValueEnumerator();
+        }
     }
 
-    public class DictionaryValueEnumerator<TKey, TValue>
+    public class DictionaryValueEnumerator<TKey, TValue> : IEnumerator<TValue>
     {
         private int[] hashes;
         private TValue[] values;

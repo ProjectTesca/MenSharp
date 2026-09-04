@@ -6,16 +6,18 @@
 // storage is a plain T[] that grows by doubling, and every operation below
 // bottoms out in whitelisted externs (array ctor/Get/Set, Array.Copy).
 //
-// Deliberately minimal for now: no IEnumerable (foreach binds to the
-// enumerator pattern below, which needs no interface), no Sort/Contains
-// (both need comparers, which need interfaces on the object model). The
-// indexer and RemoveAt throw ArgumentOutOfRangeException as .NET's do.
+// `foreach` binds to the enumerator pattern below (no interface, no
+// dispatch); `IEnumerable<T>` is implemented explicitly beside it, exactly
+// as .NET's List<T> does, so a list can also be passed where a sequence is
+// wanted. Deliberately minimal otherwise: no Sort/Contains (both need
+// comparers, which need interfaces on the object model). The indexer and
+// RemoveAt throw ArgumentOutOfRangeException as .NET's do.
 
 using System;
 
 namespace System.Collections.Generic
 {
-    public class List<T>
+    public class List<T> : IEnumerable<T>
     {
         private T[] items;
         private int size;
@@ -167,9 +169,16 @@ namespace System.Collections.Generic
         {
             return new ListEnumerator<T>(items, size);
         }
+
+        // the same walk, reached through the interface: `foreach` never
+        // needs this one, so a plain loop over a list costs no dispatch
+        IEnumerator<T> IEnumerable<T>.GetEnumerator()
+        {
+            return new ListEnumerator<T>(items, size);
+        }
     }
 
-    public class ListEnumerator<T>
+    public class ListEnumerator<T> : IEnumerator<T>
     {
         private T[] items;
         private int count;
