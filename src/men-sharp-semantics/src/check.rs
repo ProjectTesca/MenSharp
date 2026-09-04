@@ -794,7 +794,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.error(SemanticErrorKind::UnsupportedExpression, target.span());
                     return;
                 };
-                let Some(types) = self.tuple_parts(value, elements.len(), span) else {
+                let node = EntityID::from(&primary.left);
+                let Some(types) = self.tuple_parts(value, elements.len(), node, span) else {
                     return;
                 };
                 for (element, element_type) in elements.iter().zip(types) {
@@ -847,7 +848,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             VariableDesignation::Discard(_) => {}
             VariableDesignation::Parenthesized { elements, span } => {
-                let Some(types) = self.tuple_parts(value, elements.len(), span) else {
+                let node = EntityID::from(designation);
+                let Some(types) = self.tuple_parts(value, elements.len(), node, span) else {
                     return;
                 };
                 for (element, element_type) in elements.iter().zip(types) {
@@ -858,12 +860,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let _ = span;
     }
 
-    /// The element types a value of this type comes apart into, when it has
-    /// as many as the target wants.
+    /// The parts a value of this type comes apart into: a tuple's elements,
+    /// or what its `Deconstruct` writes. The call, when there is one, is
+    /// recorded on `node` for the code generator.
     fn tuple_parts(
         &mut self,
         value: &Type,
         wanted: usize,
+        node: EntityID,
         span: &Range<usize>,
     ) -> Option<Vec<Type>> {
         if matches!(value, Type::Error) {
@@ -874,11 +878,63 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         {
             return Some(elements.iter().map(|element| element.element.clone()).collect());
         }
+        if let Some(parts) = self.deconstruct_parts(value, wanted, node) {
+            return Some(parts);
+        }
         let kind = SemanticErrorKind::TypeMismatch {
-            expected: format!("a tuple of {wanted} elements"),
+            expected: format!(
+                "a tuple of {wanted} elements, or a `Deconstruct` with {wanted} `out` parameters"
+            ),
             found: self.display(value),
         };
         self.error(kind, span.clone());
+        None
+    }
+
+    /// `void Deconstruct(out A a, out B b)` on the type, as C# §12.7 looks
+    /// for it: the one whose `out` parameters match how many parts the
+    /// target wants.
+    fn deconstruct_parts(
+        &mut self,
+        value: &Type,
+        wanted: usize,
+        node: EntityID,
+    ) -> Option<Vec<Type>> {
+        let candidates = self.system().members_named(value, "Deconstruct");
+        for candidate in candidates {
+            if candidate.is_static || candidate.kind != SymbolKind::Method {
+                continue;
+            }
+            let Some(MemberSignature::Function(signature)) = &candidate.signature else {
+                continue;
+            };
+            if signature.parameters.len() != wanted
+                || signature.return_type != Type::Void
+                || !signature
+                    .parameters
+                    .iter()
+                    .all(|parameter| parameter.passing == ParameterPassing::Out)
+            {
+                continue;
+            }
+            let parts: Vec<Type> = signature
+                .parameters
+                .iter()
+                .map(|parameter| parameter.parameter_type.clone())
+                .collect();
+            let call = ResolvedCall {
+                origin: candidate.origin.clone(),
+                is_static: false,
+                is_extension: false,
+                declaring_type: candidate.declaring_type.clone(),
+                signature: signature.clone(),
+                type_arguments: Vec::new(),
+                parameter_of_argument: (0..wanted).collect(),
+                params_expansion: None,
+            };
+            self.targets.insert(node, ResolvedTarget::Call(call));
+            return Some(parts);
+        }
         None
     }
 
@@ -2629,15 +2685,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.declare_local(name.value, target);
                 }
             }
-            // `(0, var y)`: a tuple taken apart, position by position
+            // `(0, var y)` and `Point(0, var y)`: taken apart, position by
+            // position — a tuple's elements, or what `Deconstruct` writes
             Pattern::Positional {
-                pattern_type: None,
+                pattern_type,
                 subpatterns,
                 property_subpatterns: [],
                 designation,
                 span,
             } => {
-                if let Some(types) = self.tuple_parts(matched, subpatterns.len(), span) {
+                let node = EntityID::from(pattern);
+                let matched = &match pattern_type {
+                    Some(pattern_type) => self.resolve_type(pattern_type),
+                    None => matched.clone(),
+                };
+                if let Some(types) = self.tuple_parts(matched, subpatterns.len(), node, span) {
                     for (subpattern, element) in subpatterns.iter().zip(&types) {
                         // `(x: 0, y: 1)`: a name picks the element instead
                         let element = match (&subpattern.name, matched) {
@@ -2662,8 +2724,49 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.declare_local(name.value, matched.clone());
                 }
             }
+            // `[1, 2, ..]`: an array matched by length and position
+            Pattern::List {
+                elements,
+                designation,
+                ..
+            } => {
+                let element = match matched {
+                    Type::Array { element, rank: 1 } => (**element).clone(),
+                    Type::Error => Type::Error,
+                    other => {
+                        let kind = SemanticErrorKind::NotIndexable {
+                            type_name: self.display(other),
+                        };
+                        self.error(kind, pattern.span());
+                        Type::Error
+                    }
+                };
+                let mut slices = 0;
+                for written in *elements {
+                    match written {
+                        // `..` and `.. var rest`: the rest is the same kind
+                        // of collection, and only one may appear
+                        Pattern::Slice { pattern, span, .. } => {
+                            slices += 1;
+                            if slices > 1 {
+                                self.error(
+                                    SemanticErrorKind::UnsupportedExpression,
+                                    span.clone(),
+                                );
+                            }
+                            if let Some(pattern) = pattern {
+                                self.check_pattern(pattern, matched);
+                            }
+                        }
+                        written => self.check_pattern(written, &element),
+                    }
+                }
+                if let Some(name) = designation {
+                    self.declare_local(name.value, matched.clone());
+                }
+            }
             // a positional pattern on anything else needs `Deconstruct`, and
-            // list/slice patterns need indexers
+            // a slice pattern belongs inside a list one
             _ => {
                 self.error(SemanticErrorKind::UnsupportedExpression, pattern.span());
             }

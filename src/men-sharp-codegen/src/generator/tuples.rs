@@ -34,7 +34,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     /// A fresh `object[]` holding the values.
-    fn new_tuple(&mut self, ctx: &mut Ctx<'ast>, values: &[DataId], span: Range<usize>) -> DataId {
+    fn new_tuple(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        values: &[DataId],
+        ty: &Type,
+        span: Range<usize>,
+    ) -> DataId {
         let object = self.temp("SystemObjectArray");
         let size = self.int_constant(values.len() as i32 + 1);
         self.call_extern(
@@ -43,6 +49,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             &[size, object],
             span.clone(),
         );
+        // slot 0 is the shape's type id, the same way a struct carries one
+        if let Some(type_id) = self.tuple_type_id(ty) {
+            let zero = self.int_constant(0);
+            let id = self.int_constant(type_id);
+            self.set_element(ctx, object, zero, id, span.clone());
+        }
         for (index, value) in values.iter().enumerate() {
             let at = self.tuple_slot(index);
             self.set_element(ctx, object, at, *value, span.clone());
@@ -70,7 +82,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             };
             values.push(value);
         }
-        Some(self.new_tuple(ctx, &values, span))
+        Some(self.new_tuple(ctx, &values, ty, span))
     }
 
     /// A copy of a tuple value: its own array, with nested tuples and
@@ -92,7 +104,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let value = self.get_element(ctx, source, at, &element_type, span.clone());
             values.push(self.owned_copy(ctx, value, &element_type, span.clone()));
         }
-        self.new_tuple(ctx, &values, span)
+        self.new_tuple(ctx, &values, ty, span)
     }
 
     /// A value about to be stored somewhere new: a value type that lives in
@@ -128,7 +140,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let element_type = self.substitute(&element.element, &ctx.key.bindings);
             values.push(self.default_value_in(ctx, &element_type, span.clone()));
         }
-        self.new_tuple(ctx, &values, span)
+        self.new_tuple(ctx, &values, ty, span)
     }
 
     /// `a == b` on tuples: every element compared with its own `==`, and
@@ -235,6 +247,114 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             span,
         );
         out
+    }
+
+    /// `x is (int, int)` at run time: an `object[]` of the right length
+    /// carrying this shape's type id.
+    pub(super) fn tuple_type_test(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        value: DataId,
+        ty: &Type,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        let elements = Self::tuple_elements(ty)?.len();
+        let type_id = self.tuple_type_id(ty)?;
+        let result = self.temp("SystemBoolean");
+        let no = self.bool_constant(false);
+        self.copy(no, result);
+        let end = self.fresh_label("tuple_test_end");
+        self.check_object_array_of(ctx, value, elements + 1, end, span.clone());
+        let zero = self.int_constant(0);
+        let int32 = self.corlib_type("Int32");
+        let their_id = self.get_element(ctx, value, zero, &int32, span.clone());
+        let wanted = self.int_constant(type_id);
+        let same = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
+            &[their_id, wanted, same],
+            span,
+        );
+        self.program.code.push(Op::Push(same));
+        self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
+        let yes = self.bool_constant(true);
+        self.copy(yes, result);
+        self.program.code.push(Op::Label(end));
+        Some(result)
+    }
+
+    /// The type id a tuple of this shape carries in slot 0 — what makes a
+    /// boxed one recognisable to the object dispatcher.
+    fn tuple_type_id(&mut self, ty: &Type) -> Option<i32> {
+        self.layout_of(ty).map(|layout| layout.type_id)
+    }
+
+    /// The body of a [`Role::TupleMember`]: the dispatcher lands here with
+    /// a tuple of one shape, and the elements do the rest.
+    pub(super) fn emit_tuple_member_body(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        member: ObjectMember,
+        shape: u32,
+    ) {
+        let Some(ty) = self.type_order.get(shape as usize).cloned() else {
+            return;
+        };
+        let this = ctx.this_slot.expect("a tuple member has a receiver");
+        let Some(result) = ctx.result else {
+            return;
+        };
+        let span = 0..0;
+        let value = match member {
+            ObjectMember::ToString => Some(self.tuple_to_string(ctx, this, &ty, span)),
+            ObjectMember::GetHashCode => self.tuple_hash_code(ctx, this, &ty, span),
+            ObjectMember::Equals => {
+                let other = self.functions[&ctx.key].parameters[1];
+                self.tuple_equals_object(ctx, this, other, &ty, span)
+            }
+        };
+        if let Some(value) = value {
+            self.copy(value, result);
+        }
+    }
+
+    /// `t.Equals(o)`: true when `o` is a tuple of the same shape — its type
+    /// id says so — and every element matches.
+    fn tuple_equals_object(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        value: DataId,
+        other: DataId,
+        ty: &Type,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        let elements = Self::tuple_elements(ty)?.len();
+        let result = self.temp("SystemBoolean");
+        let no = self.bool_constant(false);
+        self.copy(no, result);
+        let end = self.fresh_label("tuple_equals_end");
+        self.check_object_array_of(ctx, other, elements + 1, end, span.clone());
+        // the shapes have to agree, not just the lengths
+        if let Some(type_id) = self.tuple_type_id(ty) {
+            let zero = self.int_constant(0);
+            let int32 = self.corlib_type("Int32");
+            let their_id = self.get_element(ctx, other, zero, &int32, span.clone());
+            let wanted = self.int_constant(type_id);
+            let same = self.temp("SystemBoolean");
+            self.call_extern(
+                ctx,
+                "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
+                &[their_id, wanted, same],
+                span.clone(),
+            );
+            self.program.code.push(Op::Push(same));
+            self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
+        }
+        let equal = self.tuple_equality(ctx, false, (value, ty), (other, ty), span)?;
+        self.copy(equal, result);
+        self.program.code.push(Op::Label(end));
+        Some(result)
     }
 
     /// `Equals`, `GetHashCode` or `ToString` on a value known to be a tuple.
@@ -463,13 +583,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     self.error(ctx, "internal: not a deconstruction target", span);
                     return;
                 };
-                let Some(parts) = self.tuple_parts_of(ctx, ty, elements.len(), &span) else {
+                let node = EntityID::from(&primary.left);
+                let Some(parts) = self.deconstructed_parts(
+                    ctx,
+                    value,
+                    ty,
+                    node,
+                    elements.len(),
+                    span.clone(),
+                ) else {
                     return;
                 };
                 for (index, element) in elements.iter().enumerate() {
-                    let part = parts[index].clone();
-                    let at = self.tuple_slot(index);
-                    let read = self.get_element(ctx, value, at, &part, span.clone());
+                    let (read, part) = parts[index].clone();
                     match &element.value {
                         target @ (Expression::Declaration(_) | Expression::Primary(_))
                             if Self::is_deconstruction_target(target) =>
@@ -519,13 +645,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             VariableDesignation::Discard(_) => {}
             VariableDesignation::Parenthesized { elements, .. } => {
-                let Some(parts) = self.tuple_parts_of(ctx, ty, elements.len(), &span) else {
+                let node = EntityID::from(designation);
+                let Some(parts) = self.deconstructed_parts(
+                    ctx,
+                    value,
+                    ty,
+                    node,
+                    elements.len(),
+                    span.clone(),
+                ) else {
                     return;
                 };
                 for (index, element) in elements.iter().enumerate() {
-                    let part = parts[index].clone();
-                    let at = self.tuple_slot(index);
-                    let read = self.get_element(ctx, value, at, &part, span.clone());
+                    let (read, part) = parts[index].clone();
                     self.bind_designation(ctx, element, read, &part, declared, span.clone());
                 }
             }
@@ -550,6 +682,64 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .map(|element| self.substitute(&element.element, &ctx.key.bindings))
                 .collect(),
         )
+    }
+
+    /// The parts a value comes apart into: a tuple's elements read out of
+    /// its array, or the `out` parameters its `Deconstruct` writes — the
+    /// checker recorded which on `node`.
+    pub(super) fn deconstructed_parts(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        value: DataId,
+        ty: &Type,
+        node: EntityID,
+        wanted: usize,
+        span: Range<usize>,
+    ) -> Option<Vec<(DataId, Type)>> {
+        if Self::tuple_elements(ty).is_some() {
+            let parts = self.tuple_parts_of(ctx, ty, wanted, &span)?;
+            return Some(
+                parts
+                    .into_iter()
+                    .enumerate()
+                    .map(|(index, part)| {
+                        let at = self.tuple_slot(index);
+                        let read = self.get_element(ctx, value, at, &part, span.clone());
+                        (read, part)
+                    })
+                    .collect(),
+            );
+        }
+        let Some(ResolvedTarget::Call(call)) = self.bodies.targets.get(&node).cloned() else {
+            self.error(ctx, "internal: nothing to take this value apart", span);
+            return None;
+        };
+        let MemberOrigin::Source(symbol) = call.origin else {
+            self.error(
+                ctx,
+                "a `Deconstruct` from the engine cannot be called on Udon yet: write the                  elements out by hand",
+                span,
+            );
+            return None;
+        };
+        let receiver = Some((value, self.substitute(ty, &ctx.key.bindings)));
+        let (this, key) = self.source_call_target(ctx, &call, symbol, &receiver, false, span.clone())?;
+        // one temp per `out` parameter: passed in, written home after
+        let mut parts: Vec<(DataId, Type)> = Vec::with_capacity(wanted);
+        for parameter in &call.signature.parameters {
+            let part = self.substitute(&parameter.parameter_type, &ctx.key.bindings);
+            let slot = self.temp_for(&part);
+            parts.push((slot, part));
+        }
+        let values: Vec<DataId> = parts.iter().map(|(slot, _)| *slot).collect();
+        let by_ref: Vec<(usize, Place)> = parts
+            .iter()
+            .enumerate()
+            .map(|(index, (slot, part))| (index, Place::Slot(*slot, part.clone())))
+            .collect();
+        // `Deconstruct` returns void, so there is no result to take
+        self.call_function(ctx, &key, this, &values, &by_ref, span);
+        Some(parts)
     }
 
     /// The shapes the checker reads as a deconstruction, not a place.

@@ -69,6 +69,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // the receiver is an ordinary `object` parameter, not `this`: it
             // may be anything, including a boxed int no `object[]` slot
             // could hold
+            // the receiver is the tuple itself, so only `Equals` takes an
+            // argument — the object it is compared with
+            (Role::TupleMember(member, _), _) => match member {
+                ObjectMember::Equals => (
+                    vec![self.corlib_type("Object")],
+                    self.corlib_type("Boolean"),
+                ),
+                ObjectMember::GetHashCode => (Vec::new(), self.corlib_type("Int32")),
+                ObjectMember::ToString => (Vec::new(), self.corlib_type("String")),
+            },
             (Role::ObjectDispatcher(member), _) => {
                 let object = self.corlib_type("Object");
                 match member {
@@ -109,7 +119,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return false;
         }
         match key.role {
-            Role::DefaultConstructor | Role::StructEquals | Role::StructHashCode => true,
+            Role::DefaultConstructor
+            | Role::StructEquals
+            | Role::StructHashCode
+            | Role::TupleMember(_, _) => true,
             Role::TypeTest | Role::ObjectDispatcher(_) | Role::UnhandledException => false,
             _ => !self.declarations.table.symbol(key.symbol).is_static,
         }
@@ -141,6 +154,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::SetterDispatcher => name.push_str("_set_dispatch"),
             Role::TypeTest => name.push_str("_is"),
             Role::UnhandledException => name.push_str("_unhandled_exception"),
+            Role::TupleMember(member, shape) => {
+                name = format!("fn_tuple{shape}_{}", ObjectMember::name(member));
+            }
             Role::ObjectDispatcher(member) => {
                 name.push_str("_object_");
                 name.push_str(member.name());
@@ -309,6 +325,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if let Some(chain) = chain {
                     self.emit_constructor_chain(&mut ctx, &chain, &[], 0..0);
                 }
+            }
+            (Role::TupleMember(member, shape), _) => {
+                self.emit_tuple_member_body(&mut ctx, member, shape);
             }
             (Role::StructEquals, _) => self.emit_struct_equals(&mut ctx),
             (Role::StructHashCode, _) => self.emit_struct_hash_code(&mut ctx),

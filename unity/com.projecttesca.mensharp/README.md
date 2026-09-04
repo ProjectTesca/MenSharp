@@ -653,13 +653,50 @@ seen[(1, 2)] = "cell";                // hashed and compared element-wise
 Debug.Log($"{p}");                    // (2, 3), as C# prints it
 ```
 
+A class or struct of your own comes apart the same way once it offers a
+`Deconstruct`, and so do the pairs a `Dictionary` yields:
+
+```csharp
+public void Deconstruct(out int x, out int y) { x = X; y = Y; }
+
+var (x, y) = point;
+if (point is (0, var height)) { ... }
+switch (shape) { case Point(var a, var b): ...; }
+foreach (var (name, age) in ages) { ... }
+```
+
+List patterns match an array by shape:
+
+```csharp
+string kind = values switch
+{
+    [] => "empty",
+    [var only] => "one",
+    [1, 2] => "one two",
+    [var first, .., var last] => "ends",
+    _ => "other",
+};
+if (numbers is [1, ..]) { ... }
+if (numbers is [var head, .. var rest]) { ... }   // `rest` is a copy
+```
+
+**Unity's own C# version comes first.** Every script under `Assets` is
+compiled twice: by M# into an Udon program, and by Unity into the proxy
+component the inspector shows. Unity 2022.3 fixes that second compile at
+**C# 9**, so a file using anything newer fails there — and a file Unity
+cannot compile has no class, which is why the editor then says *"Can't add
+script component … the script class cannot be found"*. Of what M# supports,
+only **list and slice patterns** (C# 11) are past that line. Adding an
+`Assets/csc.rsp` holding `-langversion:latest` is the usual way to lift it,
+at the cost of a compile Unity does not officially support.
+
 A tuple is an `object[]` on the VM, with a value type's copy-on-assignment:
-`var copy = p; copy.x = 9;` leaves `p` alone. It has no type at run time, so
-`Equals`, `GetHashCode` and `ToString` are compiled element by element
-wherever the tuple's type is known — which is everywhere except a tuple that
-has been put in an `object`, where it compares by reference and prints as
-`System.Object[]`. Unity does not serialize tuples, so a tuple field is never
-an inspector variable.
+`var copy = p; copy.x = 9;` leaves `p` alone. It carries the id of its shape
+the way a struct does, so it stays itself inside an `object`: printing,
+`Equals` and `GetHashCode` still work element by element, and casting one
+back (`((int, int))boxed`) checks the shape and throws
+`InvalidCastException` when it does not fit. Unity does not serialize
+tuples, so a tuple field is never an inspector variable.
 
 ## Nullable value types
 
@@ -840,7 +877,6 @@ points — each copy is an allocation. Structs without their own
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- positional (`is (0, var y)`, `Deconstruct`) and list patterns;
 - conversion operators (`implicit operator` / `explicit operator`);
 - static abstract/virtual interface members (C# 11 generic math);
 - static constructors of generic classes;
@@ -851,9 +887,6 @@ wrong thing:
   type does the same job. `static` local functions that use a variable of the
   method around them (CS8421), and local functions that use a variable written
   below them (CS0841), are errors here as they are in C#;
-- `Deconstruct` on a type of your own — `var (x, y) = point;` and
-  `point is (0, var y)` work on tuples, not yet on a class or struct that
-  offers a `Deconstruct` method;
 - multi-dimensional arrays (`int[,]`) — Udon has no type for one; a jagged
   array (`int[][]`) does the same job and works;
 - `Index` and `Range` as values (`Index i = ^1;`): `^i` and `i..j` work where

@@ -7541,3 +7541,216 @@ fn a_tuple_prints_and_hashes_like_its_elements() {
     assert_eq!(string_of(&emulator, "Log"), "(1, a)(2, (3, 4))there");
     assert_eq!(int_of(&emulator, "Result"), 1111);
 }
+
+#[test]
+fn deconstruct_takes_a_type_of_your_own_apart() {
+    let source = r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Point
+            {
+                public int X;
+                public int Y;
+                public Point(int x, int y) { X = x; Y = y; }
+                public void Deconstruct(out int x, out int y) { x = X; y = Y; }
+            }
+            public struct Size
+            {
+                public int Width;
+                public int Height;
+                public Size(int width, int height) { Width = width; Height = height; }
+                public void Deconstruct(out int width, out int height)
+                {
+                    width = Width;
+                    height = Height;
+                }
+            }
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static void Main()
+                {
+                    var point = new Point(3, 4);
+                    var (x, y) = point;
+                    Result += x * y;                          // 12
+                    int px;
+                    int py;
+                    (px, py) = point;
+                    Result += px + py;                        // 19
+
+                    var (width, height) = new Size(2, 5);
+                    Result += width * height;                 // 29
+
+                    // positional patterns on a type of your own
+                    if (point is (3, var found)) Result += found;      // 33
+                    object shape = point;
+                    switch (shape)
+                    {
+                        case Point(0, 0): Log += "origin"; break;
+                        case Point(var a, var b): Log += "p" + (a + b); break;
+                        default: Log += "?"; break;
+                    }                                          // p7
+                    string kind = new Size(1, 1) switch
+                    {
+                        (1, 1) => "unit",
+                        _ => "other",
+                    };
+                    Log += kind;                               // p7unit
+
+                    // and the payoff: walking a dictionary
+                    var ages = new Dictionary<string, int>();
+                    ages["ann"] = 30;
+                    foreach (var (name, age) in ages)
+                    {
+                        Log += name;
+                        Result += age;                         // 63
+                    }
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "p7unitann");
+    assert_eq!(int_of(&emulator, "Result"), 63);
+}
+
+#[test]
+fn list_patterns_match_an_array_by_shape() {
+    let source = r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static string Describe(int[] values)
+                {
+                    return values switch
+                    {
+                        [] => "empty",
+                        [var only] => "one:" + only,
+                        [1, 2] => "onetwo",
+                        [var first, .., var last] => "ends:" + first + last,
+                        _ => "other",
+                    };
+                }
+                public static void Main()
+                {
+                    Log += Describe(new int[] { });            // empty
+                    Log += Describe(new int[] { 9 });          // one:9
+                    Log += Describe(new int[] { 1, 2 });       // onetwo
+                    Log += Describe(new int[] { 3, 4, 5 });    // ends:35
+                    Log += Describe(new int[] { 7, 8 });       // ends:78
+
+                    int[] numbers = { 1, 2, 3, 4 };
+                    if (numbers is [1, ..]) Result += 1;                 // 1
+                    if (numbers is [.., 4]) Result += 10;                // 11
+                    if (numbers is [_, _, _, _]) Result += 100;          // 111
+                    if (numbers is not [1, 2, 3]) Result += 1000;        // 1111
+                    if (numbers is [var head, .. var rest])
+                    {
+                        Result += head;                                  // 1112
+                        Result += rest.Length;                           // 1115
+                        Result += rest[0];                               // 1117
+                    }
+                    if (numbers is [1, .. var middle, 4]) Result += middle.Length;  // 1119
+                    string[] words = { "a", "b" };
+                    if (words is ["a", var second]) Log += second;       // ...b
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "emptyone:9onetwoends:35ends:78b");
+    assert_eq!(int_of(&emulator, "Result"), 1119);
+}
+
+#[test]
+fn a_tuple_keeps_itself_inside_an_object() {
+    let source = r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static int Result;
+                public static string Show(object value) { return value.ToString(); }
+                public static bool Same(object left, object right) { return left.Equals(right); }
+                public static void Main()
+                {
+                    object boxed = (1, "a");
+                    Log += Show(boxed);                       // (1, a)
+                    Log += Show((2, 3));                      // (2, 3)
+                    if (Same((1, 2), (1, 2))) Result += 1;
+                    if (!Same((1, 2), (1, 3))) Result += 10;
+                    if (!Same((1, 2), (1, 2, 3))) Result += 100;
+                    if (!Same((1, 2), "no")) Result += 1000;
+
+                    object[] mixed = new object[] { (4, 5), "text" };
+                    Log += Show(mixed[0]);                    // (4, 5)
+                    Log += Show(mixed[1]);                    // text
+
+                    // a boxed tuple hashes like its elements
+                    object one = (7, 8);
+                    object two = (7, 8);
+                    if (one.GetHashCode() == two.GetHashCode()) Result += 10000;
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "(1, a)(2, 3)(4, 5)text");
+    assert_eq!(int_of(&emulator, "Result"), 11111);
+}
+
+#[test]
+fn casting_back_to_a_tuple_is_checked() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static void Main()
+                {
+                    object boxed = (1, 2);
+                    (int, int) back = ((int, int))boxed;
+                    Log += back.Item1 + "/" + back.Item2;          // 1/2
+                    object wrong = "text";
+                    try
+                    {
+                        (int, int) bad = ((int, int))wrong;
+                        Log += "|" + bad.Item1;
+                    }
+                    catch (InvalidCastException)
+                    {
+                        Log += "|caught";
+                    }
+                    object other = (1, 2, 3);
+                    try
+                    {
+                        (int, int) mismatched = ((int, int))other;
+                        Log += "|" + mismatched.Item1;
+                    }
+                    catch (InvalidCastException)
+                    {
+                        Log += "|shape";
+                    }
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "1/2|caught|shape");
+}

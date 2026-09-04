@@ -2359,15 +2359,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return Some(out);
         }
-        let out = self.allocate_array(ctx, receiver_type, taken, span.clone());
+        Some(self.copy_range(ctx, receiver, receiver_type, start, taken, span))
+    }
+
+    /// `taken` elements from `start`, in an array of their own.
+    pub(super) fn copy_range(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        array: DataId,
+        array_type: &Type,
+        start: DataId,
+        taken: DataId,
+        span: Range<usize>,
+    ) -> DataId {
+        let out = self.allocate_array(ctx, array_type, taken, span.clone());
         let zero = self.int_constant(0);
         self.call_extern(
             ctx,
             "SystemArray.__Copy__SystemArray_SystemInt32_SystemArray_SystemInt32_SystemInt32__SystemVoid",
-            &[receiver, start, out, zero, taken],
+            &[array, start, out, zero, taken],
             span,
         );
-        Some(out)
+        out
     }
 
     /// `text[index]` — Udon exposes no `String.get_Chars`, so the character

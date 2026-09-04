@@ -44,6 +44,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// Types whose values carry a type id: classes, structs and interfaces
     /// of the user's — except behaviours, which are program references.
     pub(super) fn has_type_id(&self, ty: &Type) -> bool {
+        // a tuple carries one too, so a boxed one is still itself
+        if matches!(ty, Type::Tuple(_)) {
+            return true;
+        }
         let Type::Named {
             target: TypeTarget::Source(symbol),
             ..
@@ -286,6 +290,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> Option<DataId> {
         let to = self.substitute(to, &ctx.key.bindings);
+        if matches!(to, Type::Tuple(_)) {
+            return self.tuple_type_test(ctx, value, &to, span);
+        }
         if self.has_type_id(&to) {
             let test = self.type_test_for(ctx, &to)?;
             return self.call_function(ctx, &test, None, &[value], &[], span);
@@ -392,7 +399,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if !external_downcast && (!self.has_type_id(&to) || self.is_subtype(from, &to)) {
             return source;
         }
-        let test = if external_downcast {
+        // a tuple's test is written where it is used: there is no subtype
+        // chain to walk, only the shape's own id
+        let inline_tuple = matches!(to, Type::Tuple(_));
+        let test = if external_downcast || inline_tuple {
             None
         } else {
             match self.type_test_for(ctx, &to) {
@@ -412,6 +422,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.jump_if(is_null, done);
         let ok = match test {
             Some(test) => self.call_function(ctx, &test, None, &[source], &[], span.clone()),
+            None if inline_tuple => self.tuple_type_test(ctx, source, &to, span.clone()),
             None => {
                 let Some(wanted) = self.external_type_constant(ctx, &to, &span) else {
                     self.program.code.push(Op::Label(done));
@@ -480,6 +491,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ty: &Type,
         name: &str,
     ) -> Option<FunctionKey> {
+        // a tuple has no members of its own: its three come out of its
+        // elements, one function per shape
+        if matches!(ty, Type::Tuple(_)) {
+            let member = ObjectMember::of(name)?;
+            let type_id = self.layout_of(ty)?.type_id;
+            return Some(FunctionKey {
+                symbol: self.entry?,
+                role: Role::TupleMember(member, type_id as u32),
+                bindings: Vec::new(),
+            });
+        }
         let system = men_sharp_semantics::TypeSystem {
             declarations: self.declarations,
             signatures: self.signatures,

@@ -35,6 +35,13 @@ namespace System.Collections.Generic
 
         public TKey Key => key;
         public TValue Value => value;
+
+        /// `foreach (var (key, value) in dictionary)`.
+        public void Deconstruct(out TKey key, out TValue value)
+        {
+            key = this.key;
+            value = this.value;
+        }
     }
 
     public class Dictionary<TKey, TValue>

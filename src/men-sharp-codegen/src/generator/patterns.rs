@@ -229,37 +229,175 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.program.code.push(Op::Label(end));
                 Some(result)
             }
-            // `(0, var y)`: the elements, position by position. The checker
-            // has already refused every shape but a tuple's.
+            // `(0, var y)` and `Point(0, var y)`: the parts, position by
+            // position — a tuple's elements, or what `Deconstruct` writes
             Pattern::Positional {
-                pattern_type: None,
+                pattern_type,
                 subpatterns,
-                property_subpatterns,
+                property_subpatterns: [],
                 designation,
                 ..
-            } if property_subpatterns.is_empty()
-                && Self::tuple_elements(&value_type).is_some() =>
-            {
+            } => {
                 let result = self.temp("SystemBoolean");
                 let no = self.bool_constant(false);
                 self.copy(no, result);
                 let end = self.fresh_label("positional_pattern_end");
 
-                let elements = Self::tuple_elements(&value_type)
+                // `Point(...)`: the value has to be one first
+                let (subject, subject_type) = match pattern_type {
+                    Some(pattern_type) => {
+                        let to = self
+                            .bodies
+                            .resolved_types
+                            .get(&EntityID::from(pattern_type))
+                            .cloned()
+                            .map(|ty| self.substitute(&ty, &ctx.key.bindings))?;
+                        let test = self.lower_runtime_type_test(ctx, value, &to, span.clone())?;
+                        self.program.code.push(Op::Push(test));
+                        self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
+                        let typed = self.temp_for(&to);
+                        self.copy(value, typed);
+                        (typed, to)
+                    }
+                    None => (value, value_type.clone()),
+                };
+
+                let elements = Self::tuple_elements(&subject_type)
                     .map(<[men_sharp_semantics::TupleElement]>::to_vec)
                     .unwrap_or_default();
+                let parts = self.deconstructed_parts(
+                    ctx,
+                    subject,
+                    &subject_type,
+                    EntityID::from(pattern),
+                    subpatterns.len(),
+                    span.clone(),
+                )?;
                 for (position, subpattern) in subpatterns.iter().enumerate() {
-                    // `(x: 0, y: 1)`: a name picks the element by name
+                    // `(x: 0, y: 1)`: a name picks the part by name
                     let index = match &subpattern.name {
                         Some(name) => {
                             men_sharp_semantics::tuple_element_index(&elements, name.value)?
                         }
                         None => position,
                     };
-                    let element = self.substitute(&elements.get(index)?.element, &ctx.key.bindings);
-                    let at = self.tuple_slot(index);
-                    let read = self.get_element(ctx, value, at, &element, span.clone());
-                    let matched = self.lower_pattern(ctx, read, &element, &subpattern.pattern)?;
+                    let (read, part) = parts.get(index)?.clone();
+                    let matched = self.lower_pattern(ctx, read, &part, &subpattern.pattern)?;
+                    self.program.code.push(Op::Push(matched));
+                    self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
+                }
+
+                if let Some(name) = designation {
+                    let local = self.temp_for(&subject_type);
+                    self.copy(subject, local);
+                    self.bind_pattern_variable(ctx, name.value, local, subject_type);
+                }
+                let yes = self.bool_constant(true);
+                self.copy(yes, result);
+                self.program.code.push(Op::Label(end));
+                Some(result)
+            }
+            // `[1, 2, ..]`, `[first, .. var rest, last]`: an array matched
+            // by length, then position by position from both ends
+            Pattern::List {
+                elements,
+                designation,
+                ..
+            } => {
+                let Type::Array { element, rank: 1 } = &value_type else {
+                    self.error(ctx, "a list pattern matches an array", span);
+                    return None;
+                };
+                let element_type = self.substitute(element, &ctx.key.bindings);
+                let result = self.temp("SystemBoolean");
+                let no = self.bool_constant(false);
+                self.copy(no, result);
+                let end = self.fresh_label("list_pattern_end");
+
+                self.check_not_null(ctx, value, span.clone());
+                let length = self.array_length(ctx, value, &value_type, span.clone());
+                let slice = elements
+                    .iter()
+                    .position(|element| matches!(element, Pattern::Slice { .. }));
+                let fixed = self.int_constant(elements.len() as i32 - i32::from(slice.is_some()));
+                let condition = self.temp("SystemBoolean");
+                let comparison = if slice.is_some() {
+                    "op_GreaterThanOrEqual"
+                } else {
+                    "op_Equality"
+                };
+                self.call_extern(
+                    ctx,
+                    &format!("SystemInt32.__{comparison}__SystemInt32_SystemInt32__SystemBoolean"),
+                    &[length, fixed, condition],
+                    span.clone(),
+                );
+                self.program.code.push(Op::Push(condition));
+                self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
+
+                let int32 = self.corlib_type("Int32");
+                let after = slice.map_or(0, |at| elements.len() - at - 1);
+                for (position, written) in elements.iter().enumerate() {
+                    // before the slice the index counts from the front,
+                    // after it from the back
+                    let index = match slice {
+                        Some(at) if position == at => {
+                            let Pattern::Slice { pattern, .. } = written else {
+                                continue;
+                            };
+                            let Some(rest) = pattern else {
+                                continue;
+                            };
+                            let start = self.int_constant(at as i32);
+                            let tail = self.int_constant(after as i32);
+                            let taken = self.emit_binary_operator(
+                                ctx,
+                                BinaryOperator::Subtract,
+                                (length, &int32),
+                                (tail, &int32),
+                                &int32,
+                                span.clone(),
+                                None,
+                            )?;
+                            let taken = self.emit_binary_operator(
+                                ctx,
+                                BinaryOperator::Subtract,
+                                (taken, &int32),
+                                (start, &int32),
+                                &int32,
+                                span.clone(),
+                                None,
+                            )?;
+                            let part =
+                                self.copy_range(ctx, value, &value_type, start, taken, span.clone());
+                            let matched = self.lower_pattern(ctx, part, &value_type, rest)?;
+                            self.program.code.push(Op::Push(matched));
+                            self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
+                            continue;
+                        }
+                        Some(at) if position > at => {
+                            let back = self.int_constant((elements.len() - position) as i32);
+                            self.emit_binary_operator(
+                                ctx,
+                                BinaryOperator::Subtract,
+                                (length, &int32),
+                                (back, &int32),
+                                &int32,
+                                span.clone(),
+                                None,
+                            )?
+                        }
+                        _ => self.int_constant(position as i32),
+                    };
+                    let read = self.array_get(
+                        ctx,
+                        value,
+                        index,
+                        &value_type,
+                        &element_type,
+                        span.clone(),
+                    );
+                    let matched = self.lower_pattern(ctx, read, &element_type, written)?;
                     self.program.code.push(Op::Push(matched));
                     self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
                 }
@@ -274,7 +412,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.program.code.push(Op::Label(end));
                 Some(result)
             }
-            Pattern::Positional { .. } | Pattern::List { .. } | Pattern::Slice { .. } => {
+            Pattern::Positional { .. } | Pattern::Slice { .. } => {
                 self.error(
                     ctx,
                     "a positional pattern works on a tuple; on a type of your own it would need                      a `Deconstruct` method, which the Udon backend does not call yet. List and                      slice patterns are not supported either",

@@ -191,6 +191,11 @@ enum Role {
     /// The one function every uncaught exception ends in: reports it and
     /// halts the behaviour. `symbol` is the root namespace.
     UnhandledException,
+    /// `Equals`, `GetHashCode` or `ToString` of one tuple shape, built
+    /// element by element: a tuple has no members to call, so the object
+    /// dispatcher jumps here when it meets one. `symbol` is the entry
+    /// class; the id is the shape's type id (see `type_order`).
+    TupleMember(ObjectMember, u32),
     /// The stub behind `Equals`, `GetHashCode` or `ToString` on a receiver
     /// whose runtime type is open (`object`, a non-sealed class, an
     /// interface): finds the user's override by type id, else falls back to
@@ -2142,6 +2147,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     fn layout_of(&mut self, ty: &Type) -> Option<Layout> {
         if let Some(layout) = self.layouts.get(ty) {
             return Some(layout.clone());
+        }
+        // a tuple carries a type id like a struct, so a boxed one is still
+        // recognisable — it just has no members, only positions
+        if let Type::Tuple(elements) = ty {
+            let type_id = self.type_order.len() as i32;
+            let layout = Layout {
+                type_id,
+                size: elements.len() + 1,
+                slots: HashMap::new(),
+            };
+            self.layouts.insert(ty.clone(), layout.clone());
+            self.type_order.push(ty.clone());
+            return Some(layout);
         }
         let Type::Named {
             target: TypeTarget::Source(symbol),
