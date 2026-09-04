@@ -528,6 +528,29 @@ program synchronously calls back into the *same* method that is still
 running. UdonSharp silently corrupts the method's variables in that case;
 MenSharp logs an error naming the method and aborts the event instead.
 
+## Strings
+
+String interpolation carries format specifiers and alignment, as in C#:
+
+```csharp
+Debug.Log($"{elapsed:0.0}s | {count:D5} | {total:N0} | [{name,-12}] [{score,4}]");
+```
+
+The format goes to the value's own `ToString(string)`, which Udon exposes for
+the numeric types and most engine structs (`Vector3`, `Quaternion`, `Color`,
+`Rect`, ...), so the standard forms (`F2`, `N0`, `D5`, `X`, `P1`) and custom
+patterns (`0.0`, `#.##`, `000`) all mean what .NET says they mean. A type
+without that overload — a class of your own, `string`, `bool` — is a compile
+error naming the type, rather than a string that quietly ignores the format.
+The alignment pads with `PadLeft`/`PadRight`: positive is right-aligned,
+negative left-aligned, and it has to be a number written out (a named
+constant is not accepted there yet).
+
+One caveat that is .NET's, not MenSharp's: the culture-dependent forms
+(`N`, `C`, `P`) render differently per culture — invariant culture writes
+`50.0 %` where `en-US` writes `50.0%`. Use them for display, not for text
+another program parses.
+
 ## async/await
 
 `async`/`await` work as in C#, with `Task` and `Task<T>` — and they are how

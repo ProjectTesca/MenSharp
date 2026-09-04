@@ -7841,6 +7841,37 @@ fn an_async_method_suspends_and_resumes_where_it_left_off() {
     assert!(!emulator.has_pending_events());
 }
 
+/// The code generator's error messages for `source`, with the program dump
+/// alongside — for what is rejected there rather than by the checker.
+fn codegen_errors(source: &str) -> Option<(String, Vec<String>)> {
+    let dir = dotnet_shared_dir()?;
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(declarations.errors, vec![], "declaration errors");
+    assert_eq!(signatures.errors, vec![], "signature errors");
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Program"],
+    );
+    let messages = output
+        .errors
+        .iter()
+        .map(|error| error.message.clone())
+        .collect();
+    Some((output.program.dump(), messages))
+}
+
 /// The body-check errors of `source` compiled with the mini-corlib.
 fn body_errors(source: &str) -> Option<Vec<men_sharp_semantics::SemanticError>> {
     let dir = dotnet_shared_dir()?;
@@ -8580,5 +8611,80 @@ fn iterator_misuse_is_rejected_by_the_checker() {
             .iter()
             .any(|error| matches!(error.kind, SemanticErrorKind::YieldInsideTry)),
         "{kinds:#?}"
+    );
+}
+
+#[test]
+fn interpolation_applies_its_format_and_alignment() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static void Main()
+                {
+                    float elapsed = 1.234567f;
+                    int count = 42;
+                    long big = 1234567L;
+                    // format specifiers
+                    Log += $"{elapsed:0.0}|{elapsed:F3}|{elapsed:0}|{count:D5}|{count:X}|{big:N0}|";
+                    // ... and one that keeps its optional places away
+                    Log += $"{elapsed:#.##}|{count}|";
+                    // alignment, right and left, and both at once
+                    Log += $"[{count,5}][{count,-5}][{elapsed,8:0.00}]";
+                    string missing = null;
+                    Log += $"[{missing,3}]";
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "1.2|1.235|1|00042|2A|1,234,567|1.23|42|[   42][42   ][    1.23][   ]"
+    );
+}
+
+#[test]
+fn a_format_a_type_cannot_apply_is_an_error() {
+    let Some((program, messages)) = codegen_errors(
+        r#"
+        namespace Game
+        {
+            public class Point { public int X; }
+            public class Program
+            {
+                public static string Log = "";
+                public static void Main()
+                {
+                    Point p = new Point();
+                    Log = $"{p:F2}";
+                    int width = 4;
+                    Log += $"{p.X,width}";
+                }
+            }
+        }
+        "#,
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("ToString(string)") && message.contains("Game.Point")),
+        "{messages:#?}\n{program}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("alignment") && message.contains("constant")),
+        "{messages:#?}\n{program}"
     );
 }

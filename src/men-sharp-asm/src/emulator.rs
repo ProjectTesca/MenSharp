@@ -1085,6 +1085,46 @@ impl Emulator {
                 }
                 Ok(())
             }
+            // ---- formatting ----
+            sig if sig.ends_with(".__ToString__SystemString__SystemString") => {
+                let args = self.pop_arguments(3)?;
+                let format = self.heap[args[1]].as_str()?;
+                let (value, integral) = match &self.heap[args[0]] {
+                    Value::Int32(value) => (f64::from(*value), true),
+                    Value::Int64(value) => (*value as f64, true),
+                    Value::UInt32(value) => (f64::from(*value), true),
+                    Value::Single(value) => (f64::from(*value), false),
+                    Value::Double(value) => (*value, false),
+                    other => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "the emulator cannot format {other:?} — run it on the real VM"
+                        )));
+                    }
+                };
+                let text = format_number(value, integral, &format).ok_or_else(|| {
+                    EmulatorError::TypeError(format!(
+                        "the emulator does not implement the format `{format}` — it would \
+                         have to guess, so it refuses; check it on the real VM"
+                    ))
+                })?;
+                self.heap[args[2]] = Value::Str(Rc::from(text.as_str()));
+                Ok(())
+            }
+            "SystemString.__PadLeft__SystemInt32__SystemString"
+            | "SystemString.__PadRight__SystemInt32__SystemString" => {
+                let args = self.pop_arguments(3)?;
+                let text = self.string_or_empty(args[0]);
+                let width = self.heap[args[1]].as_i32()?.max(0) as usize;
+                let padding = width.saturating_sub(text.chars().count());
+                let spaces: String = " ".repeat(padding);
+                let padded = if signature.contains("PadLeft") {
+                    spaces + &text
+                } else {
+                    text + &spaces
+                };
+                self.heap[args[2]] = Value::Str(Rc::from(padded.as_str()));
+                Ok(())
+            }
             // ---- Debug ----
             "UnityEngineDebug.__LogError__SystemObject__SystemVoid" => {
                 let args = self.pop_arguments(1)?;
@@ -1107,6 +1147,126 @@ impl Emulator {
             Value::Null => String::new(),
             value => value.display(),
         }
+    }
+}
+
+/// A .NET numeric format string, as far as the emulator implements it:
+/// the standard `F`/`N`/`D`/`X` forms and custom `0`/`#`/`.`/`,` patterns.
+/// `None` for anything else — the emulator says so rather than guessing,
+/// since the real VM has the whole of .NET's formatting.
+fn format_number(value: f64, integral: bool, format: &str) -> Option<String> {
+    if format.is_empty() {
+        return None;
+    }
+    let first = format.chars().next()?;
+    if first.is_ascii_alphabetic() {
+        let digits = &format[first.len_utf8()..];
+        let precision: Option<usize> = if digits.is_empty() {
+            None
+        } else {
+            Some(digits.parse().ok()?)
+        };
+        return match first {
+            'F' | 'f' => Some(fixed_point(value, precision.unwrap_or(2), false)),
+            'N' | 'n' => Some(fixed_point(value, precision.unwrap_or(2), true)),
+            'D' | 'd' if integral => {
+                let width = precision.unwrap_or(1);
+                let sign = if value < 0.0 { "-" } else { "" };
+                Some(format!(
+                    "{sign}{:0>width$}",
+                    (value.abs() as i64).to_string()
+                ))
+            }
+            'X' | 'x' if integral => {
+                let width = precision.unwrap_or(1);
+                let magnitude = value as i64;
+                let hex = if first == 'X' {
+                    format!("{magnitude:X}")
+                } else {
+                    format!("{magnitude:x}")
+                };
+                Some(format!("{hex:0>width$}"))
+            }
+            _ => None,
+        };
+    }
+
+    // a custom pattern: `0.00`, `#.##`, `000`, `#,##0.0`
+    if !format.chars().all(|c| matches!(c, '0' | '#' | '.' | ',')) {
+        return None;
+    }
+    let (integer_pattern, fraction_pattern) = match format.split_once('.') {
+        Some((left, right)) => (left, right),
+        None => (format, ""),
+    };
+    if fraction_pattern.contains('.') {
+        return None;
+    }
+    let decimals = fraction_pattern
+        .chars()
+        .filter(|c| matches!(c, '0' | '#'))
+        .count();
+    let grouped = integer_pattern.contains(',');
+    let rendered = fixed_point(value.abs(), decimals, grouped);
+    let (mut whole, mut fraction) = match rendered.split_once('.') {
+        Some((left, right)) => (left.to_string(), right.to_string()),
+        None => (rendered, String::new()),
+    };
+    // trailing `#` positions vanish when they are zero
+    let optional = fraction_pattern
+        .chars()
+        .rev()
+        .take_while(|c| *c == '#')
+        .count();
+    for _ in 0..optional {
+        if fraction.ends_with('0') {
+            fraction.pop();
+        }
+    }
+    // `0` positions in the integer pattern are a minimum width
+    let required = integer_pattern.chars().filter(|c| *c == '0').count();
+    let digits = whole.chars().filter(char::is_ascii_digit).count();
+    if digits < required {
+        let zeros: String = "0".repeat(required - digits);
+        whole = zeros + &whole;
+    }
+    let mut out = String::new();
+    if value < 0.0 && (whole.chars().any(|c| c != '0') || fraction.chars().any(|c| c != '0')) {
+        out.push('-');
+    }
+    out.push_str(&whole);
+    if !fraction.is_empty() {
+        out.push('.');
+        out.push_str(&fraction);
+    }
+    Some(out)
+}
+
+/// `value` with exactly `decimals` places, optionally with `,` every three
+/// digits of the integer part.
+fn fixed_point(value: f64, decimals: usize, grouped: bool) -> String {
+    let text = format!("{value:.decimals$}");
+    if !grouped {
+        return text;
+    }
+    let (sign, rest) = match text.strip_prefix('-') {
+        Some(rest) => ("-", rest),
+        None => ("", text.as_str()),
+    };
+    let (whole, fraction) = match rest.split_once('.') {
+        Some((left, right)) => (left, Some(right)),
+        None => (rest, None),
+    };
+    let mut grouped_whole = String::new();
+    for (index, digit) in whole.chars().enumerate() {
+        if index > 0 && (whole.len() - index) % 3 == 0 {
+            grouped_whole.push(',');
+        }
+        grouped_whole.push(digit);
+    }
+    match fraction {
+        Some(fraction) => format!("{sign}{grouped_whole}.{fraction}"),
+        None => format!("{sign}{grouped_whole}"),
     }
 }
 

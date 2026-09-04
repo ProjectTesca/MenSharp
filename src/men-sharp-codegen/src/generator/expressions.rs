@@ -1316,6 +1316,122 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         out
     }
 
+    /// [`Generator::stringify`] with an interpolation hole's format
+    /// specifier applied: `T.ToString(format)`, which Udon exposes for the
+    /// numeric types and most engine structs. A type without one is an
+    /// error rather than a string that quietly ignores the format.
+    pub(super) fn stringify_as(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        slot: DataId,
+        ty: &Type,
+        format: Option<&str>,
+        span: Range<usize>,
+    ) -> DataId {
+        let Some(format) = format else {
+            return self.stringify(ctx, slot, ty, span);
+        };
+        let ty = &self.substitute(ty, &ctx.key.bindings);
+        if let Some(name) = self.extern_type_name(ty) {
+            let signature = format!("{name}.__ToString__SystemString__SystemString");
+            if self.nodes.has_signature(&signature) {
+                let text = self.string_constant(format);
+                let out = self.temp("SystemString");
+                self.call_extern(ctx, &signature, &[slot, text, out], span);
+                return out;
+            }
+        }
+        self.error(
+            ctx,
+            format!(
+                "`{{...:{format}}}`: Udon has no `ToString(string)` for `{}`, so this format \
+                 has nothing to apply it. Format a number and build the text yourself \
+                 (`\"{{\" + value.ToString(\"{format}\") + \"}}\"` works where the type has one)",
+                self.display_type(ty)
+            ),
+            span.clone(),
+        );
+        self.stringify(ctx, slot, ty, span)
+    }
+
+    /// `{x,8}` / `{x,-8}`: the text padded to that field width, right- and
+    /// left-aligned as C# reads the sign.
+    fn align_to_width(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        text: DataId,
+        hole: &'ast men_sharp_parser::ast::InterpolationHole<'ast, 'ast>,
+    ) -> DataId {
+        let Some(alignment) = &hole.alignment else {
+            return text;
+        };
+        let span = alignment.span();
+        let Some(width) = Self::constant_integer(alignment) else {
+            self.error(
+                ctx,
+                "the alignment of an interpolated hole must be a whole number written out, as \
+                 in `{value,-8}`: a named constant or an expression is not accepted here yet",
+                span,
+            );
+            return text;
+        };
+        if width == 0 {
+            return text;
+        }
+        // a null string pads to spaces in C#; `PadLeft` on null would throw
+        let value = self.temp("SystemString");
+        self.copy(text, value);
+        let null = self.constant("SystemObject", "null", HeapInit::Null);
+        let is_null = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean",
+            &[value, null, is_null],
+            span.clone(),
+        );
+        let filled = self.fresh_label("pad_value");
+        self.program.code.push(Op::Push(is_null));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(filled)));
+        let empty = self.string_constant("");
+        self.copy(empty, value);
+        self.program.code.push(Op::Label(filled));
+
+        let signature = if width > 0 {
+            "SystemString.__PadLeft__SystemInt32__SystemString"
+        } else {
+            "SystemString.__PadRight__SystemInt32__SystemString"
+        };
+        let count = self.int_constant(width.abs());
+        let out = self.temp("SystemString");
+        self.call_extern(ctx, signature, &[value, count, out], span);
+        out
+    }
+
+    /// An integer literal, with an optional sign: what C# accepts as an
+    /// interpolation alignment (a constant expression).
+    fn constant_integer(expression: &Expression<'ast, 'ast>) -> Option<i32> {
+        match expression {
+            Expression::Unary(unary) => {
+                let inner = unary.operand.as_ref().ok()?;
+                let value = Self::constant_integer(inner)?;
+                match unary.operator.value {
+                    UnaryOperator::Minus => Some(-value),
+                    UnaryOperator::Plus => Some(value),
+                    _ => None,
+                }
+            }
+            Expression::Primary(primary) if primary.chain.is_empty() => {
+                let PrimaryLeft::Literal(LiteralExpression::Integer(text)) = &primary.left else {
+                    return None;
+                };
+                text.value.replace('_', "").parse().ok()
+            }
+            _ => None,
+        }
+    }
+
     /// `!x`, `-x`, `+x` on an evaluated operand: the user's operator when
     /// the checker bound one, else the type's own extern.
     #[allow(clippy::too_many_arguments)]
@@ -4501,12 +4617,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                                 continue;
                             };
                             let ty = self.type_of(ctx, expression);
-                            match self.lower_expression(ctx, expression) {
-                                Some(slot) => {
-                                    self.stringify(ctx, slot, &ty, interpolated.span.clone())
+                            let Some(slot) = self.lower_expression(ctx, expression) else {
+                                continue;
+                            };
+                            // `{x:F2}` — the format is text, not code, and
+                            // escapes in it were written in the literal
+                            let format = hole.format.as_ref().map(|text| {
+                                if interpolated.is_verbatim || interpolated.is_raw {
+                                    text.value.to_string()
+                                } else {
+                                    unescape(text.value)
                                 }
-                                None => continue,
-                            }
+                            });
+                            let text = self.stringify_as(
+                                ctx,
+                                slot,
+                                &ty,
+                                format.as_deref(),
+                                hole.span.clone(),
+                            );
+                            // `{x,-8}` — padded to the field width
+                            self.align_to_width(ctx, text, hole)
                         }
                     };
                     current = Some(match current {
