@@ -326,8 +326,14 @@ pub(crate) fn parse_statement<'input, 'allocator>(
         return Some(Statement::LocalFunction(local_function));
     }
 
-    if let Some(declaration) =
-        parse_local_variable_declaration(lexer, errors, allocator, None, true)
+    // `await x;` is an await expression, not a variable `x` of a type named
+    // `await` — inside an async body that name is a keyword, and no type
+    // is called that anywhere else
+    let is_await = lexer.kind() == TokenKind::Await
+        && crate::parser::expression::can_start_expression(lexer.lookahead(1));
+    if !is_await
+        && let Some(declaration) =
+            parse_local_variable_declaration(lexer, errors, allocator, None, true)
     {
         return Some(Statement::LocalVariable(declaration));
     }

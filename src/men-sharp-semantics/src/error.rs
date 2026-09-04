@@ -152,6 +152,28 @@ pub enum SemanticErrorKind {
     LocalUsedBeforeDeclaration {
         name: String,
     },
+    /// `await` outside an `async` method, lambda or local function
+    /// (CS4032/CS4033).
+    AwaitOutsideAsync,
+    /// `await x` where `x` has no `GetAwaiter()` giving an awaiter with
+    /// `IsCompleted`, `OnCompleted(Action)` and `GetResult()` (CS1061).
+    NotAwaitable {
+        type_name: String,
+    },
+    /// An `async` method, lambda or local function whose return type is
+    /// neither `void`, `Task` nor `Task<T>` (CS1983).
+    AsyncReturnType {
+        type_name: String,
+    },
+    /// `ref`/`out`/`in` parameters on an `async` method (CS1988).
+    AsyncByRefParameter,
+    /// `yield` in a lambda, or in a member whose return type is not
+    /// `IEnumerable<T>`/`IEnumerator<T>` (CS1621/CS1624).
+    YieldOutsideIterator,
+    /// `yield` inside a `try`, `catch` or `finally` block (CS1626/CS1631/CS1625).
+    YieldInsideTry,
+    /// `return value;` in an iterator (CS1622).
+    ReturnInIterator,
     /// A construct the checker does not handle yet. Temporary scaffolding: each of
     /// these becomes a real implementation or a precise "unsupported on Udon"
     /// diagnostic as the checker grows.

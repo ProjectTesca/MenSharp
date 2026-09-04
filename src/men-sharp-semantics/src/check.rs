@@ -33,13 +33,12 @@ use std::ops::Range;
 use crate::FileId;
 
 use men_sharp_parser::ast::{
-    Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator, Block,
-    ConstructorInitializerKind, EntityID, Expression, ForInitializer, FunctionBody,
+    Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, AwaitExpression, BinaryOperator,
+    Block, ConstructorInitializerKind, EntityID, Expression, ForInitializer, FunctionBody,
     InitializerValue, InterpolationPart, LambdaBody, LambdaExpression, LambdaParameters,
     LiteralExpression, LocalVariableDeclaration, MemberSeparator, MethodDeclaration, Modifier,
-    Pattern, PrimaryExpression,
-    PrimaryLeft, PrimaryRight, Statement, SwitchLabel, UnaryOperator, UsingResource,
-    VariableDesignation,
+    Pattern, PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, SwitchLabel, UnaryOperator,
+    UsingResource, VariableDesignation,
 };
 
 use crate::symbol::SyntaxRef;
@@ -53,9 +52,7 @@ use crate::{
     merge::Declarations,
     resolve::{NamespaceScope, Resolution, Resolver, Signatures, apply_suffixes},
     symbol::{Accessibility, SymbolId, SymbolKind},
-    types::{
-        FunctionSignature, MemberSignature, ParameterPassing, TupleElement, Type, TypeTarget,
-    },
+    types::{FunctionSignature, MemberSignature, ParameterPassing, TupleElement, Type, TypeTarget},
 };
 
 /// The output of body checking for one file (or, merged, a compilation).
@@ -100,6 +97,12 @@ pub struct BodyCheck {
     /// Every local function of the compilation, by its declaration node:
     /// what a call to it binds to. See [`crate::MemberOrigin::LocalFunction`].
     pub local_functions: HashMap<EntityID, LocalFunctionSignature>,
+    /// For every `await`: the awaiter-pattern members it bound to. Keyed
+    /// by the await node.
+    pub awaits: HashMap<EntityID, ResolvedAwait>,
+    /// Every method and local function whose body contains `yield`, by its
+    /// declaration node.
+    pub iterators: HashSet<EntityID>,
 }
 
 /// A local function's declaration, as a call site sees it.
@@ -123,6 +126,8 @@ impl BodyCheck {
         self.captured_locals.extend(other.captured_locals);
         self.capture_types.extend(other.capture_types);
         self.local_functions.extend(other.local_functions);
+        self.awaits.extend(other.awaits);
+        self.iterators.extend(other.iterators);
     }
 }
 
@@ -238,6 +243,21 @@ pub struct ResolvedMember {
     pub member_type: Type,
 }
 
+/// What one `await e` calls, in order: `e.GetAwaiter()`, then on the
+/// awaiter `IsCompleted`, `OnCompleted(Action)` when it has to wait, and
+/// `GetResult()` once it is done — C#'s awaiter pattern, bound to source
+/// members (the mini-corlib's `Task`, or an awaitable of the user's).
+#[derive(Debug, Clone)]
+pub struct ResolvedAwait {
+    pub get_awaiter: ResolvedCall,
+    pub awaiter_type: Type,
+    pub is_completed: ResolvedMember,
+    pub on_completed: ResolvedCall,
+    pub get_result: ResolvedCall,
+    /// What the `await` expression is: `GetResult()`'s return type.
+    pub result_type: Type,
+}
+
 /// A resolved invocation: the chosen overload with everything substituted.
 #[derive(Debug, Clone)]
 pub struct ResolvedCall {
@@ -304,6 +324,13 @@ pub fn check_file(
         enumerations: HashMap::new(),
         constructor_chains: HashMap::new(),
         catch_depth: 0,
+        in_async: false,
+        awaits: HashMap::new(),
+        iterator_element: None,
+        yield_seen: false,
+        value_return_seen: false,
+        try_depth: 0,
+        iterators: HashSet::new(),
     };
 
     // rebuild the same file scope signature resolution used
@@ -353,6 +380,8 @@ pub fn check_file(
             .collect(),
         capture_types: checker.capture_types,
         local_functions: checker.local_functions,
+        awaits: checker.awaits,
+        iterators: checker.iterators,
     }
 }
 
@@ -529,6 +558,20 @@ struct Checker<'a, 'ast> {
     /// How many `catch` blocks enclose the current position — where a bare
     /// `throw;` is legal.
     catch_depth: usize,
+    /// Inside an `async` body: `await` is allowed, and `return_type` is
+    /// what `return` hands the task (`Task<T>` → `T`).
+    in_async: bool,
+    /// See [`BodyCheck::awaits`].
+    awaits: HashMap<EntityID, ResolvedAwait>,
+    /// Inside a body whose return type allows `yield`: the element type.
+    iterator_element: Option<Type>,
+    /// Whether the current body has met a `yield` / a `return value;`.
+    yield_seen: bool,
+    value_return_seen: bool,
+    /// How many `try`/`catch`/`finally` blocks enclose the current statement.
+    try_depth: usize,
+    /// See [`BodyCheck::iterators`].
+    iterators: HashSet<EntityID>,
 }
 
 impl<'a, 'ast> Checker<'a, 'ast> {
@@ -786,7 +829,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             // `var (a, b)`, `int x` — a variable written where a value goes
             Expression::Declaration(declaration) => {
                 let declared = self.resolve_type(&declaration.variable_type);
-                self.bind_designation(&declaration.designation, &declared, value, &declaration.span);
+                self.bind_designation(
+                    &declaration.designation,
+                    &declared,
+                    value,
+                    &declaration.span,
+                );
             }
             // `(x, y)` — each element assigns or declares on its own
             Expression::Primary(primary) => {
@@ -876,7 +924,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         if let Type::Tuple(elements) = value
             && elements.len() == wanted
         {
-            return Some(elements.iter().map(|element| element.element.clone()).collect());
+            return Some(
+                elements
+                    .iter()
+                    .map(|element| element.element.clone())
+                    .collect(),
+            );
         }
         if let Some(parts) = self.deconstruct_parts(value, wanted, node) {
             return Some(parts);
@@ -991,12 +1044,6 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     function.name.span.clone(),
                 );
                 None
-            } else if Self::has_modifier(function, Modifier::Async) {
-                self.error(
-                    SemanticErrorKind::UnsupportedStatement,
-                    function.span.clone(),
-                );
-                None
             } else {
                 let signature = self.local_function_signature(function);
                 self.local_functions.insert(
@@ -1013,9 +1060,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 self.static_local_functions.insert(id);
             }
             if let Some(scope) = self.locals.last_mut() {
-                scope
-                    .functions
-                    .insert(function.name.value, LocalFunctionEntry { node: function, signature });
+                scope.functions.insert(
+                    function.name.value,
+                    LocalFunctionEntry {
+                        node: function,
+                        signature,
+                    },
+                );
             }
         }
         declared
@@ -1057,7 +1108,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     passing,
                     is_params,
                     parameter_type,
-                    name: parameter.name.as_ref().ok().map(|name| name.value.to_string()),
+                    name: parameter
+                        .name
+                        .as_ref()
+                        .ok()
+                        .map(|name| name.value.to_string()),
                     default_value: parameter
                         .default_value
                         .as_ref()
@@ -1078,10 +1133,20 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let Some(declaration) = self.local_functions.get(&id).cloned() else {
             return;
         };
-        let signature = declaration.signature;
+        let is_async = Self::has_modifier(function, Modifier::Async);
+        let signature = if is_async {
+            match self.async_signature(&declaration.signature, function.return_type.span.clone()) {
+                Some(signature) => signature,
+                None => return,
+            }
+        } else {
+            declaration.signature
+        };
 
         let saved_return = std::mem::replace(&mut self.return_type, signature.return_type.clone());
         let saved_static = self.static_context;
+        let saved_async = std::mem::replace(&mut self.in_async, is_async);
+        let iterator = self.enter_iterator_body(&signature.return_type);
         // a `return` in here is this function's, not that of a lambda whose
         // return type is being probed around it
         let saved_probe = self.lambda_probe_returns.take();
@@ -1105,7 +1170,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         self.locals.pop();
         self.lambda_stack.pop();
         self.lambda_probe_returns = saved_probe;
+        self.leave_iterator_body(iterator, id, function.name.span.clone());
         self.static_context = saved_static;
+        self.in_async = saved_async;
         self.return_type = saved_return;
     }
 
@@ -1163,7 +1230,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 .map(|(caller, callees)| (*caller, callees.iter().copied().collect()))
                 .collect();
             for (caller, callees) in edges {
-                let own = self.declared_names.get(&caller).cloned().unwrap_or_default();
+                let own = self
+                    .declared_names
+                    .get(&caller)
+                    .cloned()
+                    .unwrap_or_default();
                 let mut wanted: BTreeSet<String> = BTreeSet::new();
                 for callee in callees {
                     if let Some(names) = self.captures.get(&callee) {
@@ -1903,7 +1974,23 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     .map(|list| list.parameters.iter().collect::<Vec<_>>())
                     .unwrap_or_default();
                 self.check_parameter_defaults(&names, &function, node.is_static);
-                self.check_function_body(&method.body, &function, &names, node.is_static);
+                let is_async = Self::has_modifier(method, Modifier::Async);
+                let body_signature = if is_async {
+                    self.async_signature(&function, method.return_type.span.clone())
+                } else {
+                    Some(function.clone())
+                };
+                if let Some(body_signature) = body_signature {
+                    let saved_async = std::mem::replace(&mut self.in_async, is_async);
+                    let iterator = self.enter_iterator_body(&function.return_type);
+                    self.check_function_body(&method.body, &body_signature, &names, node.is_static);
+                    self.leave_iterator_body(
+                        iterator,
+                        EntityID::from(method),
+                        method.name.span.clone(),
+                    );
+                    self.in_async = saved_async;
+                }
                 self.type_stack.pop();
             }
             SyntaxRef::Constructor(constructor) => {
@@ -2323,6 +2410,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
             Statement::Try(statement) => {
+                self.try_depth += 1;
                 if let Ok(block) = &statement.block {
                     self.check_block(block);
                 }
@@ -2352,6 +2440,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 {
                     self.check_block(block);
                 }
+                self.try_depth -= 1;
             }
             Statement::Using(statement) => {
                 self.locals.push(Scope::default());
@@ -2410,6 +2499,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     return;
                 }
                 let expected = self.return_type.clone();
+                if statement.value.is_some() {
+                    self.value_return_seen = true;
+                }
                 match (&statement.value, expected == Type::Void) {
                     (Some(value), false) => {
                         let literal = Self::is_integer_literal(value);
@@ -2446,17 +2538,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                 }
             },
-            Statement::Yield(statement) => {
-                if let Some(value) = &statement.value {
-                    self.check_expression(value);
-                }
-                // iterators do not exist on Udon; a precise diagnostic comes with
-                // the capability check phase
-                self.error(
-                    SemanticErrorKind::UnsupportedStatement,
-                    statement.span.clone(),
-                );
-            }
+            Statement::Yield(statement) => self.check_yield(statement),
             Statement::LocalFunction(function) => {
                 // where it stands among the block's variables: it may use
                 // the ones above it, and its body is checked knowing that
@@ -2749,10 +2831,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         Pattern::Slice { pattern, span, .. } => {
                             slices += 1;
                             if slices > 1 {
-                                self.error(
-                                    SemanticErrorKind::UnsupportedExpression,
-                                    span.clone(),
-                                );
+                                self.error(SemanticErrorKind::UnsupportedExpression, span.clone());
                             }
                             if let Some(pattern) = pattern {
                                 self.check_pattern(pattern, matched);
@@ -3040,16 +3119,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 );
                 Type::Error
             }
-            Expression::Await(await_expression) => {
-                if let Ok(value) = &await_expression.value {
-                    self.check_expression(value);
-                }
-                self.error(
-                    SemanticErrorKind::UnsupportedExpression,
-                    await_expression.span.clone(),
-                );
-                Type::Error
-            }
+            Expression::Await(await_expression) => self.check_await(await_expression),
             Expression::Range(range) => {
                 if let Some(start) = &range.start {
                     self.check_expression(start);
@@ -3353,7 +3423,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let ty = Type::Tuple(elements);
                 // the tuple is built where it is written, so the code
                 // generator reads its type from this very node
-                self.expression_types.insert(EntityID::from(left), ty.clone());
+                self.expression_types
+                    .insert(EntityID::from(left), ty.clone());
                 Meaning::Value(ty)
             }
             PrimaryLeft::New(new_expression) => self.check_new(new_expression, expected),
@@ -4715,6 +4786,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let error_mark = self.resolver.out.errors.len();
         let saved_probe = self.lambda_probe_returns.take();
         let saved_return = std::mem::replace(&mut self.return_type, Type::Infer);
+        let is_async = Self::is_async_lambda(lambda);
+        let saved_async = std::mem::replace(&mut self.in_async, is_async);
+        let iterator = self.enter_iterator_body(&Type::Void);
 
         let mut scope = Scope::default();
         for (name, parameter) in Self::lambda_parameter_names(lambda)
@@ -4750,10 +4824,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         self.locals.pop();
         self.lambda_stack.pop();
+        self.leave_iterator_body(iterator, EntityID::from(lambda), lambda.span.clone());
         self.return_type = saved_return;
+        self.in_async = saved_async;
         self.lambda_probe_returns = saved_probe;
         self.resolver.out.errors.truncate(error_mark);
-        result
+        // an async lambda returns a task of what its body returns
+        match result {
+            Some(returned) if is_async => self.task_type(&returned),
+            other => other,
+        }
     }
 
     /// Checks a lambda against a concrete delegate signature, for real.
@@ -4770,6 +4850,17 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             );
             return;
         }
+        // an async lambda's body returns what the delegate's task carries
+        let is_async = Self::is_async_lambda(lambda);
+        let unwrapped = if is_async {
+            match self.async_signature(delegate, lambda.span.clone()) {
+                Some(signature) => signature,
+                None => return,
+            }
+        } else {
+            delegate.clone()
+        };
+        let delegate = &unwrapped;
 
         let mut scope = Scope::default();
         for (name, parameter) in names.iter().zip(&delegate.parameters) {
@@ -4803,6 +4894,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         self.note_declared(&scope);
         self.locals.push(scope);
         let saved_return = std::mem::replace(&mut self.return_type, delegate.return_type.clone());
+        let saved_async = std::mem::replace(&mut self.in_async, is_async);
+        let iterator = self.enter_iterator_body(&Type::Void);
 
         match &lambda.body {
             Ok(LambdaBody::Expression(expression)) => {
@@ -4820,8 +4913,322 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
 
         self.return_type = saved_return;
+        self.in_async = saved_async;
+        self.leave_iterator_body(iterator, EntityID::from(lambda), lambda.span.clone());
         self.locals.pop();
         self.lambda_stack.pop();
+    }
+
+    // -------------------------------------------------------- iterators
+
+    /// Opens a body: `yield` is allowed inside when `declared` is
+    /// `IEnumerable<T>`/`IEnumerator<T>`. Returns what to hand back to
+    /// `leave_iterator_body`.
+    fn enter_iterator_body(&mut self, declared: &Type) -> (Option<Type>, bool, bool) {
+        let element = self.iterator_element_of(declared);
+        (
+            std::mem::replace(&mut self.iterator_element, element),
+            std::mem::replace(&mut self.yield_seen, false),
+            std::mem::replace(&mut self.value_return_seen, false),
+        )
+    }
+
+    /// Closes a body: records it as an iterator when it yielded, and
+    /// rejects `return value;` alongside `yield` (CS1622).
+    fn leave_iterator_body(
+        &mut self,
+        saved: (Option<Type>, bool, bool),
+        node: EntityID,
+        span: Range<usize>,
+    ) {
+        if self.yield_seen {
+            self.iterators.insert(node);
+            if self.value_return_seen {
+                self.error(SemanticErrorKind::ReturnInIterator, span);
+            }
+        }
+        self.iterator_element = saved.0;
+        self.yield_seen = saved.1;
+        self.value_return_seen = saved.2;
+    }
+
+    /// `T` when `declared` is the mini-corlib's `IEnumerable<T>` or
+    /// `IEnumerator<T>` — the types an iterator may be declared with.
+    fn iterator_element_of(&self, declared: &Type) -> Option<Type> {
+        let Type::Named {
+            target: TypeTarget::Source(symbol),
+            arguments,
+        } = declared
+        else {
+            return None;
+        };
+        let path = self.symbol_path_of(*symbol);
+        let is_enumerable = path == ["System", "Collections", "Generic", "IEnumerable"]
+            || path == ["System", "Collections", "Generic", "IEnumerator"];
+        if is_enumerable && arguments.len() == 1 {
+            Some(arguments[0].clone())
+        } else {
+            None
+        }
+    }
+
+    fn check_yield(&mut self, statement: &'ast men_sharp_parser::ast::YieldStatement<'ast, 'ast>) {
+        use men_sharp_parser::ast::YieldKind;
+        let Some(element) = self.iterator_element.clone() else {
+            if let Some(value) = &statement.value {
+                self.check_expression(value);
+            }
+            self.error(
+                SemanticErrorKind::YieldOutsideIterator,
+                statement.yield_keyword.clone(),
+            );
+            return;
+        };
+        if self.try_depth > 0 {
+            self.error(
+                SemanticErrorKind::YieldInsideTry,
+                statement.yield_keyword.clone(),
+            );
+        }
+        self.yield_seen = true;
+        match (statement.kind.value, &statement.value) {
+            (YieldKind::Return, Some(value)) => {
+                let literal = Self::is_integer_literal(value);
+                let ty = self.check_expression_expecting(value, Some(&element));
+                self.require_convertible(&ty, &element, literal, value.span());
+            }
+            (YieldKind::Return, None) => {
+                self.error(
+                    SemanticErrorKind::ReturnValueMismatch,
+                    statement.span.clone(),
+                );
+            }
+            (YieldKind::Break, Some(value)) => {
+                self.check_expression(value);
+                self.error(
+                    SemanticErrorKind::ReturnValueMismatch,
+                    statement.span.clone(),
+                );
+            }
+            (YieldKind::Break, None) => {}
+        }
+    }
+
+    // ------------------------------------------------------------ async
+
+    fn is_async_lambda(lambda: &LambdaExpression<'ast, 'ast>) -> bool {
+        lambda
+            .modifiers
+            .iter()
+            .any(|modifier| modifier.value == Modifier::Async)
+    }
+
+    /// The declared symbol's namespace-and-name path, root first.
+    fn symbol_path_of(&self, symbol: SymbolId) -> Vec<&'ast str> {
+        let table = &self.resolver.declarations.table;
+        let mut parts = Vec::new();
+        let mut current = Some(symbol);
+        while let Some(id) = current {
+            let entry = table.symbol(id);
+            if !entry.name.is_empty() {
+                parts.push(entry.name);
+            }
+            current = entry.parent;
+        }
+        parts.reverse();
+        parts
+    }
+
+    /// Is this the mini-corlib's `System.Threading.Tasks.Task` (either arity)?
+    fn is_task_symbol(&self, symbol: SymbolId) -> bool {
+        self.symbol_path_of(symbol) == ["System", "Threading", "Tasks", "Task"]
+    }
+
+    /// `Task` for `void`, `Task<T>` otherwise.
+    fn task_type(&self, inner: &Type) -> Option<Type> {
+        let table = &self.resolver.declarations.table;
+        let mut current = table.root();
+        for segment in ["System", "Threading", "Tasks"] {
+            current = *table.symbol(current).members_named(segment).first()?;
+        }
+        let wanted = usize::from(*inner != Type::Void);
+        let symbol = table
+            .symbol(current)
+            .members_named("Task")
+            .iter()
+            .copied()
+            .find(|candidate| table.symbol(*candidate).type_parameters.len() == wanted)?;
+        Some(Type::Named {
+            target: TypeTarget::Source(symbol),
+            arguments: if wanted == 1 {
+                vec![inner.clone()]
+            } else {
+                Vec::new()
+            },
+        })
+    }
+
+    /// What `return` in an `async` body with this declared return type
+    /// hands its task: `void` and `Task` → nothing, `Task<T>` → `T`.
+    fn async_inner(&self, declared: &Type) -> Option<Type> {
+        match declared {
+            Type::Void | Type::Error => Some(Type::Void),
+            Type::Named {
+                target: TypeTarget::Source(symbol),
+                arguments,
+            } if self.is_task_symbol(*symbol) => {
+                Some(arguments.first().cloned().unwrap_or(Type::Void))
+            }
+            _ => None,
+        }
+    }
+
+    /// The signature an `async` body is checked against: the declared one
+    /// with its return type unwrapped — or `None`, with the errors
+    /// reported, when the declaration is not a valid async one.
+    fn async_signature(
+        &mut self,
+        declared: &FunctionSignature,
+        span: Range<usize>,
+    ) -> Option<FunctionSignature> {
+        let Some(inner) = self.async_inner(&declared.return_type) else {
+            let kind = SemanticErrorKind::AsyncReturnType {
+                type_name: self.display(&declared.return_type),
+            };
+            self.error(kind, span);
+            return None;
+        };
+        if declared
+            .parameters
+            .iter()
+            .any(|parameter| parameter.passing != ParameterPassing::Value)
+        {
+            self.error(SemanticErrorKind::AsyncByRefParameter, span);
+            return None;
+        }
+        Some(FunctionSignature {
+            return_type: inner,
+            parameters: declared.parameters.clone(),
+        })
+    }
+
+    /// `await e`: `e` must be awaitable by the awaiter pattern, and the
+    /// expression is what `GetResult()` returns.
+    fn check_await(&mut self, node: &'ast AwaitExpression<'ast, 'ast>) -> Type {
+        let Ok(value) = &node.value else {
+            return Type::Error;
+        };
+        let ty = self.check_expression(value);
+        if !self.in_async {
+            self.error(
+                SemanticErrorKind::AwaitOutsideAsync,
+                node.await_keyword.clone(),
+            );
+            return Type::Error;
+        }
+        if matches!(ty, Type::Error) {
+            return Type::Error;
+        }
+        match self.resolve_await(&ty) {
+            Some(resolved) => {
+                let result = resolved.result_type.clone();
+                self.awaits.insert(EntityID::from(node), resolved);
+                result
+            }
+            None => {
+                let kind = SemanticErrorKind::NotAwaitable {
+                    type_name: self.display(&ty),
+                };
+                self.error(kind, value.span());
+                Type::Error
+            }
+        }
+    }
+
+    /// The awaiter pattern on `awaitable`, bound to source members: an
+    /// instance `GetAwaiter()` whose result has a `bool IsCompleted`,
+    /// `void OnCompleted(Action)` and `GetResult()`.
+    fn resolve_await(&self, awaitable: &Type) -> Option<ResolvedAwait> {
+        let system = self.system();
+        let get_awaiter = self.instance_method(&system, awaitable, "GetAwaiter", 0)?;
+        let awaiter_type = get_awaiter.signature.return_type.clone();
+        let boolean = self.corlib("Boolean");
+        let is_completed = system
+            .members_named(&awaiter_type, "IsCompleted")
+            .into_iter()
+            .find_map(|candidate| {
+                if candidate.is_static
+                    || candidate.kind != SymbolKind::Property
+                    || !matches!(candidate.origin, MemberOrigin::Source(_))
+                {
+                    return None;
+                }
+                match &candidate.signature {
+                    Some(MemberSignature::Property(ty)) if *ty == boolean => Some(ResolvedMember {
+                        origin: candidate.origin.clone(),
+                        kind: candidate.kind,
+                        is_static: false,
+                        declaring_type: candidate.declaring_type.clone(),
+                        member_type: ty.clone(),
+                    }),
+                    _ => None,
+                }
+            })?;
+        let on_completed = self.instance_method(&system, &awaiter_type, "OnCompleted", 1)?;
+        if on_completed.signature.parameters[0].parameter_type != self.corlib("Action")
+            || on_completed.signature.return_type != Type::Void
+        {
+            return None;
+        }
+        let get_result = self.instance_method(&system, &awaiter_type, "GetResult", 0)?;
+        let result_type = get_result.signature.return_type.clone();
+        Some(ResolvedAwait {
+            get_awaiter,
+            awaiter_type,
+            is_completed,
+            on_completed,
+            get_result,
+            result_type,
+        })
+    }
+
+    /// A non-generic instance method of a source type, by name and
+    /// parameter count, as a resolved call with its arguments in order.
+    fn instance_method(
+        &self,
+        system: &TypeSystem<'_, 'ast>,
+        receiver: &Type,
+        name: &str,
+        arity: usize,
+    ) -> Option<ResolvedCall> {
+        system
+            .members_named(receiver, name)
+            .into_iter()
+            .find_map(|candidate| {
+                if candidate.is_static
+                    || candidate.kind != SymbolKind::Method
+                    || candidate.arity != 0
+                    || !matches!(candidate.origin, MemberOrigin::Source(_))
+                {
+                    return None;
+                }
+                let Some(MemberSignature::Function(signature)) = &candidate.signature else {
+                    return None;
+                };
+                if signature.parameters.len() != arity {
+                    return None;
+                }
+                Some(ResolvedCall {
+                    origin: candidate.origin.clone(),
+                    is_static: false,
+                    is_extension: false,
+                    declaring_type: candidate.declaring_type.clone(),
+                    signature: signature.clone(),
+                    type_arguments: Vec::new(),
+                    parameter_of_argument: (0..arity).collect(),
+                    params_expansion: None,
+                })
+            })
     }
 
     /// A lambda in a non-argument position: against the context's expected type,
@@ -5286,9 +5693,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         {
             match expression {
                 Expression::Range(range) => return self.check_slice(&receiver, range, span),
-                Expression::Unary(unary)
-                    if unary.operator.value == UnaryOperator::IndexFromEnd =>
-                {
+                Expression::Unary(unary) if unary.operator.value == UnaryOperator::IndexFromEnd => {
                     self.check_index_from_end(unary);
                     if !self.is_indexable_from_end(&receiver) {
                         let kind = SemanticErrorKind::NotIndexable {
@@ -5346,9 +5751,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     ) -> Meaning<'ast> {
         for endpoint in [&range.start, &range.end].into_iter().flatten() {
             match endpoint {
-                Expression::Unary(unary)
-                    if unary.operator.value == UnaryOperator::IndexFromEnd =>
-                {
+                Expression::Unary(unary) if unary.operator.value == UnaryOperator::IndexFromEnd => {
                     self.check_index_from_end(unary);
                 }
                 other => {

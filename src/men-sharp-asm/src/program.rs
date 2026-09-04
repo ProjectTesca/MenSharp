@@ -128,6 +128,14 @@ pub enum Op {
     SaveFrame(u32),
     /// The matching restore placeholder; see [`Op::SaveFrame`].
     RestoreFrame(u32),
+    /// Codegen-internal placeholder: copies a function's whole frame into a
+    /// fresh `object[]` — what an `await` keeps while the function is
+    /// suspended. Expanded with the frame markers, once the frame is
+    /// complete; the id indexes the code generator's snapshot table.
+    SnapshotFrame(u32),
+    /// The matching restore placeholder: copies a snapshot back into the
+    /// frame before jumping to where the function left off.
+    RestoreSnapshot(u32),
     /// Pseudo-instruction: the code from here on comes from
     /// [`Program::source_marks`]`[index]`. Zero bytes; lands in the sidecar
     /// as an address → source position table, which is how the Unity side
@@ -168,6 +176,8 @@ impl Op {
             | Op::Comment(_)
             | Op::SaveFrame(_)
             | Op::RestoreFrame(_)
+            | Op::SnapshotFrame(_)
+            | Op::RestoreSnapshot(_)
             | Op::Source(_) => 0,
             Op::Nop | Op::Pop | Op::Copy => 4,
             Op::Push(_)
@@ -265,7 +275,10 @@ impl Program {
             let size = op.byte_size();
             let resolved = match op {
                 Op::Label(_) | Op::Comment(_) | Op::Source(_) => None,
-                Op::SaveFrame(_) | Op::RestoreFrame(_) => {
+                Op::SaveFrame(_)
+                | Op::RestoreFrame(_)
+                | Op::SnapshotFrame(_)
+                | Op::RestoreSnapshot(_) => {
                     return Err(AssembleError::UnresolvedFrameMarker);
                 }
                 Op::Nop => Some(Resolved::Nop),
@@ -352,7 +365,12 @@ impl Program {
                         pending_labels.push(name);
                     }
                 }
-                Op::Comment(_) | Op::SaveFrame(_) | Op::RestoreFrame(_) | Op::Source(_) => {}
+                Op::Comment(_)
+                | Op::SaveFrame(_)
+                | Op::RestoreFrame(_)
+                | Op::SnapshotFrame(_)
+                | Op::RestoreSnapshot(_)
+                | Op::Source(_) => {}
                 _ => {
                     for label in pending_labels.drain(..) {
                         let _ = writeln!(out, "    {label}:");
@@ -377,6 +395,8 @@ impl Program {
                         | Op::Comment(_)
                         | Op::SaveFrame(_)
                         | Op::RestoreFrame(_)
+                        | Op::SnapshotFrame(_)
+                        | Op::RestoreSnapshot(_)
                         | Op::Source(_) => {
                             unreachable!()
                         }

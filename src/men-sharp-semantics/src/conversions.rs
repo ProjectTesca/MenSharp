@@ -197,7 +197,11 @@ impl TypeSystem<'_, '_> {
     /// The `op_Implicit` that turns `from` into `to`, when one does. Only
     /// operators from metadata: a conversion operator written in source is
     /// not compiled at all (and says so).
-    pub fn implicit_conversion_operator(&self, from: &Type, to: &Type) -> Option<ConversionOperator> {
+    pub fn implicit_conversion_operator(
+        &self,
+        from: &Type,
+        to: &Type,
+    ) -> Option<ConversionOperator> {
         // §12.6.4.6 looks at the operators of both types
         let mut candidates: Vec<ConversionOperator> = Vec::new();
         for owner in [from, to] {
@@ -346,9 +350,10 @@ impl TypeSystem<'_, '_> {
         if let (Type::Tuple(from_elements), Type::Tuple(to_elements)) = (from, to)
             && from_elements.len() == to_elements.len()
         {
-            return from_elements.iter().zip(to_elements).all(|(from, to)| {
-                self.is_implicitly_convertible(&from.element, &to.element)
-            });
+            return from_elements
+                .iter()
+                .zip(to_elements)
+                .all(|(from, to)| self.is_implicitly_convertible(&from.element, &to.element));
         }
 
         // a type parameter converts to its bounds (and whatever they convert to)

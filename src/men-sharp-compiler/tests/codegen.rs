@@ -41,9 +41,40 @@ fn run_sources(sources: Vec<SourceCode>, event: &str) -> Option<Emulator> {
 /// [`run_sources`] that hands back the emulator's verdict instead of
 /// panicking on it — for programs expected to halt.
 fn run_sources_result(
-    mut sources: Vec<SourceCode>,
+    sources: Vec<SourceCode>,
     event: &str,
 ) -> Option<(String, Result<Emulator, men_sharp_asm::EmulatorError>)> {
+    let (program, assembled) = build(sources)?;
+    let mut emulator = Emulator::new(&program, &assembled);
+    let result = emulator.run(&assembled, event).map(|()| emulator);
+    Some((program.dump(), result))
+}
+
+/// Runs `event`, then moves the clock on by each `(seconds, frames)` step
+/// in turn, delivering the delayed events that fall due — how a program
+/// that awaits is driven.
+fn run_stepping(source: &str, event: &str, steps: &[(f32, i32)]) -> Option<Emulator> {
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let (program, assembled) = build(sources)?;
+    let mut emulator = Emulator::new(&program, &assembled);
+    let dump = program.dump();
+    emulator
+        .run(&assembled, event)
+        .unwrap_or_else(|error| panic!("emulator error: {error:?}\n{dump}"));
+    for (seconds, frames) in steps {
+        emulator
+            .advance(&assembled, *seconds, *frames)
+            .unwrap_or_else(|error| panic!("emulator error: {error:?}\n{dump}"));
+    }
+    Some(emulator)
+}
+
+/// Compiles `sources` (adding the mini-corlib when absent) to an assembled
+/// program, asserting that every phase is clean.
+fn build(
+    mut sources: Vec<SourceCode>,
+) -> Option<(men_sharp_asm::Program, men_sharp_asm::Assembled)> {
     let dir = dotnet_shared_dir()?;
     if !sources
         .iter()
@@ -77,9 +108,7 @@ fn run_sources_result(
     );
 
     let assembled = output.program.assemble().unwrap();
-    let mut emulator = Emulator::new(&output.program, &assembled);
-    let result = emulator.run(&assembled, event).map(|()| emulator);
-    Some((output.program.dump(), result))
+    Some((output.program, assembled))
 }
 
 fn int_of(emulator: &Emulator, name: &str) -> i32 {
@@ -7667,7 +7696,10 @@ fn list_patterns_match_an_array_by_shape() {
     let Some(emulator) = run(source, "Main") else {
         return;
     };
-    assert_eq!(string_of(&emulator, "Log"), "emptyone:9onetwoends:35ends:78b");
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "emptyone:9onetwoends:35ends:78b"
+    );
     assert_eq!(int_of(&emulator, "Result"), 1119);
 }
 
@@ -7753,4 +7785,800 @@ fn casting_back_to_a_tuple_is_checked() {
         return;
     };
     assert_eq!(string_of(&emulator, "Log"), "1/2|caught|shape");
+}
+
+#[test]
+fn an_async_method_suspends_and_resumes_where_it_left_off() {
+    let source = r#"
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static int Result;
+
+                public static async Task<int> Work(int n)
+                {
+                    Log += "a";
+                    await Scheduler.Delay(1f);
+                    Log += "b";
+                    int doubled = n * 2;
+                    await Scheduler.NextFrame();
+                    Log += "c";
+                    return doubled + 1;
+                }
+
+                public static async void Main()
+                {
+                    Log += "s";
+                    int value = await Work(20);
+                    Result = value;
+                    Log += "e";
+                }
+            }
+        }
+        "#;
+    let Some(emulator) = run_stepping(source, "Main", &[]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    // suspended at the delay: nothing after it ran
+    assert_eq!(string_of(&emulator, "Log"), "sa");
+    assert_eq!(int_of(&emulator, "Result"), 0);
+    assert!(emulator.has_pending_events());
+
+    let emulator = run_stepping(source, "Main", &[(0.5, 30)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "sa");
+
+    let emulator = run_stepping(source, "Main", &[(1.0, 60)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "sab");
+
+    let emulator = run_stepping(source, "Main", &[(1.0, 60), (0.0, 1)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "sabce");
+    assert_eq!(int_of(&emulator, "Result"), 41);
+    assert!(!emulator.has_pending_events());
+}
+
+/// The body-check errors of `source` compiled with the mini-corlib.
+fn body_errors(source: &str) -> Option<Vec<men_sharp_semantics::SemanticError>> {
+    let dir = dotnet_shared_dir()?;
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(declarations.errors, vec![], "declaration errors");
+    assert_eq!(signatures.errors, vec![], "signature errors");
+    Some(bodies.errors)
+}
+
+#[test]
+fn exceptions_travel_through_tasks_and_completion_sources_complete_them() {
+    let source = r#"
+        using System;
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static TaskCompletionSource<string> Source;
+
+                static async Task<int> Fails(bool now)
+                {
+                    if (now) throw new InvalidOperationException("now");
+                    await Scheduler.Delay(1f);
+                    throw new InvalidOperationException("later");
+                }
+
+                static async Task Catcher()
+                {
+                    try { await Fails(true); } catch (InvalidOperationException e) { Log += "1:" + e.Message + ";"; }
+                    try { await Fails(false); } catch (InvalidOperationException e) { Log += "2:" + e.Message + ";"; }
+                    Task t = Fails(true);
+                    Log += "faulted=" + t.IsFaulted + ";";
+                    try { await Scheduler.NextFrame(); Log += "body;"; } finally { Log += "finally;"; }
+                }
+
+                static async Task Waiter()
+                {
+                    Source = new TaskCompletionSource<string>();
+                    string word = await Source.Task;
+                    Log += "got " + word + ";";
+                }
+
+                public static void Main()
+                {
+                    Catcher();
+                    Waiter();
+                }
+
+                public static void Deliver()
+                {
+                    Source.SetResult("mail");
+                    Log += "delivered;";
+                }
+            }
+        }
+        "#;
+    let Some(emulator) = run_stepping(source, "Main", &[]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "1:now;");
+
+    let emulator = run_stepping(source, "Main", &[(1.0, 60)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "1:now;2:later;faulted=True;");
+
+    let mut emulator = run_stepping(source, "Main", &[(1.0, 60), (0.0, 1)]).unwrap();
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "1:now;2:later;faulted=True;body;finally;"
+    );
+    // the completion source: its continuation runs once the delivering
+    // event's body is done
+    let sources = {
+        let mut sources = vec![SourceCode::new("test.cs", source)];
+        sources.extend(Compiler::corlib_sources());
+        sources
+    };
+    let (_, assembled) = build(sources).unwrap();
+    emulator.run(&assembled, "Deliver").unwrap();
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "1:now;2:later;faulted=True;body;finally;delivered;got mail;"
+    );
+}
+
+#[test]
+fn when_all_when_any_and_the_timing_helpers_complete_in_order() {
+    let source = r#"
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+
+                static async Task<string> Word(string w, float delay)
+                {
+                    await Scheduler.Delay(delay);
+                    return w;
+                }
+
+                public static async void Main()
+                {
+                    Task<string> a = Word("x", 1f);
+                    Task<string> b = Word("y", 2f);
+                    Task first = await Task.WhenAny(a, b);
+                    Log += (first == a) + ";";
+                    await Task.WhenAll(a, b);
+                    Log += a.Result + b.Result + ";";
+                    await Task.Delay(500);
+                    Log += "half;";
+                    await Scheduler.Yield();
+                    Log += "yield;";
+                    await Task.CompletedTask.OnNextFrame();
+                    Log += "next;";
+                    int n = await Task.FromResult(7).After(1f);
+                    Log += n + ";";
+                }
+            }
+        }
+        "#;
+    let Some(emulator) = run_stepping(source, "Main", &[(1.0, 60)]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "True;");
+    let emulator = run_stepping(source, "Main", &[(1.0, 60), (1.0, 60)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "True;xy;");
+    let emulator = run_stepping(source, "Main", &[(1.0, 60), (1.0, 60), (0.5, 30)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "True;xy;half;yield;");
+    let emulator =
+        run_stepping(source, "Main", &[(1.0, 60), (1.0, 60), (0.5, 30), (0.0, 1)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "True;xy;half;yield;next;");
+    let emulator = run_stepping(
+        source,
+        "Main",
+        &[(1.0, 60), (1.0, 60), (0.5, 30), (0.0, 1), (1.0, 60)],
+    )
+    .unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "True;xy;half;yield;next;7;");
+    assert!(!emulator.has_pending_events());
+}
+
+#[test]
+fn async_lambdas_local_functions_and_concurrent_activations_keep_their_own_state() {
+    let source = r#"
+        using System;
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+
+                public static async void Main()
+                {
+                    Func<int, Task<int>> twice = async x => { await Scheduler.Delay(1f); return x * 2; };
+                    async Task<string> Local(string s) { await Scheduler.NextFrame(); return s + "!"; }
+                    Task<int> t1 = twice(1);
+                    Task<int> t2 = twice(2);
+                    Task<string> t3 = Local("hi");
+                    int sum = await t1 + await t2;
+                    Log += sum + ";";
+                    await t3;
+                    Log += await t3 + ";";
+                    int counter = 0;
+                    Action bump = () => counter++;
+                    await Scheduler.Run(async () => { await Scheduler.NextFrame(); bump(); bump(); });
+                    Log += counter + ";";
+                    await Scheduler.WaitUntil(() => counter >= 2);
+                    Log += "done";
+                }
+            }
+        }
+        "#;
+    let Some(emulator) = run_stepping(source, "Main", &[(0.0, 1)]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "");
+    let emulator = run_stepping(source, "Main", &[(0.0, 1), (1.0, 60)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "6;hi!;");
+    let emulator = run_stepping(source, "Main", &[(0.0, 1), (1.0, 60), (0.0, 1)]).unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "6;hi!;2;done");
+}
+
+#[test]
+fn a_behaviour_awaits_and_an_awaitable_of_the_users_own_works() {
+    let source = r#"
+        using System;
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Signal
+            {
+                private bool raised;
+                private Action waiting;
+                public void Raise() { raised = true; if (waiting != null) { Action w = waiting; waiting = null; w(); } }
+                public Signal GetAwaiter() { return this; }
+                public bool IsCompleted { get { return raised; } }
+                public void OnCompleted(Action continuation) { waiting = continuation; }
+                public string GetResult() { return "raised"; }
+            }
+
+            public class Program : MenSharpBehaviour
+            {
+                public string Log = "";
+                public int Opens;
+                private Signal signal = new Signal();
+
+                public async void Interact()
+                {
+                    Opens++;
+                    Log += "open;";
+                    await Scheduler.Delay(2f);
+                    Log += "close;";
+                    Log += await signal + ";";
+                }
+
+                public void Ring()
+                {
+                    signal.Raise();
+                    Log += "rang;";
+                }
+            }
+        }
+        "#;
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let Some(program) = compile_behaviour(sources, "Game.Program") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let assembled = program.output.program.assemble().unwrap();
+    let dump = program.output.program.dump();
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    // `Interact` is a built-in Udon event: `_interact`
+    emulator
+        .run(&assembled, "_interact")
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    emulator
+        .run(&assembled, "_interact")
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert_eq!(string_of(&emulator, "Log"), "open;open;");
+    assert_eq!(int_of(&emulator, "Opens"), 2);
+    emulator
+        .advance(&assembled, 2.0, 120)
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert_eq!(string_of(&emulator, "Log"), "open;open;close;close;");
+    // the user's awaitable resumes both waiters synchronously from Raise —
+    // the last registered continuation wins in this simple Signal
+    emulator
+        .run(&assembled, "Ring")
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "open;open;close;close;raised;rang;"
+    );
+}
+
+#[test]
+fn an_exception_out_of_an_async_void_is_unhandled_and_a_run_task_fault_is_logged() {
+    let source = r#"
+        using System;
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+
+                static async Task Boom()
+                {
+                    await Scheduler.NextFrame();
+                    throw new InvalidOperationException("boom");
+                }
+
+                public static async void Main()
+                {
+                    Scheduler.Run(Boom);
+                    Log += "started;";
+                    await Scheduler.DelayFrames(2);
+                    Log += "resumed;";
+                    throw new InvalidOperationException("void");
+                }
+            }
+        }
+        "#;
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let Some((program, assembled)) = build(sources) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let dump = program.dump();
+    let mut emulator = Emulator::new(&program, &assembled);
+    emulator
+        .run(&assembled, "Main")
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert_eq!(string_of(&emulator, "Log"), "started;");
+    // frame 1: the forgotten task faults, and says so
+    emulator
+        .advance(&assembled, 0.0, 1)
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert!(
+        emulator
+            .log
+            .iter()
+            .any(|line| line.contains("Scheduler.Run") && line.contains("boom")),
+        "{:#?}",
+        emulator.log
+    );
+    // frame 2: the async void throws — nothing catches that
+    match emulator.advance(&assembled, 0.0, 1) {
+        Err(men_sharp_asm::EmulatorError::Exception(message)) => {
+            assert!(
+                message.contains("Unhandled exception")
+                    && message.contains("InvalidOperationException")
+                    && message.contains("void"),
+                "{message}"
+            );
+        }
+        other => panic!("expected the async void's exception to halt, got {other:?}\n{dump}"),
+    }
+    assert_eq!(string_of(&emulator, "Log"), "started;resumed;");
+}
+
+#[test]
+fn async_misuse_is_rejected_by_the_checker() {
+    let Some(errors) = body_errors(
+        r#"
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Plain() { return 1; }
+                public static async int Wrong() { await Scheduler.NextFrame(); return 1; }
+                public static async Task ByRef(out int x) { x = 1; await Scheduler.NextFrame(); }
+                public static void Main()
+                {
+                    int a = await Task.FromResult(1);
+                    System.Action inner = () => { await Scheduler.NextFrame(); };
+                }
+                public static async Task NotAwaitable()
+                {
+                    await Plain();
+                }
+            }
+        }
+        "#,
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    use men_sharp_semantics::SemanticErrorKind;
+    let kinds: Vec<String> = errors
+        .iter()
+        .map(|error| format!("{:?}", error.kind))
+        .collect();
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, SemanticErrorKind::AsyncReturnType { .. })),
+        "{kinds:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, SemanticErrorKind::AsyncByRefParameter)),
+        "{kinds:#?}"
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|error| matches!(error.kind, SemanticErrorKind::AwaitOutsideAsync))
+            .count(),
+        2,
+        "{kinds:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, SemanticErrorKind::NotAwaitable { .. })),
+        "{kinds:#?}"
+    );
+}
+
+#[test]
+fn async_recursion_and_instance_methods_keep_every_activation_apart() {
+    let source = r#"
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Counter
+            {
+                public int Ticks;
+                private string name;
+                public Counter(string name) { this.name = name; }
+                public async Task<string> Tick(int times)
+                {
+                    for (int i = 0; i < times; i++)
+                    {
+                        await Scheduler.NextFrame();
+                        Ticks++;
+                    }
+                    return name + Ticks;
+                }
+            }
+
+            public class Program
+            {
+                public static string Log = "";
+
+                static async Task<int> Depth(int n)
+                {
+                    if (n == 0) { return 0; }
+                    await Scheduler.NextFrame();
+                    int below = await Depth(n - 1);
+                    Log += n + ";";
+                    return below + 1;
+                }
+
+                public static async void Main()
+                {
+                    Counter a = new Counter("a");
+                    Counter b = new Counter("b");
+                    Task<string> ta = a.Tick(2);
+                    Task<string> tb = b.Tick(3);
+                    int depth = await Depth(3);
+                    Log += "depth=" + depth + ";";
+                    Log += await ta + ";" + await tb + ";";
+                    Log += "ticks=" + (a.Ticks + b.Ticks);
+                }
+            }
+        }
+        "#;
+    let Some(emulator) = run_stepping(source, "Main", &[(0.0, 1), (0.0, 1), (0.0, 1), (0.0, 1)])
+    else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "1;2;3;depth=3;a2;b3;ticks=5");
+    assert!(!emulator.has_pending_events());
+}
+
+#[test]
+fn iterators_yield_lazily_and_enumerate_again_from_the_start() {
+    let source = r#"
+        using System;
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Tree
+            {
+                public int Value;
+                public Tree Left;
+                public Tree Right;
+                public Tree(int value, Tree left, Tree right) { Value = value; Left = left; Right = right; }
+
+                public IEnumerable<int> InOrder()
+                {
+                    if (Left != null)
+                    {
+                        foreach (int v in Left.InOrder()) { yield return v; }
+                    }
+                    yield return Value;
+                    if (Right != null)
+                    {
+                        foreach (int v in Right.InOrder()) { yield return v; }
+                    }
+                }
+            }
+
+            public class Program
+            {
+                public static string Log = "";
+
+                static IEnumerable<int> Evens(int count)
+                {
+                    Log += "start;";
+                    for (int i = 0; i < count; i++)
+                    {
+                        Log += "make" + i + ";";
+                        yield return i * 2;
+                    }
+                    Log += "end;";
+                }
+
+                static IEnumerable<string> Words(string prefix)
+                {
+                    yield return prefix + "a";
+                    if (prefix == "stop") { yield break; }
+                    yield return prefix + "b";
+                }
+
+                static IEnumerable<T> Repeat<T>(T item, int times)
+                {
+                    for (int i = 0; i < times; i++) { yield return item; }
+                }
+
+                static IEnumerator<int> Counter()
+                {
+                    int n = 1;
+                    while (true) { yield return n; n *= 3; }
+                }
+
+                static IEnumerable<int> Broken()
+                {
+                    yield return 1;
+                    throw new InvalidOperationException("mid");
+                }
+
+                public static void Main()
+                {
+                    // lazy: nothing runs until MoveNext, and each step runs
+                    // exactly up to the next yield
+                    IEnumerable<int> evens = Evens(2);
+                    Log += "made;";
+                    foreach (int e in evens) { Log += "got" + e + ";"; }
+                    // the same enumerable, enumerated again from the start
+                    int sum = 0;
+                    foreach (int e in evens) { sum += e; }
+                    foreach (int e in evens) { sum += e; }
+                    Log += "sum=" + sum + ";";
+
+                    IEnumerable<int> local(int a) { yield return a; yield return a + 1; }
+                    foreach (int v in local(10)) { Log += v + ","; }
+                    foreach (string w in Words("x")) { Log += w + ","; }
+                    foreach (string w in Words("stop")) { Log += w + ","; }
+                    foreach (string s in Repeat("r", 2)) { Log += s; }
+                    Log += ";";
+
+                    IEnumerator<int> counter = Counter();
+                    counter.MoveNext();
+                    counter.MoveNext();
+                    counter.MoveNext();
+                    Log += "counter=" + counter.Current + ";";
+
+                    Tree tree = new Tree(2, new Tree(1, null, null), new Tree(4, new Tree(3, null, null), null));
+                    foreach (int v in tree.InOrder()) { Log += v; }
+                    Log += ";";
+
+                    IEnumerator<int> broken = Broken().GetEnumerator();
+                    broken.MoveNext();
+                    try { broken.MoveNext(); } catch (InvalidOperationException e) { Log += "caught " + e.Message + ";"; }
+                    Log += "after=" + broken.MoveNext();
+                }
+            }
+        }
+        "#;
+    let Some(emulator) = run(source, "Main") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "made;start;make0;got0;make1;got2;end;start;make0;make1;end;start;make0;make1;end;sum=4;10,11,xa,xb,stopa,rr;counter=9;1234;caught mid;after=False"
+    );
+}
+
+#[test]
+fn cancellation_stops_a_waiting_method_at_its_await() {
+    let source = r#"
+        using System;
+        using System.Threading;
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static CancellationTokenSource Blinking;
+                public static int Blinks;
+
+                static async Task Blink(CancellationToken token)
+                {
+                    try
+                    {
+                        while (true)
+                        {
+                            Blinks++;
+                            await Scheduler.Delay(1f, token);
+                        }
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        Log += "stopped at " + Blinks + ";";
+                    }
+                }
+
+                static async Task Guarded(CancellationToken token)
+                {
+                    await Scheduler.Delay(5f, token);
+                    token.ThrowIfCancellationRequested();
+                    Log += "unreachable;";
+                }
+
+                public static async void Main()
+                {
+                    Blinking = new CancellationTokenSource();
+                    Blink(Blinking.Token);
+                    Task none = Blink(CancellationToken.None);
+
+                    var timed = new CancellationTokenSource();
+                    timed.CancelAfter(2000);
+                    Task guarded = Guarded(timed.Token);
+                    var already = new CancellationTokenSource();
+                    already.Cancel();
+                    Task early = Guarded(already.Token);
+                    try { await early; } catch (TaskCanceledException) { Log += "early canceled=" + early.IsCanceled + ";"; }
+                    try { await Scheduler.WaitUntil(() => false, timed.Token); } catch (OperationCanceledException) { Log += "wait stopped;"; }
+                    Log += "guarded faulted=" + guarded.IsFaulted + ";";
+                }
+
+                public static void Stop()
+                {
+                    Blinking.Cancel();
+                    Log += "cancel called;";
+                }
+            }
+        }
+        "#;
+    let sources = {
+        let mut sources = vec![SourceCode::new("test.cs", source)];
+        sources.extend(Compiler::corlib_sources());
+        sources
+    };
+    let Some((program, assembled)) = build(sources) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let dump = program.dump();
+    let mut emulator = Emulator::new(&program, &assembled);
+    emulator
+        .run(&assembled, "Main")
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    // the already-cancelled token faults its awaitable at once
+    assert_eq!(string_of(&emulator, "Log"), "early canceled=True;");
+    assert_eq!(int_of(&emulator, "Blinks"), 2);
+    emulator
+        .advance(&assembled, 1.0, 60)
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert_eq!(int_of(&emulator, "Blinks"), 4);
+    // cancelling resumes the waiting method with the exception, before
+    // its delay is up — and only that one
+    emulator
+        .run(&assembled, "Stop")
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "early canceled=True;cancel called;stopped at 4;"
+    );
+    emulator
+        .advance(&assembled, 1.0, 60)
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    // the token-less blink goes on; CancelAfter fired at 2s: the guarded
+    // task and the WaitUntil both stopped
+    assert_eq!(int_of(&emulator, "Blinks"), 5);
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "early canceled=True;cancel called;stopped at 4;wait stopped;guarded faulted=True;"
+    );
+}
+
+#[test]
+fn iterator_misuse_is_rejected_by_the_checker() {
+    let Some(errors) = body_errors(
+        r#"
+        using System;
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                static int NotEnumerable() { yield return 1; }
+                static IEnumerable<int> Mixed() { yield return 1; return null; }
+                static IEnumerable<int> Guarded()
+                {
+                    try { yield return 1; } catch (Exception) { }
+                }
+                public static void Main()
+                {
+                    Func<int> f = () => { yield return 1; };
+                }
+            }
+        }
+        "#,
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    use men_sharp_semantics::SemanticErrorKind;
+    let kinds: Vec<String> = errors
+        .iter()
+        .map(|error| format!("{:?}", error.kind))
+        .collect();
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|error| matches!(error.kind, SemanticErrorKind::YieldOutsideIterator))
+            .count(),
+        2,
+        "{kinds:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, SemanticErrorKind::ReturnInIterator)),
+        "{kinds:#?}"
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|error| matches!(error.kind, SemanticErrorKind::YieldInsideTry)),
+        "{kinds:#?}"
+    );
 }

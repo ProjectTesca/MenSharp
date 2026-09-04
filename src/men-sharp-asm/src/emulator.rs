@@ -167,6 +167,27 @@ pub struct Emulator {
     /// Everything passed to `UnityEngineDebug.__Log__…`, for assertions.
     pub log: Vec<String>,
     pub fuel: u64,
+    /// `Time.time`: seconds since the scene started, advanced by [`Emulator::advance`].
+    pub time: f32,
+    /// `Time.frameCount`, advanced by [`Emulator::advance`].
+    pub frame: i32,
+    /// Custom events the program asked for later, via
+    /// `SendCustomEventDelayedSeconds`/`Frames` — delivered by
+    /// [`Emulator::advance`] once their time or frame has come.
+    pub delayed: Vec<DelayedEvent>,
+}
+
+/// One pending `SendCustomEventDelayed…` call.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DelayedEvent {
+    pub event: String,
+    pub due: Due,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Due {
+    Time(f32),
+    Frame(i32),
 }
 
 impl Emulator {
@@ -214,7 +235,40 @@ impl Emulator {
             stack: Vec::new(),
             log: Vec::new(),
             fuel: 50_000_000,
+            time: 0.0,
+            frame: 0,
+            delayed: Vec::new(),
         }
+    }
+
+    /// Moves the clock on by `seconds` and `frames`, then delivers every
+    /// delayed event whose time has come, in the order they fall due —
+    /// what Udon does between two frames. An event may schedule more;
+    /// those are delivered too when they are due by then.
+    pub fn advance(
+        &mut self,
+        assembled: &Assembled,
+        seconds: f32,
+        frames: i32,
+    ) -> Result<(), EmulatorError> {
+        self.time += seconds;
+        self.frame += frames;
+        loop {
+            let position = self.delayed.iter().position(|event| match event.due {
+                Due::Time(at) => at <= self.time,
+                Due::Frame(at) => at <= self.frame,
+            });
+            let Some(position) = position else {
+                return Ok(());
+            };
+            let event = self.delayed.remove(position);
+            self.run(assembled, &event.event)?;
+        }
+    }
+
+    /// Whether any delayed event is still waiting.
+    pub fn has_pending_events(&self) -> bool {
+        !self.delayed.is_empty()
     }
 
     /// The value of a named heap slot — how tests read program results.
@@ -527,6 +581,57 @@ impl Emulator {
                 self.heap[args[2]] = Value::Boolean(value);
                 Ok(())
             }
+            "SystemConvert.__ToSingle__SystemInt32__SystemSingle"
+            | "SystemConvert.__ToSingle__SystemDouble__SystemSingle"
+            | "SystemConvert.__ToSingle__SystemInt64__SystemSingle" => {
+                let args = self.pop_arguments(2)?;
+                let value = match &self.heap[args[0]] {
+                    Value::Double(value) => *value as f32,
+                    Value::Single(value) => *value,
+                    Value::Int32(value) => *value as f32,
+                    Value::Int64(value) => *value as f32,
+                    other => {
+                        return Err(EmulatorError::TypeError(format!(
+                            "Convert.ToSingle of {other:?}"
+                        )));
+                    }
+                };
+                self.heap[args[1]] = Value::Single(value);
+                Ok(())
+            }
+            // ---- time and delayed events ----
+            "UnityEngineTime.__get_time__SystemSingle" => {
+                let args = self.pop_arguments(1)?;
+                self.heap[args[0]] = Value::Single(self.time);
+                Ok(())
+            }
+            "UnityEngineTime.__get_frameCount__SystemInt32" => {
+                let args = self.pop_arguments(1)?;
+                self.heap[args[0]] = Value::Int32(self.frame);
+                Ok(())
+            }
+            "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEventDelayedSeconds__SystemString_SystemSingle_VRCUdonCommonEnumsEventTiming__SystemVoid" =>
+            {
+                let args = self.pop_arguments(4)?;
+                let event = self.heap[args[1]].as_str()?.to_string();
+                let seconds = self.heap[args[2]].as_f32()?;
+                self.delayed.push(DelayedEvent {
+                    event,
+                    due: Due::Time(self.time + seconds),
+                });
+                Ok(())
+            }
+            "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEventDelayedFrames__SystemString_SystemInt32_VRCUdonCommonEnumsEventTiming__SystemVoid" =>
+            {
+                let args = self.pop_arguments(4)?;
+                let event = self.heap[args[1]].as_str()?.to_string();
+                let frames = self.heap[args[2]].as_i32()?;
+                self.delayed.push(DelayedEvent {
+                    event,
+                    due: Due::Frame(self.frame + frames.max(1)),
+                });
+                Ok(())
+            }
             "SystemConvert.__ToDouble__SystemInt32__SystemDouble"
             | "SystemConvert.__ToDouble__SystemSingle__SystemDouble"
             | "SystemConvert.__ToDouble__SystemInt64__SystemDouble" => {
@@ -661,9 +766,7 @@ impl Emulator {
                 let result = match signature {
                     "SystemChar.__IsLetter__SystemChar__SystemBoolean" => value.is_alphabetic(),
                     "SystemChar.__IsDigit__SystemChar__SystemBoolean" => value.is_ascii_digit(),
-                    "SystemChar.__IsWhiteSpace__SystemChar__SystemBoolean" => {
-                        value.is_whitespace()
-                    }
+                    "SystemChar.__IsWhiteSpace__SystemChar__SystemBoolean" => value.is_whitespace(),
                     _ => value.is_alphanumeric(),
                 };
                 self.heap[args[1]] = Value::Boolean(result);
@@ -690,7 +793,8 @@ impl Emulator {
                 self.heap[*args.last().expect("an out slot")] = Value::Str(Rc::from(value));
                 Ok(())
             }
-            "SystemArray.__Copy__SystemArray_SystemInt32_SystemArray_SystemInt32_SystemInt32__SystemVoid" => {
+            "SystemArray.__Copy__SystemArray_SystemInt32_SystemArray_SystemInt32_SystemInt32__SystemVoid" =>
+            {
                 let args = self.pop_arguments(5)?;
                 let source = match &self.heap[args[0]] {
                     Value::Array(values) => values.clone(),

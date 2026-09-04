@@ -528,6 +528,143 @@ program synchronously calls back into the *same* method that is still
 running. UdonSharp silently corrupts the method's variables in that case;
 MenSharp logs an error naming the method and aborts the event instead.
 
+## async/await
+
+`async`/`await` work as in C#, with `Task` and `Task<T>` — and they are how
+you write what would be a coroutine elsewhere:
+
+```csharp
+public async void Interact()
+{
+    door.SetActive(true);
+    await Scheduler.Delay(2f);            // seconds of scene time
+    await Scheduler.NextFrame();          // one frame
+    int hits = await CountHits(5);        // another async method
+    string word = await pressed.Task;     // a TaskCompletionSource<string>
+    door.SetActive(false);
+}
+
+private async Task<int> CountHits(int frames)
+{
+    int hits = 0;
+    for (int i = 0; i < frames; i++)
+    {
+        await Scheduler.NextFrame();
+        if (Physics.Raycast(transform.position, transform.forward)) { hits++; }
+    }
+    return hits;
+}
+```
+
+What is there: `async` methods, lambdas and local functions returning `void`,
+`Task` or `Task<T>`; `await` on any of them, on `Task.Delay(ms)`,
+`Task.CompletedTask`, `Task.FromResult(x)`, `Task.WhenAll(...)`,
+`Task.WhenAny(...)`, a `TaskCompletionSource<T>` (complete it from any event —
+a button, `OnDeserialization`, a network event), and on an awaitable of your
+own (a class with `GetAwaiter()` giving `IsCompleted`, `OnCompleted(Action)`
+and `GetResult()`, as C# defines it). Exceptions travel through tasks: one
+thrown in an async method faults its task and is rethrown where the task is
+awaited, `try`/`catch`/`finally` work across an `await`, and an exception out
+of an `async void` method is an unhandled one (logged, and the event ends), as
+in C#. Two activations of the same method can be suspended at once; each
+keeps its own variables.
+
+`MenSharp.Scheduler` holds the awaitables Udon has and .NET does not:
+`Delay(seconds)`, `DelayFrames(n)`, `NextFrame()`, `Yield()` (runs the other
+continuations queued so far, then continues — how a long computation shares
+an event), `WaitUntil(() => ready)`, `WaitWhile(...)`, and `Run(async () =>
+{ ... })` for a task nothing awaits (a fault in it is logged rather than
+ending the event). A long job split with `await Scheduler.NextFrame()` inside
+its loop is a cooperative thread.
+
+When a continuation runs: as soon as the event that completed the task has
+finished its own work — never in the middle of it — and in the same frame.
+To move it, ask for a task that completes later: `await
+task.OnNextFrame()`, `await task.After(0.5f)`, `await task.AfterFrames(3)`,
+each on `Task` and `Task<T>`. They are ordinary tasks, so `var later =
+Load().OnNextFrame();` makes a task whose awaiters all resume on the next
+frame.
+
+How it works on the VM: a suspended method's variables are copied into an
+`object[]` together with the address to resume at, and the pair is the
+`Action` the task holds; resuming copies them back and jumps. Timed
+continuations use the program's own `SendCustomEventDelayedSeconds`/`Frames`
+(the event is `_mensharpResume`; the name is reserved). Nothing is hoisted or
+rewritten, so anything that works in a method works in an async one.
+
+Stopping one — the `StopCoroutine` of async code — is a
+`CancellationTokenSource`, as in .NET: give its token to what waits, and
+`Cancel()` makes that awaitable fault with `TaskCanceledException` at once,
+so the method leaves through `catch (OperationCanceledException)`:
+
+```csharp
+private CancellationTokenSource blinking;
+
+public void StartBlinking()
+{
+    blinking = new CancellationTokenSource();
+    Blink(blinking.Token);
+}
+
+public void StopBlinking() { blinking.Cancel(); }
+
+private async void Blink(CancellationToken token)
+{
+    try
+    {
+        while (true)
+        {
+            lamp.SetActive(!lamp.activeSelf);
+            await Scheduler.Delay(0.5f, token);
+        }
+    }
+    catch (OperationCanceledException) { lamp.SetActive(false); }
+}
+```
+
+`Scheduler.Delay`, `DelayFrames`, `NextFrame`, `WaitUntil`, `WaitWhile` and
+`Task.Delay` take a token; `token.IsCancellationRequested`,
+`token.ThrowIfCancellationRequested()`, `token.Register(action)`,
+`source.CancelAfter(milliseconds)`, `CancellationToken.None` and `task.IsCanceled`
+work as in .NET.
+
+What does not cross a program boundary: a task holds code addresses of the
+program that made it, so awaiting a task returned by *another* behaviour's
+method, or passing one to it, is an error — have that behaviour call back
+into yours when it is done. Task-typed fields are not inspector variables.
+
+## Iterators
+
+`yield return` works as in C#, in a method or local function returning
+`IEnumerable<T>` or `IEnumerator<T>`:
+
+```csharp
+private IEnumerable<Transform> Descendants(Transform root)
+{
+    foreach (Transform child in root)      // hmm — Transform is not enumerable on Udon; see below
+    {
+        yield return child;
+        foreach (Transform grandchild in Descendants(child)) { yield return grandchild; }
+    }
+}
+```
+
+The body runs lazily, one step per `MoveNext` — `foreach` over the result
+runs it up to each `yield return` in turn — and a second `foreach` over the
+same enumerable starts it over. `yield break` ends it early, an exception
+out of the body ends it and reaches the loop, and generic iterators
+(`IEnumerable<T> Repeat<T>(T item, int n)`) and recursive ones (the tree walk
+above) work. It suspends the same way an `async` method does, so the same
+things hold: nothing is hoisted or rewritten, and any code that works in a
+method works in an iterator.
+
+`yield` inside a `try`/`catch`/`finally` block is not supported yet, and
+`IEnumerable<T>` here is the compiler's own interface with `GetEnumerator`
+only: an iterator's result can be enumerated and passed around, not
+`.ToList()`ed or LINQ-ed. (`foreach (Transform child in transform)` above
+needs the engine's non-generic enumerator, which Udon does not expose — walk
+`transform.childCount`/`GetChild(i)` instead.)
+
 ## Delegates, lambdas and events
 
 Delegates are ordinary values: `Func<>`/`Action<>`/`Predicate<>` and the
@@ -894,7 +1031,9 @@ wrong thing:
   such types to pass around, and no `Span<T>` for a slice that does not copy;
 - `ulong` literals (`1UL`), and integer literals too big for `long`;
 - nested array braces (`{ { 1, 2 }, { 3, 4 } }`) — jagged and rectangular
-  arrays are not there yet.
+  arrays are not there yet;
+- awaiting a task across a program boundary — see *async/await* — and
+  `yield` inside a `try` block — see *Iterators*.
 
 Target-typed `new()` (`List<int> values = new();`, `Counter c = new(5);`) and
 the null-coalescing assignment (`name ??= "anon";`, which evaluates its right

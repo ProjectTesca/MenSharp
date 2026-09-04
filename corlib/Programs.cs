@@ -48,6 +48,36 @@ namespace MenSharp.Internal
             return default(T);
         }
 
+        // ------------------------------------- the scheduler's intrinsics
+
+        /// `SendCustomEventDelayedSeconds("_mensharpResume", seconds)` on
+        /// this behaviour: how `Task.Delay` gets called back.
+        public static void ScheduleResume(float seconds)
+        {
+        }
+
+        /// `SendCustomEventDelayedFrames("_mensharpResume", frames)`.
+        public static void ScheduleResumeFrames(int frames)
+        {
+        }
+
+        /// `Time.time`.
+        public static float Now()
+        {
+            return 0f;
+        }
+
+        /// `Time.frameCount`.
+        public static int FrameCount()
+        {
+            return 0;
+        }
+
+        /// `Debug.LogError`.
+        public static void LogError(object message)
+        {
+        }
+
         // ------------------------------------------------- the searches
 
         public static T GetComponent<T>(object transform)

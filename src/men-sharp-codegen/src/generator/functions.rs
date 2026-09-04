@@ -295,6 +295,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             result,
             return_slot,
             caught: Vec::new(),
+            async_state: None,
+            iterator_state: None,
         };
 
         self.program.code.push(Op::Label(label));
@@ -384,7 +386,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     value_parameters,
                     &parameter_types,
                 );
+                let is_async = Self::has_async_modifier(declaration.modifiers);
+                let is_iterator = self
+                    .bodies
+                    .iterators
+                    .contains(&EntityID::from(*declaration));
+                let (_, return_type) = self.function_shape(key);
+                if is_async {
+                    self.begin_async(&mut ctx, &return_type, declaration.name.span.clone());
+                } else if is_iterator {
+                    self.begin_iterator(&mut ctx, &return_type, declaration.name.span.clone());
+                }
                 self.emit_function_body(&mut ctx, &declaration.body);
+                if is_async {
+                    self.end_async(&mut ctx, declaration.name.span.clone());
+                } else if is_iterator {
+                    self.end_iterator(&mut ctx, declaration.name.span.clone());
+                }
             }
             // a user-declared operator is a static method with a symbol for a name
             (Role::Method, Some(SyntaxRef::Operator(declaration))) => {
@@ -500,13 +518,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    pub(super) fn emit_function_body(&mut self, ctx: &mut Ctx<'ast>, body: &'ast FunctionBody<'ast, 'ast>) {
+    pub(super) fn emit_function_body(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        body: &'ast FunctionBody<'ast, 'ast>,
+    ) {
         match body {
             FunctionBody::Block(block) => self.lower_block(ctx, block),
             FunctionBody::Expression {
                 expression: Ok(expression),
                 ..
             } => {
+                // an async body's expression completes its task
+                if let Some(state) = ctx.async_state.clone() {
+                    let value = if state.inner == Type::Void {
+                        self.lower_expression(ctx, expression);
+                        None
+                    } else {
+                        self.owned_value_as(ctx, expression, &state.inner)
+                    };
+                    self.complete_async(ctx, value, expression.span());
+                    return;
+                }
                 let value = self.lower_expression(ctx, expression);
                 if let (Some(value), Some(result)) = (value, ctx.result) {
                     self.copy(value, result);
@@ -858,7 +891,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// A temp that belongs to *no* function's frame: for values that must
     /// survive a recursive frame restore (they are dead again by the next
     /// call, so nothing ever needs to save them).
-    fn scratch_slot(&mut self, udon_type: &str) -> DataId {
+    pub(super) fn scratch_slot(&mut self, udon_type: &str) -> DataId {
         let saved = self.current_frame.take();
         let slot = self.temp(udon_type);
         self.current_frame = saved;
@@ -1630,6 +1663,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             result: function.result,
             return_slot: function.return_slot,
             caught: Vec::new(),
+            async_state: None,
+            iterator_state: None,
         }
     }
 
@@ -1681,6 +1716,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 result,
                 return_slot,
                 caught: Vec::new(),
+                async_state: None,
+                iterator_state: None,
             };
 
             // type_id = (int) this[0]

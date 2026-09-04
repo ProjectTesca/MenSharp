@@ -327,6 +327,11 @@ impl Compiler {
                 "corlib/Dictionary.cs",
                 include_str!("../../../corlib/Dictionary.cs"),
             ),
+            SourceCode::new("corlib/Tasks.cs", include_str!("../../../corlib/Tasks.cs")),
+            SourceCode::new(
+                "corlib/Iterators.cs",
+                include_str!("../../../corlib/Iterators.cs"),
+            ),
             behaviour,
         ]
     }

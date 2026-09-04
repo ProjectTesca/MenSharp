@@ -104,7 +104,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Statement::Switch(statement) => self.lower_switch(ctx, statement),
             Statement::Try(statement) => self.lower_try(ctx, statement),
             Statement::Throw(statement) => self.lower_throw_statement(ctx, statement),
+            Statement::Yield(statement) => self.lower_yield(ctx, statement),
             Statement::Return(ReturnStatement { value, span, .. }) => {
+                let mut returned = None;
                 if let Some(value) = value {
                     // a returned local or parameter is not copied: its slot
                     // is dead once the function returns. A field or element
@@ -125,22 +127,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     } else {
                         self.owned_value(ctx, value)
                     };
-                    // converted to the declared return type
+                    // converted to the declared return type — or, in an
+                    // async body, to what its task carries
                     let (_, return_type) = self.function_shape(&ctx.key);
-                    let lowered = lowered.map(|slot| {
+                    let return_type = match &ctx.async_state {
+                        Some(state) => state.inner.clone(),
+                        None => return_type,
+                    };
+                    returned = lowered.map(|slot| {
                         let from = self.type_of(ctx, value);
                         self.convert(ctx, slot, &from, &return_type, span.clone())
                     });
-                    match (lowered, ctx.result) {
-                        (Some(value), Some(result)) => self.copy(value, result),
-                        (Some(_), None) => {}
-                        (None, _) => {
-                            let _ = span;
-                        }
+                    if ctx.async_state.is_none()
+                        && let (Some(value), Some(result)) = (returned, ctx.result)
+                    {
+                        self.copy(value, result);
                     }
                 }
                 // leaving every `try` region: their `finally` blocks first
                 self.emit_finally_copies(ctx, 0);
+                // an async body's `return` completes its task
+                if ctx.async_state.is_some() {
+                    self.complete_async(ctx, returned, span.clone());
+                }
                 self.program.code.push(Op::JumpIndirect(ctx.return_slot));
             }
             Statement::Break(statement) => {
@@ -679,6 +688,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 );
                 None
             }
+            Expression::Await(await_expression) => self.lower_await(ctx, await_expression),
             Expression::Binary(binary) => self.lower_binary(ctx, binary, expression),
             Expression::Unary(unary) => self.lower_unary(ctx, unary, expression),
             Expression::Assignment(assignment) => self.lower_assignment(ctx, assignment),
@@ -1895,9 +1905,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return Place::Error;
         }
         if let Type::Array { element, rank: 1 } = &ty {
-            let index = Self::single_index_expression(arguments).and_then(|expression| {
-                self.index_value(ctx, slot, &ty, expression, span.clone())
-            });
+            let index = Self::single_index_expression(arguments)
+                .and_then(|expression| self.index_value(ctx, slot, &ty, expression, span.clone()));
             return match index {
                 Some(index) => Place::Element {
                     array: slot,
@@ -2323,8 +2332,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             ("op_LessThanOrEqual", end, length),
             ("op_LessThanOrEqual", start, end),
         ] {
-            let signature =
-                format!("SystemInt32.__{name}__SystemInt32_SystemInt32__SystemBoolean");
+            let signature = format!("SystemInt32.__{name}__SystemInt32_SystemInt32__SystemBoolean");
             self.call_extern(ctx, &signature, &[left, right, flag], span.clone());
             self.program.code.push(Op::Push(flag));
             self.program.code.push(Op::JumpIfFalse(Target::Label(fail)));
@@ -2810,8 +2818,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     }
                 };
                 if let PrimaryRight::Member { name: Ok(name), .. } = right
-                    && let Some(place) =
-                        self.tuple_element_place(ctx, &receiver, name.value, span)
+                    && let Some(place) = self.tuple_element_place(ctx, &receiver, name.value, span)
                 {
                     return match self.read_place(ctx, place, span.clone()) {
                         Some((slot, ty)) => Piece::Value(slot, ty),
@@ -2887,8 +2894,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     };
                     let slot = *slot;
                     let ty = ty.clone();
-                    let index = Self::single_index_expression(arguments.arguments)
-                        .and_then(|expression| {
+                    let index =
+                        Self::single_index_expression(arguments.arguments).and_then(|expression| {
                             self.index_value(ctx, slot, &ty, expression, span.clone())
                         });
                     let Some(index) = index else {
@@ -3369,15 +3376,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let Some(payload) = self.local_function_payload(ctx, &key, span.clone()) else {
                     return Piece::Error;
                 };
-                let this = self.function_has_this(&key).then_some(()).and(payload.first().copied());
+                let this = self
+                    .function_has_this(&key)
+                    .then_some(())
+                    .and(payload.first().copied());
                 let leading = payload.len();
                 let mut arguments: Vec<DataId> = payload[usize::from(this.is_some())..].to_vec();
                 arguments.extend(values);
                 let by_ref: Vec<(usize, Place)> = source_by_ref
                     .into_iter()
-                    .map(|(index, place)| {
-                        (index + leading - usize::from(this.is_some()), place)
-                    })
+                    .map(|(index, place)| (index + leading - usize::from(this.is_some()), place))
                     .collect();
                 match self.call_function(ctx, &key, this, &arguments, &by_ref, span) {
                     Some(result) => Piece::Value(result, return_type),
@@ -4368,8 +4376,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         Piece::Value(self.int_constant(value as i32), self.corlib_type("Int32"))
                     }
                     (Ok(value), false, _) => {
-                        let slot =
-                            self.constant("SystemInt64", &value.to_string(), HeapInit::Int64(value));
+                        let slot = self.constant(
+                            "SystemInt64",
+                            &value.to_string(),
+                            HeapInit::Int64(value),
+                        );
                         Piece::Value(slot, self.corlib_type("Int64"))
                     }
                     (Ok(value), true, false) if u32::try_from(value).is_ok() => {

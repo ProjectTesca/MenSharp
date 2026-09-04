@@ -202,6 +202,61 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.copy(*values.first()?, out);
                 Some(Piece::Value(out, target))
             }
+            // the scheduler's: a delayed event on this behaviour, the clock,
+            // and the log (see `tasks`)
+            "ScheduleResume" | "ScheduleResumeFrames" => {
+                let receiver = self.self_behaviour_slot();
+                let event = self.string_constant(super::tasks::RESUME_EVENT);
+                let timing = self.constant(
+                    "VRCUdonCommonEnumsEventTiming",
+                    "VRC.Udon.Common.Enums.EventTiming#0",
+                    HeapInit::EnumValue {
+                        dotnet_type: "VRC.Udon.Common.Enums.EventTiming".into(),
+                        value: 0,
+                    },
+                );
+                let signature = if name == "ScheduleResume" {
+                    "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEventDelayedSeconds__SystemString_SystemSingle_VRCUdonCommonEnumsEventTiming__SystemVoid"
+                } else {
+                    "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEventDelayedFrames__SystemString_SystemInt32_VRCUdonCommonEnumsEventTiming__SystemVoid"
+                };
+                self.call_extern(
+                    ctx,
+                    signature,
+                    &[receiver, event, *values.first()?, timing],
+                    span,
+                );
+                Some(Piece::Void)
+            }
+            "Now" => {
+                let out = self.temp("SystemSingle");
+                self.call_extern(
+                    ctx,
+                    "UnityEngineTime.__get_time__SystemSingle",
+                    &[out],
+                    span,
+                );
+                Some(Piece::Value(out, self.corlib_type("Single")))
+            }
+            "FrameCount" => {
+                let out = self.temp("SystemInt32");
+                self.call_extern(
+                    ctx,
+                    "UnityEngineTime.__get_frameCount__SystemInt32",
+                    &[out],
+                    span,
+                );
+                Some(Piece::Value(out, self.corlib_type("Int32")))
+            }
+            "LogError" => {
+                self.call_extern(
+                    ctx,
+                    "UnityEngineDebug.__LogError__SystemObject__SystemVoid",
+                    &[*values.first()?],
+                    span,
+                );
+                Some(Piece::Void)
+            }
             _ => None,
         }
     }

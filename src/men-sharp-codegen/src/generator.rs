@@ -122,6 +122,9 @@ pub fn generate(
         current_frame: None,
         frame_markers: Vec::new(),
         external_callers: HashSet::new(),
+        async_snapshots: Vec::new(),
+        resume_thunks: HashMap::new(),
+        self_behaviour: None,
     };
     generator.run(entry_path);
     CodegenOutput {
@@ -404,6 +407,16 @@ struct Generator<'a, 'ast> {
     /// analysis of *this* program can see — those ancestors get a runtime
     /// re-entry guard instead.
     external_callers: HashSet<FunctionKey>,
+    /// (function, slot) per `Op::SnapshotFrame`/`Op::RestoreSnapshot`
+    /// marker: the function whose frame the snapshot in `slot` copies.
+    /// Expanded with the frame markers, once every frame is complete. See
+    /// `tasks`.
+    async_snapshots: Vec<(FunctionKey, DataId)>,
+    /// The thunk that resumes each `async` function from a continuation
+    /// delegate, once made. See `tasks`.
+    resume_thunks: HashMap<FunctionKey, LabelId>,
+    /// The slot holding the program's own UdonBehaviour, once made.
+    self_behaviour: Option<DataId>,
 }
 
 /// Per-function compilation state.
@@ -425,6 +438,12 @@ struct Ctx<'ast> {
     /// The exception each enclosing `catch` block caught, innermost last:
     /// what a bare `throw;` rethrows.
     caught: Vec<DataId>,
+    /// Set inside an `async` body: its task and what completes it. See
+    /// `tasks`.
+    async_state: Option<tasks::AsyncCtx>,
+    /// Set inside an iterator body: the `Iterator<T>` it yields into. See
+    /// `tasks`.
+    iterator_state: Option<tasks::IteratorCtx>,
 }
 
 impl Ctx<'_> {
@@ -811,6 +830,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // else, since it dispatches `ToString` and `Message`
         let unhandled = self.unhandled_key();
         self.ensure_function(&unhandled);
+        // every event drains the continuation queue when its body is done,
+        // and the resume event feeds the timed ones into it (see `tasks`)
+        self.scheduler_key("__Drain");
+        self.scheduler_key("__OnResume");
 
         // fixpoint: draining the queue may register new types, which may make
         // dispatchers incomplete, which enqueues more functions, ...
@@ -918,6 +941,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 });
                 self.copy(result, return_value);
             }
+            // continuations of tasks the body completed run now, with the
+            // body's frames all returned from
+            self.emit_scheduler_call("__Drain", name);
+            self.program
+                .code
+                .push(Op::Jump(Target::Address(HALT_ADDRESS)));
+        }
+
+        // the event `SendCustomEventDelayed…` raises for timed continuations
+        if self.scheduler_key("__OnResume").is_some() {
+            let name = tasks::RESUME_EVENT;
+            self.begin_entry_stub(name, init_label, init_return, initialized);
+            self.emit_scheduler_call("__OnResume", name);
+            self.emit_scheduler_call("__Drain", name);
             self.program
                 .code
                 .push(Op::Jump(Target::Address(HALT_ADDRESS)));
@@ -1225,6 +1262,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 result: None,
                 return_slot: init_return, // unused
                 caught: Vec::new(),
+                async_state: None,
+                iterator_state: None,
             };
             self.call_function(&mut ctx, &key, None, &[], &[], span);
         }
@@ -1305,6 +1344,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             result: None,
             return_slot: slot, // unused
             caught: Vec::new(),
+            async_state: None,
+            iterator_state: None,
         };
         self.emit_function_start_mark(&ctx);
         match written {
@@ -1388,7 +1429,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .cloned()
             .collect();
 
-        if !any_recursion && guarded.is_empty() {
+        if !any_recursion && guarded.is_empty() && self.async_snapshots.is_empty() {
             self.program
                 .code
                 .retain(|op| !matches!(op, Op::SaveFrame(_) | Op::RestoreFrame(_)));
@@ -1437,6 +1478,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .zip(&expand)
             .filter(|(_, needed)| **needed)
             .map(|((_, callee), _)| (callee.clone(), self.functions[callee].frame.clone()))
+            .collect();
+        // what an `await` copies out of (and a resume copies back into) a
+        // suspended function: its frame, complete by now
+        let snapshot_frames: HashMap<FunctionKey, Vec<DataId>> = self
+            .async_snapshots
+            .iter()
+            .map(|(key, _)| (key.clone(), self.functions[key].frame.clone()))
             .collect();
 
         const SET: &str = "SystemObjectArray.__Set__SystemInt32_SystemObject__SystemVoid";
@@ -1489,6 +1537,32 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         out.push(Op::Push(false_constant));
                         out.push(Op::Push(*flag));
                         out.push(Op::Copy);
+                    }
+                }
+                Op::SnapshotFrame(id) => {
+                    let (key, slot) = self.async_snapshots[id as usize].clone();
+                    let frame = snapshot_frames[&key].clone();
+                    let count = self.int_constant(frame.len() as i32);
+                    out.push(Op::Push(count));
+                    out.push(Op::Push(slot));
+                    out.push(Op::Extern(CTOR.into()));
+                    for (index, source) in frame.iter().enumerate() {
+                        let at = self.int_constant(index as i32);
+                        out.push(Op::Push(slot));
+                        out.push(Op::Push(at));
+                        out.push(Op::Push(*source));
+                        out.push(Op::Extern(SET.into()));
+                    }
+                }
+                Op::RestoreSnapshot(id) => {
+                    let (key, slot) = self.async_snapshots[id as usize].clone();
+                    let frame = snapshot_frames[&key].clone();
+                    for (index, target) in frame.iter().enumerate() {
+                        let at = self.int_constant(index as i32);
+                        out.push(Op::Push(slot));
+                        out.push(Op::Push(at));
+                        out.push(Op::Push(*target));
+                        out.push(Op::Extern(GET.into()));
                     }
                 }
                 Op::RestoreFrame(id) => {
@@ -1946,7 +2020,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // a call into another program can synchronously come back into this
         // one — remember who makes them, so their ancestors get re-entry
         // guards (see resolve_frame_markers)
-        if signature.contains("SendCustomEvent") || signature.contains("SetProgramVariable") {
+        if (signature.contains("SendCustomEvent") && !signature.contains("SendCustomEventDelayed"))
+            || signature.contains("SetProgramVariable")
+        {
             self.external_callers.insert(ctx.key.clone());
         }
         // where this extern is in the source: an extern's own exception halts
@@ -2582,6 +2658,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.is_delegate_type(&ty) || self.nullable_inner(&ty).is_some() {
             return false;
         }
+        // ... and a task holds continuations, which are code addresses too
+        if self.is_task_type(&ty) {
+            return false;
+        }
         // ... and Unity serializes neither an array of arrays nor a tuple,
         // so those fields are the program's own, not the inspector's
         if matches!(ty, Type::Tuple(_)) {
@@ -2747,8 +2827,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 SyntaxRef::Property(property) => property.initializer.as_ref(),
                 _ => None,
-            })
-            ;
+            });
 
         // literal initializers bake into the heap default instead of running
         // as code. This matters for exported behaviour fields: the inspector's
@@ -3063,8 +3142,9 @@ mod expressions;
 mod functions;
 mod network;
 mod nullable;
-mod tuples;
 mod patterns;
 mod programs;
 mod runtime;
 mod structs;
+mod tasks;
+mod tuples;

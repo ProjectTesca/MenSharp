@@ -529,9 +529,11 @@ public static class MenSharpProxy
                     continue;
                 }
                 // what Unity never serializes, and the compiler never exports:
-                // delegates (a program's own code addresses), nullable value
+                // delegates (a program's own code addresses), tasks (which
+                // hold continuations — code addresses too), nullable value
                 // types (a boxed value or null), and jagged arrays
                 if (typeof(Delegate).IsAssignableFrom(field.FieldType)
+                    || typeof(System.Threading.Tasks.Task).IsAssignableFrom(field.FieldType)
                     || Nullable.GetUnderlyingType(field.FieldType) != null
                     || IsTuple(field.FieldType)
                     || (field.FieldType.IsArray

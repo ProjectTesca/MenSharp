@@ -584,14 +584,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     return;
                 };
                 let node = EntityID::from(&primary.left);
-                let Some(parts) = self.deconstructed_parts(
-                    ctx,
-                    value,
-                    ty,
-                    node,
-                    elements.len(),
-                    span.clone(),
-                ) else {
+                let Some(parts) =
+                    self.deconstructed_parts(ctx, value, ty, node, elements.len(), span.clone())
+                else {
                     return;
                 };
                 for (index, element) in elements.iter().enumerate() {
@@ -646,14 +641,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             VariableDesignation::Discard(_) => {}
             VariableDesignation::Parenthesized { elements, .. } => {
                 let node = EntityID::from(designation);
-                let Some(parts) = self.deconstructed_parts(
-                    ctx,
-                    value,
-                    ty,
-                    node,
-                    elements.len(),
-                    span.clone(),
-                ) else {
+                let Some(parts) =
+                    self.deconstructed_parts(ctx, value, ty, node, elements.len(), span.clone())
+                else {
                     return;
                 };
                 for (index, element) in elements.iter().enumerate() {
@@ -723,7 +713,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         };
         let receiver = Some((value, self.substitute(ty, &ctx.key.bindings)));
-        let (this, key) = self.source_call_target(ctx, &call, symbol, &receiver, false, span.clone())?;
+        let (this, key) =
+            self.source_call_target(ctx, &call, symbol, &receiver, false, span.clone())?;
         // one temp per `out` parameter: passed in, written home after
         let mut parts: Vec<(DataId, Type)> = Vec::with_capacity(wanted);
         for parameter in &call.signature.parameters {

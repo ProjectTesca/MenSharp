@@ -123,6 +123,12 @@ namespace System
         public NotSupportedException(string message) : base(message) { }
     }
 
+    public class OperationCanceledException : SystemException
+    {
+        public OperationCanceledException() : base("The operation was canceled.") { }
+        public OperationCanceledException(string message) : base(message) { }
+    }
+
     public class NotImplementedException : SystemException
     {
         public NotImplementedException() : base("The method or operation is not implemented.") { }
@@ -148,6 +154,15 @@ namespace System.Collections.Generic
     {
         public KeyNotFoundException() : base("The given key was not present in the dictionary.") { }
         public KeyNotFoundException(string message) : base(message) { }
+    }
+}
+
+namespace System.Threading.Tasks
+{
+    public class TaskCanceledException : OperationCanceledException
+    {
+        public TaskCanceledException() : base("A task was canceled.") { }
+        public TaskCanceledException(string message) : base(message) { }
     }
 }
 

@@ -68,13 +68,21 @@ pub(super) struct LocalFunctionInfo<'ast> {
 /// A thunk waiting to be emitted: the entry into `target` from the invoker
 /// of `shape`.
 pub(super) struct Thunk {
-    label: LabelId,
-    target: FunctionKey,
-    shape: u32,
-    /// How many delegate elements after the address feed the target's
-    /// leading parameters — its `this`, then a lambda's boxes. `usize::MAX`
-    /// marks the multicast thunk of the shape (`target` is its invoker).
-    payload: usize,
+    pub(super) label: LabelId,
+    pub(super) target: FunctionKey,
+    pub(super) shape: u32,
+    pub(super) kind: ThunkKind,
+}
+
+pub(super) enum ThunkKind {
+    /// A call of the target: `payload` is how many delegate elements after
+    /// the address feed the target's leading parameters — its `this`, then
+    /// a lambda's boxes.
+    Call { payload: usize },
+    /// The multicast thunk of the shape (`target` is its invoker).
+    Multicast,
+    /// Resumes a suspended `async` target from its snapshot (see `tasks`).
+    Resume,
 }
 
 const GET: &str = "SystemObjectArray.__Get__SystemInt32__SystemObject";
@@ -189,7 +197,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     // --------------------------------------------------------- invokers
 
     /// The invoker of a shape, made on first use.
-    fn ensure_invoker(&mut self, shape: &DelegateShape) -> (FunctionKey, u32) {
+    pub(super) fn ensure_invoker(&mut self, shape: &DelegateShape) -> (FunctionKey, u32) {
         if let Some(key) = self.invokers.get(shape) {
             let Role::DelegateInvoker(index) = key.role else {
                 unreachable!("an invoker has the invoker role");
@@ -255,7 +263,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             label,
             target: target.clone(),
             shape,
-            payload,
+            kind: ThunkKind::Call { payload },
         });
         label
     }
@@ -265,15 +273,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// it schedules nothing new itself.
     pub(super) fn emit_thunks(&mut self) {
         while let Some(thunk) = self.thunk_queue.pop_front() {
-            if thunk.payload == usize::MAX {
-                self.emit_multicast_thunk(thunk.label, thunk.shape);
-            } else {
-                self.emit_thunk(thunk);
+            match thunk.kind {
+                ThunkKind::Call { payload } => self.emit_thunk(thunk, payload),
+                ThunkKind::Multicast => self.emit_multicast_thunk(thunk.label, thunk.shape),
+                ThunkKind::Resume => self.emit_resume_thunk(thunk.label, &thunk.target),
             }
         }
     }
 
-    fn emit_thunk(&mut self, thunk: Thunk) {
+    fn emit_thunk(&mut self, thunk: Thunk, payload: usize) {
         let shape = self.delegate_shapes[thunk.shape as usize].clone();
         let invoker = self.invokers[&shape].clone();
         let ctx = self.dispatcher_ctx(&invoker);
@@ -296,14 +304,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
 
         self.program.code.push(Op::Label(thunk.label));
-        if target_parameters.len() != thunk.payload + shape.parameters.len() {
+        if target_parameters.len() != payload + shape.parameters.len() {
             self.errors.push(CodegenError {
                 message: format!(
                     "internal: the delegate target `{}` takes {} parameters, the delegate \
                      supplies {}",
                     self.functions[&thunk.target].name,
                     target_parameters.len(),
-                    thunk.payload + shape.parameters.len()
+                    payload + shape.parameters.len()
                 ),
                 file: ctx.file,
                 span: 0..0,
@@ -328,7 +336,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // the payload: receiver / `this` and boxes, straight into the
         // target's leading parameters
         let delegate = invoker_parameters[0];
-        for (index, &slot) in target_parameters.iter().enumerate().take(thunk.payload) {
+        for (index, &slot) in target_parameters.iter().enumerate().take(payload) {
             let element = self.int_constant(index as i32 + 1);
             self.call_extern(&ctx, GET, &[delegate, element, slot], 0..0);
         }
@@ -336,7 +344,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         for index in 0..shape.parameters.len() {
             self.copy(
                 invoker_parameters[1 + index],
-                target_parameters[thunk.payload + index],
+                target_parameters[payload + index],
             );
         }
 
@@ -359,7 +367,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         for (index, (_, by_ref)) in shape.parameters.iter().enumerate() {
             if *by_ref {
                 self.copy(
-                    target_parameters[thunk.payload + index],
+                    target_parameters[payload + index],
                     invoker_parameters[1 + index],
                 );
             }
@@ -372,7 +380,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     /// A fresh delegate object: the thunk's address, then the payload.
-    fn make_delegate(
+    pub(super) fn make_delegate(
         &mut self,
         ctx: &mut Ctx<'ast>,
         thunk: LabelId,
@@ -515,18 +523,32 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.bind_local(ctx, name, slot, ty.clone());
             }
         }
+        let is_async = Self::has_async_modifier(node.modifiers);
+        if is_async {
+            self.begin_async(ctx, &returns, node.span.clone());
+        }
+        // an async lambda's expression is what its task carries
+        let returns = match &ctx.async_state {
+            Some(state) => state.inner.clone(),
+            None => returns,
+        };
         match &node.body {
             Ok(LambdaBody::Expression(expression)) => {
                 if returns == Type::Void {
                     self.lower_expression(ctx, expression);
-                } else if let Some(value) = self.owned_value_as(ctx, expression, &returns)
-                    && let Some(result) = ctx.result
-                {
-                    self.copy(value, result);
+                } else if let Some(value) = self.owned_value_as(ctx, expression, &returns) {
+                    if is_async {
+                        self.complete_async(ctx, Some(value), expression.span());
+                    } else if let Some(result) = ctx.result {
+                        self.copy(value, result);
+                    }
                 }
             }
             Ok(LambdaBody::Block(block)) => self.lower_block(ctx, block),
             Err(()) => {}
+        }
+        if is_async {
+            self.end_async(ctx, node.span.clone());
         }
     }
 
@@ -632,11 +654,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         let has_this = info.has_this;
         let function = info.node.name.value.to_string();
-        let names: Vec<String> = info
-            .captures
-            .iter()
-            .map(|(name, _)| name.clone())
-            .collect();
+        let names: Vec<String> = info.captures.iter().map(|(name, _)| name.clone()).collect();
         let mut payload: Vec<DataId> = Vec::new();
         if has_this {
             let Some(this) = ctx.this_slot else {
@@ -708,7 +726,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             &slots[next..],
             &parameters,
         );
+        let is_async = Self::has_async_modifier(node.modifiers);
+        let is_iterator = self.bodies.iterators.contains(&EntityID::from(node));
+        let returns = self.local_functions[key].returns.clone();
+        if is_async {
+            self.begin_async(ctx, &returns, node.name.span.clone());
+        } else if is_iterator {
+            self.begin_iterator(ctx, &returns, node.name.span.clone());
+        }
         self.emit_function_body(ctx, &node.body);
+        if is_async {
+            self.end_async(ctx, node.name.span.clone());
+        } else if is_iterator {
+            self.end_iterator(ctx, node.name.span.clone());
+        }
     }
 
     // ----------------------------------------------------- method groups
@@ -1011,7 +1042,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     label,
                     target: self.invokers[shape].clone(),
                     shape: index,
-                    payload: usize::MAX,
+                    kind: ThunkKind::Multicast,
                 });
                 label
             }

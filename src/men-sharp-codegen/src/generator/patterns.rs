@@ -368,8 +368,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                                 span.clone(),
                                 None,
                             )?;
-                            let part =
-                                self.copy_range(ctx, value, &value_type, start, taken, span.clone());
+                            let part = self.copy_range(
+                                ctx,
+                                value,
+                                &value_type,
+                                start,
+                                taken,
+                                span.clone(),
+                            );
                             let matched = self.lower_pattern(ctx, part, &value_type, rest)?;
                             self.program.code.push(Op::Push(matched));
                             self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
@@ -389,14 +395,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         }
                         _ => self.int_constant(position as i32),
                     };
-                    let read = self.array_get(
-                        ctx,
-                        value,
-                        index,
-                        &value_type,
-                        &element_type,
-                        span.clone(),
-                    );
+                    let read =
+                        self.array_get(ctx, value, index, &value_type, &element_type, span.clone());
                     let matched = self.lower_pattern(ctx, read, &element_type, written)?;
                     self.program.code.push(Op::Push(matched));
                     self.program.code.push(Op::JumpIfFalse(Target::Label(end)));

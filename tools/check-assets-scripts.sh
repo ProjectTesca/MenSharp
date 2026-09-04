@@ -41,7 +41,6 @@ for candidate in \
     "$unity_data/MonoBleedingEdge/lib/mono/unityaot-linux/System.Core.dll" \
     "$unity_data/Managed/UnityEngine/UnityEngine.dll" \
     "$unity_data"/Managed/UnityEngine/UnityEngine.*Module.dll \
-    "$assemblies/ProjectTesca.MenSharp.Runtime.dll" \
     "$assemblies/MenSharpTestUSharp.dll" \
     "$assemblies/UdonSharp.Lib.dll" \
     "$assemblies/UdonSharp.Runtime.dll" \
@@ -57,6 +56,11 @@ output="$(mktemp -d)"
 trap 'rm -rf "$output"' EXIT
 
 echo "type-checking $compile_dir as C# $langversion (what Unity uses)"
+# the package's Runtime sources are compiled in rather than referenced as
+# Unity's built dll, so a twin class added to the package counts before
+# Unity has rebuilt it
+runtime_dir="$project/Packages/com.projecttesca.mensharp/Runtime"
+[[ -d "$runtime_dir" ]] || runtime_dir="$(cd "$(dirname "$0")/.." && pwd)/unity/com.projecttesca.mensharp/Runtime"
 dotnet "$csc" -nologo -target:library -nostdlib -langversion:"$langversion" \
-    "${references[@]}" -out:"$output/assets.dll" "$compile_dir"/*.cs
+    "${references[@]}" -out:"$output/assets.dll" "$compile_dir"/*.cs "$runtime_dir"/*.cs
 echo "ok"

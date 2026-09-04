@@ -1134,6 +1134,10 @@ namespace Game.Counters
                 "class A { public async System.Threading.Tasks.Task<int> M() { return await F(); } }",
             ),
             (
+                "await statement",
+                "class A { async void M() { await F(); await t; await (a + b); int x = await g; } }",
+            ),
+            (
                 "interpolated strings",
                 "class A { void M() { var s = $\"{a,5:F2} and {b}\"; var v = $@\"{a}\\n\"; \
                  var r = $\"\"\"{a}\"\"\"; var n = $\"{f(x, y)}\"; } }",

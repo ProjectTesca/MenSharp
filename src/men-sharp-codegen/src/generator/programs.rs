@@ -586,6 +586,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return Piece::Error;
         }
+        // a task's continuations are code addresses too: an `async` method
+        // of another behaviour can be called, but not awaited, from here
+        let crosses_task = self.is_task_type(&call.signature.return_type)
+            || call
+                .signature
+                .parameters
+                .iter()
+                .any(|parameter| self.is_task_type(&parameter.parameter_type));
+        if crosses_task {
+            let name = self.declarations.table.symbol(symbol).name;
+            self.error(
+                ctx,
+                format!(
+                    "`{name}` takes or returns a Task, which cannot cross into another \
+                     program yet: a task's continuations are code addresses of the program \
+                     that made it. Have the other behaviour call back into this one when \
+                     it is done (an event, or a method of this behaviour)"
+                ),
+                span,
+            );
+            return Piece::Error;
+        }
         let Some(layout) = self.export_layout(symbol) else {
             self.error(
                 ctx,
@@ -680,6 +702,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     "`{name}` is a delegate, which cannot cross into another program: a \
                      delegate is code addresses of the program that made it. Call a method \
                      of the other behaviour instead (`other.Method(...)`)"
+                ),
+                span,
+            );
+            return Place::Error;
+        }
+        if self.is_task_type(&ty) {
+            self.error(
+                ctx,
+                format!(
+                    "`{name}` is a Task, which cannot cross into another program: its \
+                     continuations are code addresses of the program that made it"
                 ),
                 span,
             );
