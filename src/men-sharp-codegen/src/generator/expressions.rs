@@ -439,6 +439,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return;
         };
 
+        // §13.9.5: an enumerator that can be disposed is disposed however
+        // the loop is left — the end, a `break`, a `return`, an exception.
+        // That is what runs an iterator's pending `finally` blocks.
+        let disposal = enumeration
+            .dispose
+            .clone()
+            .filter(|call| !self.dispose_does_nothing(call, &enumerator_type))
+            .map(|call| {
+                FinallyAction::Dispose(Box::new(Disposal {
+                    call,
+                    enumerator,
+                    enumerator_type: enumerator_type.clone(),
+                }))
+            });
+        let dispose_handler = self.fresh_label("foreach_dispose");
+        if let Some(action) = disposal.clone() {
+            ctx.loop_stack.push(BreakFrame::Try {
+                handler: dispose_handler,
+                finally: Some(action),
+            });
+        }
+
         ctx.locals.push(HashMap::new());
         let head = self.fresh_label("foreach_head");
         let break_label = self.fresh_label("foreach_break");
@@ -486,7 +508,47 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ctx.loop_stack.pop();
         self.program.code.push(Op::Jump(Target::Label(head)));
         self.program.code.push(Op::Label(break_label));
+
+        if let Some(action) = disposal {
+            // the region ends here, before the disposal itself runs: an
+            // exception out of `Dispose` unwinds past this loop, not into
+            // its own handler
+            ctx.loop_stack.pop();
+            let done = self.fresh_label("foreach_disposed");
+            self.emit_finally_action(ctx, &action);
+            self.program.code.push(Op::Jump(Target::Label(done)));
+
+            // left by an exception: dispose, then keep unwinding
+            self.program.code.push(Op::Label(dispose_handler));
+            let state = self.exception_state();
+            let saved = self.temp("SystemObject");
+            self.copy(state.exception, saved);
+            let cleared = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
+            self.copy(cleared, state.pending);
+            self.emit_finally_action(ctx, &action);
+            self.emit_throw(ctx, saved, span.clone(), false);
+            self.program.code.push(Op::Label(done));
+        }
         ctx.locals.pop();
+    }
+
+    /// A `Dispose()` that provably does nothing: a source method with an
+    /// empty body on a sealed type, which is every collection's enumerator.
+    /// Skipping it keeps a `foreach` over a list exactly the size it was.
+    fn dispose_does_nothing(&self, call: &ResolvedCall, enumerator_type: &Type) -> bool {
+        let MemberOrigin::Source(symbol) = call.origin else {
+            return false;
+        };
+        if self.is_interface_member(symbol) || !self.is_final_type(enumerator_type) {
+            return false;
+        }
+        let declarations = &self.declarations.table.symbol(symbol).declarations;
+        !declarations.is_empty()
+            && declarations.iter().all(|site| {
+                matches!(&site.syntax, SyntaxRef::Method(method)
+                    if matches!(&method.body, FunctionBody::Block(block)
+                        if block.statements.is_empty()))
+            })
     }
 
     /// `switch` over constants: compare the value against every case label in
@@ -1555,8 +1617,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 } else {
                     BinaryOperator::Subtract
                 };
+                // the place is found once: `a[Next()]++` moves once
                 let place = self.lower_place(ctx, operand_expression);
-                let (value, ty) = self.read_place(ctx, place, unary.span.clone())?;
+                let (value, ty) = self.read_place(ctx, place.clone(), unary.span.clone())?;
                 let updated = self.emit_binary_operator(
                     ctx,
                     operator,
@@ -1566,7 +1629,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     unary.span.clone(),
                     Some(EntityID::from(unary)),
                 )?;
-                let place = self.lower_place(ctx, operand_expression);
                 self.write_place(ctx, place, updated, unary.span.clone());
                 Some(updated)
             }
@@ -1608,44 +1670,49 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if assignment.operator.value == AssignmentOperator::Coalesce {
             return self.lower_coalesce_assignment(ctx, assignment);
         }
-        let value = self.owned_value(ctx, value_expression)?;
-        let value_type = self.type_of(ctx, value_expression);
-
-        let final_value = {
-            let operator = match assignment.operator.value {
-                AssignmentOperator::Add => BinaryOperator::Add,
-                AssignmentOperator::Subtract => BinaryOperator::Subtract,
-                AssignmentOperator::Multiply => BinaryOperator::Multiply,
-                AssignmentOperator::Divide => BinaryOperator::Divide,
-                AssignmentOperator::Modulo => BinaryOperator::Modulo,
-                AssignmentOperator::BitwiseAnd => BinaryOperator::BitwiseAnd,
-                AssignmentOperator::BitwiseOr => BinaryOperator::BitwiseOr,
-                AssignmentOperator::BitwiseXor => BinaryOperator::BitwiseXor,
-                AssignmentOperator::LeftShift => BinaryOperator::LeftShift,
-                AssignmentOperator::RightShift => BinaryOperator::RightShift,
-                _ => {
-                    self.error(
-                        ctx,
-                        "this compound assignment is not supported by the Udon backend yet",
-                        assignment.span.clone(),
-                    );
-                    return None;
-                }
-            };
-            let place = self.lower_place(ctx, &assignment.target);
-            let (current, target_type) = self.read_place(ctx, place, assignment.span.clone())?;
-            self.emit_binary_operator(
-                ctx,
-                operator,
-                (current, &target_type),
-                (value, &value_type),
-                &target_type,
-                assignment.span.clone(),
-                Some(EntityID::from(assignment)),
-            )?
+        let operator = match assignment.operator.value {
+            AssignmentOperator::Add => BinaryOperator::Add,
+            AssignmentOperator::Subtract => BinaryOperator::Subtract,
+            AssignmentOperator::Multiply => BinaryOperator::Multiply,
+            AssignmentOperator::Divide => BinaryOperator::Divide,
+            AssignmentOperator::Modulo => BinaryOperator::Modulo,
+            AssignmentOperator::BitwiseAnd => BinaryOperator::BitwiseAnd,
+            AssignmentOperator::BitwiseOr => BinaryOperator::BitwiseOr,
+            AssignmentOperator::BitwiseXor => BinaryOperator::BitwiseXor,
+            AssignmentOperator::LeftShift => BinaryOperator::LeftShift,
+            AssignmentOperator::RightShift => BinaryOperator::RightShift,
+            _ => {
+                self.error(
+                    ctx,
+                    "this compound assignment is not supported by the Udon backend yet",
+                    assignment.span.clone(),
+                );
+                return None;
+            }
         };
 
+        // §12.21.4, in this order: find the place once, so the receiver and
+        // any index expression run once; read what it holds *now*, into a
+        // slot of our own, since evaluating the right side may write to the
+        // place itself; then the right side; then combine and store back.
         let place = self.lower_place(ctx, &assignment.target);
+        let (current, target_type) =
+            self.read_place(ctx, place.clone(), assignment.span.clone())?;
+        let previous = self.temp_for(&target_type);
+        self.copy(current, previous);
+
+        let value = self.owned_value(ctx, value_expression)?;
+        let value_type = self.type_of(ctx, value_expression);
+        let final_value = self.emit_binary_operator(
+            ctx,
+            operator,
+            (previous, &target_type),
+            (value, &value_type),
+            &target_type,
+            assignment.span.clone(),
+            Some(EntityID::from(assignment)),
+        )?;
+
         self.write_place(ctx, place, final_value, assignment.span.clone());
         Some(final_value)
     }
@@ -2620,8 +2687,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 PostfixOperator::Increment | PostfixOperator::Decrement
             )
         {
+            // ... and once here too, for the same reason
             let place = self.place_upto(ctx, primary, primary.chain.len() - 1);
-            let Some((value, ty)) = self.read_place(ctx, place, span.clone()) else {
+            let Some((value, ty)) = self.read_place(ctx, place.clone(), span.clone()) else {
                 return Piece::Error;
             };
             let old = self.temp_for(&ty);
@@ -2641,7 +2709,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 span.clone(),
                 Some(EntityID::from(last)),
             ) {
-                let place = self.place_upto(ctx, primary, primary.chain.len() - 1);
                 self.write_place(ctx, place, updated, span.clone());
             }
             return Piece::Value(old, ty);
@@ -3071,7 +3138,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     // ---------------------------------------------------------------- calls
 
-    fn emit_call(
+    pub(super) fn emit_call(
         &mut self,
         ctx: &mut Ctx<'ast>,
         call: &ResolvedCall,

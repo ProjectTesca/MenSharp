@@ -530,7 +530,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let end = self.fresh_label("finally_end");
         ctx.loop_stack.push(BreakFrame::Try {
             handler,
-            finally: Some(finally),
+            finally: Some(FinallyAction::Block(finally)),
         });
         self.lower_try_catch(ctx, statement);
         ctx.loop_stack.pop();
@@ -639,15 +639,38 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         while index > above {
             index -= 1;
             let BreakFrame::Try {
-                finally: Some(block),
+                finally: Some(action),
                 ..
-            } = ctx.loop_stack[index]
+            } = &ctx.loop_stack[index]
             else {
                 continue;
             };
+            let action = action.clone();
             let outer = ctx.loop_stack.split_off(index);
-            self.lower_block(ctx, block);
+            self.emit_finally_action(ctx, &action);
             ctx.loop_stack.extend(outer);
+        }
+    }
+
+    /// One region's way out: the block as written, or the `Dispose()` a
+    /// `foreach` owes its enumerator.
+    pub(super) fn emit_finally_action(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        action: &FinallyAction<'ast>,
+    ) {
+        match action {
+            FinallyAction::Block(block) => self.lower_block(ctx, block),
+            FinallyAction::Dispose(disposal) => {
+                self.emit_call(
+                    ctx,
+                    &disposal.call,
+                    Some((disposal.enumerator, disposal.enumerator_type.clone())),
+                    &[],
+                    0..0,
+                    false,
+                );
+            }
         }
     }
 

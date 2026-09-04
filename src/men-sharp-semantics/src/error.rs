@@ -170,8 +170,12 @@ pub enum SemanticErrorKind {
     /// `yield` in a lambda, or in a member whose return type is not
     /// `IEnumerable<T>`/`IEnumerator<T>` (CS1621/CS1624).
     YieldOutsideIterator,
-    /// `yield` inside a `try`, `catch` or `finally` block (CS1626/CS1631/CS1625).
-    YieldInsideTry,
+    /// `yield` where C# does not allow one: a `try` block that has a
+    /// `catch`, a `catch` block, or a `finally` block
+    /// (CS1626/CS1631/CS1625). `region` names which.
+    YieldInsideTry {
+        region: String,
+    },
     /// `return value;` in an iterator (CS1622).
     ReturnInIterator,
     /// A construct the checker does not handle yet. Temporary scaffolding: each of

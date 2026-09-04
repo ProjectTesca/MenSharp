@@ -25,6 +25,10 @@ namespace System.Collections.Generic
     {
         bool MoveNext();
         T Current { get; }
+        /// Ends the enumeration early: what `foreach` calls on its way out,
+        /// however it leaves. An iterator runs its pending `finally` blocks
+        /// here; a collection's enumerator has nothing to do.
+        void Dispose();
     }
 }
 
@@ -45,7 +49,7 @@ namespace MenSharp.Internal
         }
     }
 
-    public class ArrayEnumerator<T> : System.Collections.Generic.IEnumerator<T>
+    public sealed class ArrayEnumerator<T> : System.Collections.Generic.IEnumerator<T>
     {
         private readonly T[] items;
         private int index;
@@ -62,6 +66,8 @@ namespace MenSharp.Internal
         }
 
         public T Current { get { return current; } }
+
+        public void Dispose() { }
     }
 
     public static class Iterators
@@ -70,11 +76,18 @@ namespace MenSharp.Internal
         /// it back when it resumes, so a copy made by a second `foreach`
         /// (`GetEnumerator` again) drives the same code with its own state.
         public static object Stepping;
+
+        /// Set while a suspended body is resumed only to run the `finally`
+        /// blocks it is sitting inside. The body reads it the instant it
+        /// resumes, before any code of the user's, so a `MoveNext` from
+        /// inside one of those blocks can clear it again without confusing
+        /// the body that is being disposed.
+        public static bool Disposing;
     }
 
     /// What an iterator method returns: both the enumerable and its
     /// enumerator, as C#'s compiler-generated class is.
-    public class Iterator<T> : System.Collections.Generic.IEnumerable<T>, System.Collections.Generic.IEnumerator<T>
+    public sealed class Iterator<T> : System.Collections.Generic.IEnumerable<T>, System.Collections.Generic.IEnumerator<T>
     {
         // 0 between steps (or not started), 1 yielded a value, 2 finished
         private int state;
@@ -127,6 +140,7 @@ namespace MenSharp.Internal
             resume = null;
             state = 0;
             Iterators.Stepping = this;
+            Iterators.Disposing = false;
             try
             {
                 step();
@@ -156,6 +170,36 @@ namespace MenSharp.Internal
             state = 2;
             current = default(T);
             resume = null;
+        }
+
+        /// Ends the enumeration where it stands: the body is resumed one
+        /// last time, in disposing mode, so the `finally` blocks it is
+        /// inside run before it is dropped. `foreach` calls this however it
+        /// leaves the loop, which is what makes `try`/`finally` around a
+        /// `yield return` mean what it does in C#.
+        public void Dispose()
+        {
+            if (state != 1)
+            {
+                state = 2;
+                current = default(T);
+                resume = null;
+                return;
+            }
+            Action step = resume;
+            resume = null;
+            state = 2;
+            Iterators.Stepping = this;
+            Iterators.Disposing = true;
+            try
+            {
+                step();
+            }
+            finally
+            {
+                Iterators.Disposing = false;
+                current = default(T);
+            }
         }
 
         public void Reset()

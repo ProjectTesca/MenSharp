@@ -509,12 +509,32 @@ enum BreakFrame<'ast> {
         break_target: LabelId,
     },
     /// A `try` region: where an exception raised (or returned into) this
-    /// region goes, and the `finally` block every exit out of it has to
-    /// run first.
+    /// region goes, and what every exit out of it has to run first.
     Try {
         handler: LabelId,
-        finally: Option<&'ast Block<'ast, 'ast>>,
+        finally: Option<FinallyAction<'ast>>,
     },
+}
+
+/// What leaving a `try` region runs on the way out.
+#[derive(Clone)]
+enum FinallyAction<'ast> {
+    /// The `Dispose()` call is the big variant, and one lives in every
+    /// `foreach` frame; boxing it keeps `BreakFrame` small.
+    /// The `finally` block as it was written.
+    Block(&'ast Block<'ast, 'ast>),
+    /// A `foreach` whose enumerator can be disposed: §13.9.5 wraps the loop
+    /// in exactly this `try`/`finally`, and it is what runs an iterator's
+    /// pending `finally` blocks when the loop is left early.
+    Dispose(Box<Disposal>),
+}
+
+/// See [`FinallyAction::Dispose`].
+#[derive(Clone)]
+struct Disposal {
+    call: ResolvedCall,
+    enumerator: DataId,
+    enumerator_type: Type,
 }
 
 /// An assignable location.

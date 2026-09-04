@@ -8576,6 +8576,14 @@ fn iterator_misuse_is_rejected_by_the_checker() {
                 {
                     try { yield return 1; } catch (Exception) { }
                 }
+                static IEnumerable<int> InCatch()
+                {
+                    try { } catch (Exception) { yield return 1; }
+                }
+                static IEnumerable<int> InFinally()
+                {
+                    try { } finally { yield break; }
+                }
                 public static void Main()
                 {
                     Func<int> f = () => { yield return 1; };
@@ -8606,10 +8614,12 @@ fn iterator_misuse_is_rejected_by_the_checker() {
             .any(|error| matches!(error.kind, SemanticErrorKind::ReturnInIterator)),
         "{kinds:#?}"
     );
-    assert!(
+    assert_eq!(
         errors
             .iter()
-            .any(|error| matches!(error.kind, SemanticErrorKind::YieldInsideTry)),
+            .filter(|error| matches!(error.kind, SemanticErrorKind::YieldInsideTry { .. }))
+            .count(),
+        3,
         "{kinds:#?}"
     );
 }
@@ -8788,4 +8798,150 @@ fn collections_and_iterators_pass_as_sequences() {
         string_of(&emulator, "Log"),
         "1,2,3,6;6;a,b,ann,bob,70;ann=30;bob=40;1,4,9,16,14;6;5;15;p,q,15;456;15;hey;o,k,"
     );
+}
+
+#[test]
+fn yield_inside_try_finally_cleans_up_however_the_loop_is_left() {
+    let Some(emulator) = run(
+        r#"
+        using System;
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+
+                static IEnumerable<int> Guarded()
+                {
+                    Log += "open;";
+                    try
+                    {
+                        yield return 1;
+                        Log += "mid;";
+                        yield return 2;
+                    }
+                    finally { Log += "close;"; }
+                }
+
+                static IEnumerable<int> Nested()
+                {
+                    try
+                    {
+                        try { yield return 1; }
+                        finally { Log += "inner;"; }
+                    }
+                    finally { Log += "outer;"; }
+                }
+
+                static IEnumerable<int> Early()
+                {
+                    try { yield return 1; yield break; }
+                    finally { Log += "efin;"; }
+                }
+
+                static string FirstOf()
+                {
+                    foreach (int n in Guarded()) { return "got" + n; }
+                    return "none";
+                }
+
+                public static void Main()
+                {
+                    // run to the end: the finally runs where the body reaches it
+                    foreach (int n in Guarded()) { Log += n + ";"; }
+                    Log += "|";
+
+                    // left early: the finally still runs, at the break
+                    foreach (int n in Guarded()) { Log += n + ";"; break; }
+                    Log += "|";
+
+                    // ... and at a return out of the loop
+                    Log += FirstOf() + ";|";
+
+                    // ... and when an exception carries the loop away
+                    try
+                    {
+                        foreach (int n in Guarded()) { throw new InvalidOperationException("boom"); }
+                    }
+                    catch (InvalidOperationException e) { Log += "caught " + e.Message + ";"; }
+                    Log += "|";
+
+                    // innermost finally first, as C# unwinds
+                    foreach (int n in Nested()) { break; }
+                    Log += "|";
+
+                    // `yield break` inside the region runs it too
+                    foreach (int n in Early()) { Log += "e" + n + ";"; }
+                    Log += "|";
+
+                    // never enumerated: the body never starts, so nothing to clean up
+                    IEnumerable<int> unused = Guarded();
+                    Log += "quiet";
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        // verified line for line against the same program under real .NET.
+        // The third segment has no `open;close;` because `Log += FirstOf()`
+        // reads `Log` before calling it, so what the call appended is
+        // overwritten — C#'s compound-assignment order, not a lost finally.
+        "open;1;mid;2;close;|open;1;close;|got1;|open;close;caught boom;|inner;outer;|e1;efin;|quiet"
+    );
+}
+
+#[test]
+fn a_compound_assignment_reads_its_target_before_the_right_side() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static int[] Cells = new int[2];
+                public static int Cell0;
+                public static int Reads;
+                static int Index() { Log += "i"; return 0; }
+                static int Next() { Log += "n"; return 1; }
+                static string Side() { Log += "s"; return "r"; }
+                static int Bump() { Cells[0] += 10; return 1; }
+                public static void Main()
+                {
+                    // §12.21.4: the target is read, then the right side is
+                    // evaluated, then they are combined — so what the right
+                    // side writes to the target is overwritten, not added to
+                    Log += Side();
+                    Cells[0] = 0;
+                    // ... and the index is evaluated once, before both
+                    Cells[Index()] += Bump();
+                    Cell0 = Cells[0];
+                    // an index expression runs once for `++` as well
+                    Cells[1] = 5;
+                    Reads = Cells[Next()]++;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "rin");
+    assert_eq!(int_of(&emulator, "Cell0"), 1);
+    assert_eq!(int_of(&emulator, "Reads"), 5);
+    match emulator.value_of("Cells") {
+        Some(Value::Array(cells)) => {
+            assert!(matches!(cells.borrow()[1], Value::Int32(6)), "{:?}", cells)
+        }
+        other => panic!("Cells = {other:?}"),
+    }
 }

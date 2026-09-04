@@ -376,14 +376,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let continuation = self.continuation_to(ctx, resume, span.clone());
                 self.call_corlib_member(
                     ctx,
-                    Some((state.object, state.ty)),
+                    Some((state.object, state.ty.clone())),
                     "__Yield",
                     &[value, continuation],
-                    span,
+                    span.clone(),
                 );
                 self.program.code.push(Op::JumpIndirect(ctx.return_slot));
                 self.program.code.push(Op::Label(resume));
                 self.reload_stepping(ctx, state.object);
+                self.emit_disposing_exit(ctx, &state, span);
             }
             (YieldKind::Break, _) => {
                 self.emit_finally_copies(ctx, 0);
@@ -392,6 +393,44 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             (YieldKind::Return, None) => {}
         }
+    }
+
+    /// Right after a resume: `Dispose` resumes a suspended body only to
+    /// unwind it, so the `finally` blocks this `yield` sits inside run and
+    /// the iteration ends there instead of carrying on.
+    fn emit_disposing_exit(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        state: &IteratorCtx,
+        span: Range<usize>,
+    ) {
+        let Some(field) = self
+            .find_symbol(&STEPPING_PATH[..3])
+            .and_then(|_| self.find_symbol(&["MenSharp", "Internal", "Iterators", "Disposing"]))
+        else {
+            self.error(
+                ctx,
+                "internal: the mini-corlib's Iterators.Disposing is missing",
+                span,
+            );
+            return;
+        };
+        let disposing = self.ensure_static(field, false);
+        let carry_on = self.fresh_label("yield_continue");
+        self.program.code.push(Op::Push(disposing));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(carry_on)));
+        self.emit_finally_copies(ctx, 0);
+        self.call_corlib_member(
+            ctx,
+            Some((state.object, state.ty.clone())),
+            "__Finish",
+            &[],
+            span,
+        );
+        self.program.code.push(Op::JumpIndirect(ctx.return_slot));
+        self.program.code.push(Op::Label(carry_on));
     }
 
     /// After a resume: the iterator driving this step may be a copy made by

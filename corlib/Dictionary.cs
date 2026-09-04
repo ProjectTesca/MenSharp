@@ -280,7 +280,7 @@ namespace System.Collections.Generic
         }
     }
 
-    public class DictionaryEnumerator<TKey, TValue> : IEnumerator<KeyValuePair<TKey, TValue>>
+    public sealed class DictionaryEnumerator<TKey, TValue> : IEnumerator<KeyValuePair<TKey, TValue>>
     {
         private int[] hashes;
         private TKey[] keys;
@@ -314,6 +314,8 @@ namespace System.Collections.Generic
         }
 
         public KeyValuePair<TKey, TValue> Current => current;
+
+        public void Dispose() { }
     }
 
     public class DictionaryKeyCollection<TKey, TValue> : IEnumerable<TKey>
@@ -338,7 +340,7 @@ namespace System.Collections.Generic
         }
     }
 
-    public class DictionaryKeyEnumerator<TKey, TValue> : IEnumerator<TKey>
+    public sealed class DictionaryKeyEnumerator<TKey, TValue> : IEnumerator<TKey>
     {
         private int[] hashes;
         private TKey[] keys;
@@ -370,6 +372,8 @@ namespace System.Collections.Generic
         }
 
         public TKey Current => current;
+
+        public void Dispose() { }
     }
 
     public class DictionaryValueCollection<TKey, TValue> : IEnumerable<TValue>
@@ -394,7 +398,7 @@ namespace System.Collections.Generic
         }
     }
 
-    public class DictionaryValueEnumerator<TKey, TValue> : IEnumerator<TValue>
+    public sealed class DictionaryValueEnumerator<TKey, TValue> : IEnumerator<TValue>
     {
         private int[] hashes;
         private TValue[] values;
@@ -426,5 +430,7 @@ namespace System.Collections.Generic
         }
 
         public TValue Current => current;
+
+        public void Dispose() { }
     }
 }

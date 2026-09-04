@@ -216,6 +216,10 @@ pub struct ForeachEnumeration {
     pub enumerator_type: Type,
     pub move_next: ResolvedCall,
     pub current: ResolvedMember,
+    /// The enumerator's `Dispose()`, when it has one: `foreach` calls it
+    /// however the loop is left, which is what runs an iterator's pending
+    /// `finally` blocks.
+    pub dispose: Option<ResolvedCall>,
 }
 
 /// What a checked node resolved to. Keyed by node identity in
@@ -329,7 +333,9 @@ pub fn check_file(
         iterator_element: None,
         yield_seen: false,
         value_return_seen: false,
-        try_depth: 0,
+        guarded_depth: 0,
+        catch_depth_for_yield: 0,
+        finally_depth: 0,
         iterators: HashSet::new(),
     };
 
@@ -569,7 +575,13 @@ struct Checker<'a, 'ast> {
     yield_seen: bool,
     value_return_seen: bool,
     /// How many `try`/`catch`/`finally` blocks enclose the current statement.
-    try_depth: usize,
+    /// How many `try` blocks that have a `catch` enclose this statement,
+    /// and how many `catch` and `finally` blocks do. C# allows `yield
+    /// return` in a `try` that only has a `finally`, and nowhere else
+    /// inside an exception region.
+    guarded_depth: usize,
+    catch_depth_for_yield: usize,
+    finally_depth: usize,
     /// See [`BodyCheck::iterators`].
     iterators: HashSet<EntityID>,
 }
@@ -2410,9 +2422,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
             Statement::Try(statement) => {
-                self.try_depth += 1;
+                let guarded = !statement.catches.is_empty();
+                if guarded {
+                    self.guarded_depth += 1;
+                }
                 if let Ok(block) = &statement.block {
                     self.check_block(block);
+                }
+                if guarded {
+                    self.guarded_depth -= 1;
                 }
                 for catch in statement.catches {
                     self.locals.push(Scope::default());
@@ -2430,7 +2448,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                     if let Ok(block) = &catch.block {
                         self.catch_depth += 1;
+                        self.catch_depth_for_yield += 1;
                         self.check_block(block);
+                        self.catch_depth_for_yield -= 1;
                         self.catch_depth -= 1;
                     }
                     self.locals.pop();
@@ -2438,9 +2458,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if let Some(finally) = &statement.finally_clause
                     && let Ok(block) = &finally.block
                 {
+                    self.finally_depth += 1;
                     self.check_block(block);
+                    self.finally_depth -= 1;
                 }
-                self.try_depth -= 1;
             }
             Statement::Using(statement) => {
                 self.locals.push(Scope::default());
@@ -4984,11 +5005,23 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             );
             return;
         };
-        if self.try_depth > 0 {
-            self.error(
-                SemanticErrorKind::YieldInsideTry,
-                statement.yield_keyword.clone(),
-            );
+        // §13.15: `yield` of either kind is out in a `finally`; a `yield
+        // return` is also out in a `catch`, and in a `try` that has one
+        let returns = statement.kind.value == YieldKind::Return;
+        let region = if self.finally_depth > 0 {
+            Some("a `finally` block")
+        } else if returns && self.catch_depth_for_yield > 0 {
+            Some("a `catch` block")
+        } else if returns && self.guarded_depth > 0 {
+            Some("a `try` block that has a `catch` (only `try`/`finally` may yield)")
+        } else {
+            None
+        };
+        if let Some(region) = region {
+            let kind = SemanticErrorKind::YieldInsideTry {
+                region: region.to_string(),
+            };
+            self.error(kind, statement.yield_keyword.clone());
         }
         self.yield_seen = true;
         match (statement.kind.value, &statement.value) {
@@ -6453,10 +6486,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let Some(MemberSignature::Property(member_type)) = current.signature.clone() else {
             return None;
         };
+        let dispose = self
+            .resolve_parameterless_call(&enumerator_type, "Dispose", span)
+            .map(|(call, _)| call);
         Some(ForeachEnumeration {
             get_enumerator,
             enumerator_type,
             move_next,
+            dispose,
             current: ResolvedMember {
                 origin: current.origin,
                 kind: current.kind,

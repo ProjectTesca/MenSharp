@@ -178,7 +178,7 @@ namespace System.Collections.Generic
         }
     }
 
-    public class ListEnumerator<T> : IEnumerator<T>
+    public sealed class ListEnumerator<T> : IEnumerator<T>
     {
         private T[] items;
         private int count;
@@ -204,5 +204,7 @@ namespace System.Collections.Generic
         }
 
         public T Current => current;
+
+        public void Dispose() { }
     }
 }

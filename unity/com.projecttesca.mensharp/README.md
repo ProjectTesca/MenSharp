@@ -681,7 +681,30 @@ above) work. It suspends the same way an `async` method does, so the same
 things hold: nothing is hoisted or rewritten, and any code that works in a
 method works in an iterator.
 
-`yield` inside a `try`/`catch`/`finally` block is not supported yet.
+An iterator can clean up after itself with `try`/`finally`, and the
+`finally` runs however the loop is left:
+
+```csharp
+private IEnumerable<int> Reading()
+{
+    handle = Open();
+    try
+    {
+        while (handle.HasMore) { yield return handle.Next(); }
+    }
+    finally { handle.Close(); }   // runs on break, return, or an exception too
+}
+```
+
+That works because `foreach` disposes its enumerator on every way out, as C#
+does, and disposing a suspended iterator resumes it one last time just to run
+the `finally` blocks it is sitting inside. Enumerators with nothing to clean
+up cost nothing: a `foreach` over an array, a string, a `List<T>` or a
+`Dictionary` compiles to exactly what it did before.
+
+Where C# says no, so does this: `yield return` inside a `try` that has a
+`catch` (CS1626), inside a `catch` (CS1631), and `yield` of either kind
+inside a `finally` (CS1625). `yield break` inside a `try`/`catch` is fine.
 
 ## Sequences: IEnumerable&lt;T&gt;
 
@@ -1081,8 +1104,7 @@ wrong thing:
 - `ulong` literals (`1UL`), and integer literals too big for `long`;
 - nested array braces (`{ { 1, 2 }, { 3, 4 } }`) — jagged and rectangular
   arrays are not there yet;
-- awaiting a task across a program boundary — see *async/await* — and
-  `yield` inside a `try` block — see *Iterators*.
+- awaiting a task across a program boundary — see *async/await*.
 
 Target-typed `new()` (`List<int> values = new();`, `Counter c = new(5);`) and
 the null-coalescing assignment (`name ??= "anon";`, which evaluates its right
