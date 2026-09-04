@@ -9091,9 +9091,14 @@ fn one_behaviour_awaits_another() {
     // continuation back to it rather than running it itself
     world.advance(1.0, 60).unwrap();
     assert_eq!(door_log(&world), "start21;opened;");
+    // the continuation comes home on the next frame, never inside the
+    // door's own event
+    assert_eq!(result(&world), "call;");
+    world.advance(0.0, 1).unwrap();
     assert_eq!(result(&world), "call;got42;");
 
     // ... and a task that faulted over there is caught over here
+    world.advance(0.0, 1).unwrap();
     world.advance(0.0, 1).unwrap();
     assert_eq!(result(&world), "call;got42;caught;end");
     // the exception itself cannot cross, so what arrives is its text
@@ -9172,6 +9177,142 @@ fn remote_tasks_are_ordinary_tasks_everywhere_else() {
     assert_eq!(result(&world), "queued2;ready9;");
 
     world.advance(1.0, 60).unwrap();
+    world.advance(0.0, 1).unwrap();
     assert_eq!(result(&world), "queued2;ready9;all3;end");
     assert!(!world.has_pending_events());
+}
+
+#[test]
+fn a_plain_event_can_start_several_async_helpers() {
+    let source = r#"
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour
+            {
+                public string Log = "";
+                public async Task<int> Open(int by)
+                {
+                    Log += "start;";
+                    await Scheduler.Delay(1f);
+                    Log += "opened;";
+                    return by * 2;
+                }
+            }
+
+            public class Switch : MenSharpBehaviour
+            {
+                public Door door;
+                public string Trace = "";
+                private Task<int> opening;
+
+                // the entry itself is NOT async: it starts helpers that are
+                public void Interact()
+                {
+                    Trace += "click;";
+                    opening = door.Open(21);
+                    Watch();
+                    Report();
+                }
+
+                private async void Watch()
+                {
+                    Trace += "watch;";
+                    int opened = await opening;
+                    Trace += "opened" + opened + ";";
+                }
+
+                private async void Report()
+                {
+                    await Scheduler.Delay(4f);
+                    Trace += "report;";
+                }
+            }
+        }
+        "#;
+    let Some(mut world) = world_of(source, &["Game.Door", "Game.Switch"]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let door = world.index_of("Game.Door").unwrap();
+    let switch = world.index_of("Game.Switch").unwrap();
+    world
+        .program_mut(switch)
+        .set_value("door", Value::Behaviour(door));
+
+    let trace = |world: &men_sharp_asm::World| match world.program(switch).value_of("Trace") {
+        Some(Value::Str(text)) => text.to_string(),
+        other => panic!("Trace = {other:?}"),
+    };
+
+    world.raise(switch, "_interact").unwrap();
+    assert_eq!(trace(&world), "click;watch;");
+
+    // the remote task finishes and hands the continuation home
+    world.advance(1.0, 60).unwrap();
+    world.advance(0.0, 1).unwrap();
+    assert_eq!(trace(&world), "click;watch;opened42;");
+
+    // ... and the other helper's own delay still comes up
+    world.advance(3.0, 180).unwrap();
+    assert_eq!(trace(&world), "click;watch;opened42;report;");
+}
+
+#[test]
+fn a_wake_up_that_arrives_early_still_leaves_a_way_back() {
+    // Each delay asks the runtime for one wake-up, and the due time it is
+    // measured against is read from a different clock than the one the
+    // runtime counts down. A wake-up that lands a hair early finds nothing
+    // due; if that were the end of it, the continuation would never run.
+    let source = r#"
+        using MenSharp;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static void Main() { Wait(); }
+                static async void Wait()
+                {
+                    await Scheduler.Delay(1f);
+                    Log += "woke";
+                }
+            }
+        }
+        "#;
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let Some((program, assembled)) = build(sources) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let dump = program.dump();
+    let mut emulator = Emulator::new(&program, &assembled);
+    emulator
+        .run(&assembled, "Main")
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert!(
+        emulator.has_pending_events(),
+        "the delay asked for a wake-up"
+    );
+
+    // the runtime's wake-up arrives, but early: drop the one it owed us and
+    // raise the event by hand with no time passed
+    emulator.delayed.clear();
+    emulator
+        .run(&assembled, "_mensharpResume")
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert_eq!(string_of(&emulator, "Log"), "", "nothing was due yet");
+    assert!(
+        emulator.has_pending_events(),
+        "the sweep left the wait behind, so it must have asked for another \
+         wake-up:\n{dump}"
+    );
+
+    // ... and that one gets it home
+    emulator
+        .advance(&assembled, 1.0, 60)
+        .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
+    assert_eq!(string_of(&emulator, "Log"), "woke");
 }

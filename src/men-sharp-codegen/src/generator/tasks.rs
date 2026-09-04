@@ -777,7 +777,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             name: INCOMING_RESUME.into(),
             udon_type: "SystemObjectArray".into(),
             init: HeapInit::Null,
-            export: true,
+            // not exported, like every other variable one program writes on
+            // another (`__0_x__param` and friends): `SetProgramVariable`
+            // reaches any symbol, and a public one would also be a public
+            // variable, which this is not
+            export: false,
             sync: None,
         });
         self.incoming_resume = Some(slot);

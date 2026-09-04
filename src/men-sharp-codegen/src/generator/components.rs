@@ -335,10 +335,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     span.clone(),
                 );
                 let event = self.string_constant(super::tasks::RESUME_EVENT);
-                // ... at the end of the frame, not now: the other program is
+                // ... on the next frame, not now: the other program is
                 // running its own event, and calling into it here is the
                 // re-entry the guard exists to stop
-                let none = self.int_constant(0);
+                let next = self.int_constant(1);
                 let timing = self.constant(
                     "VRCUdonCommonEnumsEventTiming",
                     "VRC.Udon.Common.Enums.EventTiming#0",
@@ -350,7 +350,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.call_extern(
                     ctx,
                     "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEventDelayedFrames__SystemString_SystemInt32_VRCUdonCommonEnumsEventTiming__SystemVoid",
-                    &[receiver, event, none, timing],
+                    &[receiver, event, next, timing],
                     span,
                 );
                 Some(Piece::Void)

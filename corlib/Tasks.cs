@@ -743,6 +743,43 @@ namespace MenSharp
                     i++;
                 }
             }
+            __Rearm();
+        }
+
+        /// Whatever is still waiting keeps a wake-up of its own.
+        ///
+        /// Each delay asks the runtime for one `_mensharpResume`, and the
+        /// due time it is compared against here is read from a different
+        /// clock than the one the runtime counts down. A wake-up that lands
+        /// a hair early would otherwise find nothing due and leave that
+        /// continuation with nothing left to wake it, ever. So a sweep that
+        /// leaves anything behind asks for another.
+        private static void __Rearm()
+        {
+            if (timedCount > 0)
+            {
+                float now = Internal.Programs.Now();
+                float earliest = timedDue[0];
+                for (int i = 1; i < timedCount; i++)
+                {
+                    if (timedDue[i] < earliest) { earliest = timedDue[i]; }
+                }
+                float wait = earliest - now;
+                if (wait < 0f) { wait = 0f; }
+                Internal.Programs.ScheduleResume(wait);
+            }
+            if (framedCount > 0)
+            {
+                int frame = Internal.Programs.FrameCount();
+                int earliest = framedDue[0];
+                for (int i = 1; i < framedCount; i++)
+                {
+                    if (framedDue[i] < earliest) { earliest = framedDue[i]; }
+                }
+                int wait = earliest - frame;
+                if (wait < 1) { wait = 1; }
+                Internal.Programs.ScheduleResumeFrames(wait);
+            }
         }
     }
 }
