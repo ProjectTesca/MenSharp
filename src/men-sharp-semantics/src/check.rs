@@ -755,6 +755,145 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
+    // ------------------------------------------------------ deconstruction
+
+    /// Is this assignment target a deconstruction rather than a place?
+    fn is_deconstruction(target: &'ast Expression<'ast, 'ast>) -> bool {
+        match target {
+            Expression::Declaration(_) => true,
+            Expression::Primary(primary) => {
+                primary.chain.is_empty() && matches!(primary.left, PrimaryLeft::Tuple { .. })
+            }
+            _ => false,
+        }
+    }
+
+    fn check_deconstruction(
+        &mut self,
+        assignment: &'ast men_sharp_parser::ast::AssignmentExpression<'ast, 'ast>,
+    ) -> Type {
+        let Ok(value) = &assignment.value else {
+            return Type::Error;
+        };
+        let value_type = self.check_expression(value);
+        self.bind_deconstruction(&assignment.target, &value_type);
+        value_type
+    }
+
+    /// One side of a deconstruction against the type it takes apart.
+    fn bind_deconstruction(&mut self, target: &'ast Expression<'ast, 'ast>, value: &Type) {
+        match target {
+            // `var (a, b)`, `int x` — a variable written where a value goes
+            Expression::Declaration(declaration) => {
+                let declared = self.resolve_type(&declaration.variable_type);
+                self.bind_designation(&declaration.designation, &declared, value, &declaration.span);
+            }
+            // `(x, y)` — each element assigns or declares on its own
+            Expression::Primary(primary) => {
+                let PrimaryLeft::Tuple { elements, span } = &primary.left else {
+                    self.error(SemanticErrorKind::UnsupportedExpression, target.span());
+                    return;
+                };
+                let Some(types) = self.tuple_parts(value, elements.len(), span) else {
+                    return;
+                };
+                for (element, element_type) in elements.iter().zip(types) {
+                    match &element.value {
+                        Expression::Declaration(_) | Expression::Primary(_)
+                            if Self::is_deconstruction(&element.value) =>
+                        {
+                            self.bind_deconstruction(&element.value, &element_type);
+                        }
+                        // `_` on its own is a discard, not a variable
+                        value_target if Self::is_discard(value_target) => {}
+                        value_target => {
+                            let ty = self.check_expression(value_target);
+                            self.require_convertible(
+                                &element_type,
+                                &ty,
+                                false,
+                                value_target.span(),
+                            );
+                        }
+                    }
+                }
+            }
+            other => {
+                self.error(SemanticErrorKind::UnsupportedExpression, other.span());
+            }
+        }
+    }
+
+    /// `(a, (b, c))` and friends: the names a deconstruction declares.
+    fn bind_designation(
+        &mut self,
+        designation: &'ast VariableDesignation<'ast, 'ast>,
+        declared: &Type,
+        value: &Type,
+        span: &Range<usize>,
+    ) {
+        match designation {
+            VariableDesignation::Single(name) => {
+                let ty = if matches!(declared, Type::Infer) {
+                    value.clone()
+                } else {
+                    self.require_convertible(value, declared, false, name.span.clone());
+                    declared.clone()
+                };
+                if matches!(ty, Type::Void | Type::Null) {
+                    self.error(SemanticErrorKind::TypeAnnotationNeeded, name.span.clone());
+                }
+                self.declare_local(name.value, ty);
+            }
+            VariableDesignation::Discard(_) => {}
+            VariableDesignation::Parenthesized { elements, span } => {
+                let Some(types) = self.tuple_parts(value, elements.len(), span) else {
+                    return;
+                };
+                for (element, element_type) in elements.iter().zip(types) {
+                    self.bind_designation(element, declared, &element_type, span);
+                }
+            }
+        }
+        let _ = span;
+    }
+
+    /// The element types a value of this type comes apart into, when it has
+    /// as many as the target wants.
+    fn tuple_parts(
+        &mut self,
+        value: &Type,
+        wanted: usize,
+        span: &Range<usize>,
+    ) -> Option<Vec<Type>> {
+        if matches!(value, Type::Error) {
+            return None;
+        }
+        if let Type::Tuple(elements) = value
+            && elements.len() == wanted
+        {
+            return Some(elements.iter().map(|element| element.element.clone()).collect());
+        }
+        let kind = SemanticErrorKind::TypeMismatch {
+            expected: format!("a tuple of {wanted} elements"),
+            found: self.display(value),
+        };
+        self.error(kind, span.clone());
+        None
+    }
+
+    /// A bare `_`: a discard, wherever a value could have been named.
+    fn is_discard(expression: &Expression<'ast, 'ast>) -> bool {
+        let Expression::Primary(primary) = expression else {
+            return false;
+        };
+        primary.chain.is_empty()
+            && matches!(
+                &primary.left,
+                PrimaryLeft::Identifier { name, generics: None, .. } if name.value == "_"
+            )
+    }
+
     /// A local function in scope, innermost first.
     fn local_function(&self, name: &str) -> Option<&LocalFunctionEntry<'ast>> {
         self.locals
@@ -2094,13 +2233,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
                 if let (Ok(variable_type), Ok(name)) = (&statement.variable_type, &statement.name) {
                     let declared = self.resolve_type(variable_type);
-                    let ty = if matches!(declared, Type::Infer) {
-                        element.clone()
-                    } else {
-                        self.require_convertible(&element, &declared, false, name.span.clone());
-                        declared
-                    };
-                    self.declare_local(name.value, ty);
+                    let span = name.span();
+                    self.bind_designation(name, &declared, &element, &span);
                 }
                 if let Ok(body) = statement.body {
                     self.check_statement(body);
@@ -2441,8 +2575,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.declare_local(name.value, matched.clone());
                 }
                 Ok(VariableDesignation::Discard(_)) | Err(()) => {}
-                Ok(_) => {
-                    self.error(SemanticErrorKind::UnsupportedExpression, pattern.span());
+                // `var (a, b)`: a deconstruction that always matches
+                Ok(designation @ VariableDesignation::Parenthesized { .. }) => {
+                    self.bind_designation(designation, &Type::Infer, matched, &pattern.span());
                 }
             },
             Pattern::Constant(expression) => {
@@ -2494,7 +2629,41 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.declare_local(name.value, target);
                 }
             }
-            // positional/list/slice matching needs Deconstruct and indexers
+            // `(0, var y)`: a tuple taken apart, position by position
+            Pattern::Positional {
+                pattern_type: None,
+                subpatterns,
+                property_subpatterns: [],
+                designation,
+                span,
+            } => {
+                if let Some(types) = self.tuple_parts(matched, subpatterns.len(), span) {
+                    for (subpattern, element) in subpatterns.iter().zip(&types) {
+                        // `(x: 0, y: 1)`: a name picks the element instead
+                        let element = match (&subpattern.name, matched) {
+                            (Some(name), Type::Tuple(elements)) => {
+                                match crate::types::tuple_element_index(elements, name.value) {
+                                    Some(index) => elements[index].element.clone(),
+                                    None => {
+                                        let kind = SemanticErrorKind::UnknownMember {
+                                            type_name: self.display(matched),
+                                        };
+                                        self.error(kind, name.span.clone());
+                                        Type::Error
+                                    }
+                                }
+                            }
+                            _ => element.clone(),
+                        };
+                        self.check_pattern(&subpattern.pattern, &element);
+                    }
+                }
+                if let Some(name) = designation {
+                    self.declare_local(name.value, matched.clone());
+                }
+            }
+            // a positional pattern on anything else needs `Deconstruct`, and
+            // list/slice patterns need indexers
             _ => {
                 self.error(SemanticErrorKind::UnsupportedExpression, pattern.span());
             }
@@ -2526,6 +2695,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         match expression {
             Expression::Primary(primary) => self.check_primary(primary, expected),
             Expression::Assignment(assignment) => {
+                // `var (a, b) = t;`, `(c, d) = t;`, `(int e, string f) = t;`
+                // — C# models every one of these as an assignment
+                if assignment.operator.value == AssignmentOperator::Assign
+                    && Self::is_deconstruction(&assignment.target)
+                {
+                    return self.check_deconstruction(assignment);
+                }
                 let target = self.check_expression(&assignment.target);
                 let Ok(value) = &assignment.value else {
                     return target;
@@ -3071,7 +3247,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         element: self.check_expression(&element.value),
                     })
                     .collect();
-                Meaning::Value(Type::Tuple(elements))
+                let ty = Type::Tuple(elements);
+                // the tuple is built where it is written, so the code
+                // generator reads its type from this very node
+                self.expression_types.insert(EntityID::from(left), ty.clone());
+                Meaning::Value(ty)
             }
             PrimaryLeft::New(new_expression) => self.check_new(new_expression, expected),
             PrimaryLeft::Typeof { target_type, .. } => {
@@ -3463,6 +3643,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if matches!(receiver, Type::Error) {
                     return Meaning::Error;
                 }
+                // `t.Item1`, `t.x`: a tuple's elements are not members of a
+                // type Udon knows — they are positions, resolved here
+                if let Type::Tuple(elements) = &receiver
+                    && let Some(index) = crate::types::tuple_element_index(elements, name)
+                {
+                    return Meaning::Value(elements[index].element.clone());
+                }
+
                 // `op.Invoke(...)` on a delegate of the compilation's own
                 if name == "Invoke"
                     && let Some(candidate) = self.source_delegate_invoke(&receiver)

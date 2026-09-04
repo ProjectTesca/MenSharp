@@ -373,7 +373,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             &element_type,
             statement.span.clone(),
         );
-        self.bind_local(ctx, name.value, variable, element_type.clone());
+        self.bind_designation(
+            ctx,
+            name,
+            variable,
+            &element_type,
+            &None,
+            statement.span.clone(),
+        );
 
         ctx.loop_stack.push(BreakFrame::Loop {
             continue_target: continue_label,
@@ -457,7 +464,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // so the body cannot reach into the enumerator's own slot
         let variable = self.temp_for(&element_type);
         self.copy(current, variable);
-        self.bind_local(ctx, name.value, variable, element_type);
+        self.bind_designation(ctx, name, variable, &element_type, &None, span.clone());
 
         // `continue` goes straight back to `MoveNext()`
         ctx.loop_stack.push(BreakFrame::Loop {
@@ -947,6 +954,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             return self.lift_binary(ctx, operator, left, right, result_type, span, node);
         }
+        // `a == b` on tuples: element by element, as C# defines it
+        if matches!(operator, Equal | NotEqual)
+            && (Self::tuple_elements(left.1).is_some() || Self::tuple_elements(right.1).is_some())
+        {
+            return self.tuple_equality(ctx, operator == NotEqual, left, right, span);
+        }
         // `a + b`, `a - b`, `a == b` on delegates: the corlib helpers
         if self.is_delegate_type(left.1) || self.is_delegate_type(right.1) {
             return self.delegate_operator(ctx, operator, left, right, span);
@@ -1246,7 +1259,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     /// A value as a `string`, via the type's own `ToString` extern.
-    fn stringify(
+    pub(super) fn stringify(
         &mut self,
         ctx: &mut Ctx<'ast>,
         slot: DataId,
@@ -1254,6 +1267,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> DataId {
         let ty = &self.substitute(ty, &ctx.key.bindings);
+        // `(1, a)`: a tuple has no type at run time, so it is printed here,
+        // where its shape is known
+        if Self::tuple_elements(ty).is_some() {
+            return self.tuple_to_string(ctx, slot, ty, span);
+        }
         // a value that may be an object of the user's: its own `ToString`
         if self.has_type_id(ty)
             || (self.heap_type(ty) == "SystemObject"
@@ -1438,6 +1456,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         assignment: &'ast men_sharp_parser::ast::AssignmentExpression<'ast, 'ast>,
     ) -> Option<DataId> {
         let value_expression = assignment.value.as_ref().ok()?;
+        // `var (a, b) = t;` and friends are assignments whose target is a
+        // shape, not a place
+        if assignment.operator.value == AssignmentOperator::Assign
+            && Self::is_deconstruction_target(&assignment.target)
+        {
+            return self.lower_deconstruction(ctx, assignment);
+        }
         if assignment.operator.value == AssignmentOperator::Assign {
             // the target first (its index expressions run before the value,
             // as in C#), then the value converted to the target's type
@@ -1525,7 +1550,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     // --------------------------------------------------------------- places
 
-    fn lower_place(
+    pub(super) fn lower_place(
         &mut self,
         ctx: &mut Ctx<'ast>,
         expression: &'ast Expression<'ast, 'ast>,
@@ -1571,7 +1596,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let last = &primary.chain[count - 1];
         let receiver = piece.receiver();
         match last {
-            PrimaryRight::Member { span, .. } => {
+            PrimaryRight::Member { span, name, .. } => {
+                // a tuple's elements are positions, not members
+                if let Ok(name) = name
+                    && let Some(place) = self.tuple_element_place(ctx, &receiver, name.value, span)
+                {
+                    return place;
+                }
                 match self.bodies.targets.get(&EntityID::from(last)) {
                     Some(ResolvedTarget::Member(member)) => {
                         let member = member.clone();
@@ -2607,6 +2638,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     None => Piece::Error,
                 }
             }
+            PrimaryLeft::Tuple { elements, span } => {
+                let ty = self.type_of_node(ctx, EntityID::from(left));
+                match self.lower_tuple(ctx, elements, &ty, span.clone()) {
+                    Some(slot) => Piece::Value(slot, ty),
+                    None => Piece::Error,
+                }
+            }
             PrimaryLeft::Base(span) => match (ctx.this_slot, ctx.this_type.clone()) {
                 (Some(slot), Some(ty)) => Piece::Base {
                     receiver: Some((slot, ty)),
@@ -2758,6 +2796,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         Piece::Pending { receiver }
                     }
                 };
+                if let PrimaryRight::Member { name: Ok(name), .. } = right
+                    && let Some(place) =
+                        self.tuple_element_place(ctx, &receiver, name.value, span)
+                {
+                    return match self.read_place(ctx, place, span.clone()) {
+                        Some((slot, ty)) => Piece::Value(slot, ty),
+                        None => Piece::Error,
+                    };
+                }
                 match self.bodies.targets.get(&EntityID::from(right)) {
                     Some(ResolvedTarget::Member(member)) => {
                         let member = member.clone();
@@ -3368,6 +3415,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     };
                     if let Some((slot, receiver_type)) = receiver_value {
                         let receiver_type = self.substitute(&receiver_type, &ctx.key.bindings);
+                        // a tuple has no type at run time: its `Equals`,
+                        // `GetHashCode` and `ToString` are lowered here,
+                        // where the shape is known — which is what lets one
+                        // be a dictionary key
+                        if Self::tuple_elements(&receiver_type).is_some()
+                            && let Some(piece) = self.tuple_object_member(
+                                ctx,
+                                &member_name,
+                                (slot, &receiver_type),
+                                &values,
+                                span.clone(),
+                            )
+                        {
+                            return piece;
+                        }
                         if Some(slot) != ctx.this_slot
                             && self.has_type_id(&receiver_type)
                             && !self.is_source_struct(&receiver_type)
@@ -4515,7 +4577,7 @@ fn nameof_text<'a>(expression: &'a Expression<'a, 'a>) -> Option<&'a str> {
 }
 
 /// The type of what a place holds, for converting a value written to it.
-fn place_type(place: &Place) -> Option<Type> {
+pub(super) fn place_type(place: &Place) -> Option<Type> {
     match place {
         Place::Slot(_, ty)
         | Place::SelfReference { ty, .. }

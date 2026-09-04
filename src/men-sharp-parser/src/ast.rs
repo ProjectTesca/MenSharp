@@ -1063,7 +1063,9 @@ pub enum ForInitializer<'input, 'allocator> {
 pub struct ForeachStatement<'input, 'allocator> {
     pub foreach_keyword: Range<usize>,
     pub variable_type: Result<TypeRef<'input, 'allocator>, ()>,
-    pub name: Result<Ident<'input>, ()>,
+    /// `foreach (var x in ...)`, and the deconstructing
+    /// `foreach (var (a, b) in ...)`.
+    pub name: Result<VariableDesignation<'input, 'allocator>, ()>,
     pub in_keyword: Option<Range<usize>>,
     pub collection: Result<Expression<'input, 'allocator>, ()>,
     pub body: Result<&'allocator Statement<'input, 'allocator>, ()>,

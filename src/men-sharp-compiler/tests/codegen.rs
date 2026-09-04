@@ -7404,3 +7404,140 @@ fn jagged_arrays_are_arrays_of_arrays() {
     assert_eq!(string_of(&emulator, "Log"), "123b");
     assert_eq!(int_of(&emulator, "Result"), 83);
 }
+
+#[test]
+fn tuples_carry_values_and_come_apart() {
+    let source = r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int Result;
+                public static string Log = "";
+                public static (int, string) Pair() { return (1, "a"); }
+                public static (int x, int y) Point(int x, int y) { return (x, y); }
+                public static int Sum((int a, int b) values) { return values.a + values.b; }
+                public static void Main()
+                {
+                    (int, string) pair = Pair();
+                    Result += pair.Item1;                    // 1
+                    Log += pair.Item2;                       // a
+                    var named = Point(2, 3);
+                    Result += named.x * named.y;             // 7
+                    Result += named.Item1;                   // 9
+                    Result += Sum((4, 5));                   // 18
+
+                    // value semantics: a copy, not a share
+                    var copy = named;
+                    copy.x = 100;
+                    Result += named.x;                       // 20
+
+                    // deconstruction, in all three spellings
+                    var (a, b) = Pair();
+                    Result += a;                             // 21
+                    Log += b;                                // aa
+                    int c;
+                    string d;
+                    (c, d) = Pair();
+                    Result += c;                             // 22
+                    Log += d;                                // aaa
+                    (int e, string f) = Pair();
+                    Result += e;                             // 23
+                    Log += f;                                // aaaa
+                    var (_, only) = Pair();
+                    Log += only;                             // aaaaa
+                    (long wide, string _) = Pair();
+                    if (wide == 1L) Result += 10;            // 33
+
+                    // nested tuples
+                    ((int, int), string) nested = ((1, 2), "n");
+                    var ((p, q), r) = nested;
+                    Result += p + q;                         // 36
+                    Log += r;                                // aaaaan
+                    Result += nested.Item1.Item2;            // 38
+
+                    // equality is element by element
+                    if (Point(1, 2) == (1, 2)) Result += 100;        // 138
+                    if (Point(1, 2) != (1, 3)) Result += 1000;       // 1138
+
+                    // patterns
+                    var shape = Point(0, 5);
+                    if (shape is (0, var height)) Result += height;  // 1143
+                    switch (shape)
+                    {
+                        case (0, 0): Log += "origin"; break;
+                        case (0, var h): Log += "up" + h; break;
+                        default: Log += "?"; break;
+                    }                                        // aaaaanup5
+                    string kind = shape switch
+                    {
+                        (0, 0) => "origin",
+                        (var x, _) when x > 0 => "right",
+                        _ => "left",
+                    };
+                    Log += kind;                             // aaaaanup5left
+
+                    // tuples in a list, walked apart
+                    var list = new List<(int, string)>();
+                    list.Add((7, "z"));
+                    foreach (var (number, letter) in list)
+                    {
+                        Result += number;                    // 1150
+                        Log += letter;                       // ...z
+                    }
+                    foreach (var whole in list) Result += whole.Item1;   // 1157
+                    int[] plain = { 1, 2 };
+                    foreach (var value in plain) Result += value;        // 1160
+                    Result += list[0].Item1;                 // 1167
+                    (int, int) blank = default;
+                    Result += blank.Item1;                   // 1167
+                    var (bx, by) = blank;
+                    Result += bx + by;                       // 1167
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "aaaaanup5leftz");
+    assert_eq!(int_of(&emulator, "Result"), 1167);
+}
+
+#[test]
+fn a_tuple_prints_and_hashes_like_its_elements() {
+    let source = r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static int Result;
+                public static void Main()
+                {
+                    var t = (1, "a");
+                    Log += $"{t}";                            // (1, a)
+                    Log += ((2, (3, 4))).ToString();          // (2, (3, 4))
+
+                    // a tuple as a dictionary key: hashed and compared by
+                    // its elements, not by reference
+                    var map = new Dictionary<(int, int), string>();
+                    map[(1, 2)] = "here";
+                    map[(3, 4)] = "there";
+                    if (map.ContainsKey((1, 2))) Result += 1;
+                    if (!map.ContainsKey((9, 9))) Result += 10;
+                    Log += map[(3, 4)];                       // there
+                    if ((1, 2).Equals((1, 2))) Result += 100;
+                    if (!(1, 2).Equals((1, 3))) Result += 1000;
+                }
+            }
+        }
+    "#;
+    let Some(emulator) = run(source, "Main") else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "Log"), "(1, a)(2, (3, 4))there");
+    assert_eq!(int_of(&emulator, "Result"), 1111);
+}

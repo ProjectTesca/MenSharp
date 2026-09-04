@@ -626,6 +626,41 @@ variables written *above* it (C# says CS0841 otherwise), and calling one
 before such a variable's declaration has run is an error too — C# rejects
 that as a use before assignment.
 
+## Tuples
+
+`(int, string)`, named elements, deconstruction and positional patterns work
+as in C#:
+
+```csharp
+(int x, int y) Point(int x, int y) => (x, y);
+
+var p = Point(2, 3);
+int sum = p.x + p.y;                  // or p.Item1 + p.Item2
+var (a, b) = Point(4, 5);             // deconstruction, in every spelling
+(int e, string f) = Pair();            // declaring types inline
+foreach (var (id, name) in pairs) { ... }
+
+if (p is (0, var height)) { ... }     // positional patterns
+string kind = p switch
+{
+    (0, 0) => "origin",
+    (var x, _) when x > 0 => "right",
+    _ => "left",
+};
+
+var seen = new Dictionary<(int, int), string>();
+seen[(1, 2)] = "cell";                // hashed and compared element-wise
+Debug.Log($"{p}");                    // (2, 3), as C# prints it
+```
+
+A tuple is an `object[]` on the VM, with a value type's copy-on-assignment:
+`var copy = p; copy.x = 9;` leaves `p` alone. It has no type at run time, so
+`Equals`, `GetHashCode` and `ToString` are compiled element by element
+wherever the tuple's type is known — which is everywhere except a tuple that
+has been put in an `object`, where it compares by reference and prints as
+`System.Object[]`. Unity does not serialize tuples, so a tuple field is never
+an inspector variable.
+
 ## Nullable value types
 
 `int?`, `float?`, `Vector3?`, `MyStruct?` — `Nullable<T>` — work as in C#:
@@ -816,9 +851,11 @@ wrong thing:
   type does the same job. `static` local functions that use a variable of the
   method around them (CS8421), and local functions that use a variable written
   below them (CS0841), are errors here as they are in C#;
+- `Deconstruct` on a type of your own — `var (x, y) = point;` and
+  `point is (0, var y)` work on tuples, not yet on a class or struct that
+  offers a `Deconstruct` method;
 - multi-dimensional arrays (`int[,]`) — Udon has no type for one; a jagged
   array (`int[][]`) does the same job and works;
-- tuples (`(int, int)`), deconstruction and positional patterns;
 - `Index` and `Range` as values (`Index i = ^1;`): `^i` and `i..j` work where
   they are written, on arrays and strings, and nowhere else — Udon has no
   such types to pass around, and no `Span<T>` for a slice that does not copy;

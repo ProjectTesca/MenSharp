@@ -341,6 +341,16 @@ impl TypeSystem<'_, '_> {
             }
         }
 
+        // tuples convert element by element; the names are not part of it
+        // (`(int a, int b)` and `(int, int)` are the same type to the CLR)
+        if let (Type::Tuple(from_elements), Type::Tuple(to_elements)) = (from, to)
+            && from_elements.len() == to_elements.len()
+        {
+            return from_elements.iter().zip(to_elements).all(|(from, to)| {
+                self.is_implicitly_convertible(&from.element, &to.element)
+            });
+        }
+
         // a type parameter converts to its bounds (and whatever they convert to)
         if let Type::TypeParameter(symbol) = from {
             return self

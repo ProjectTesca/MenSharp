@@ -90,6 +90,19 @@ pub struct TupleElement {
     pub element: Type,
 }
 
+/// Which element of a tuple `Item3`, or a name written in its type, refers
+/// to. A tuple's elements are positions, not members of any type Udon knows.
+pub fn tuple_element_index(elements: &[TupleElement], name: &str) -> Option<usize> {
+    if let Some(index) = elements
+        .iter()
+        .position(|element| element.name.as_deref() == Some(name))
+    {
+        return Some(index);
+    }
+    let position: usize = name.strip_prefix("Item")?.parse().ok()?;
+    (position >= 1 && position <= elements.len()).then_some(position - 1)
+}
+
 /// The resolved signature of a callable: methods, constructors, operators,
 /// indexers, delegates.
 #[derive(Debug, Clone, PartialEq, Eq)]

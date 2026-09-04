@@ -1994,6 +1994,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.substitute(&ty, &ctx.key.bindings)
     }
 
+    /// The type the checker recorded for a node that is not a whole
+    /// expression — a tuple written inline, say.
+    fn type_of_node(&self, ctx: &Ctx, node: EntityID) -> Type {
+        let ty = self
+            .bodies
+            .expression_types
+            .get(&node)
+            .cloned()
+            .unwrap_or(Type::Error);
+        self.substitute(&ty, &ctx.key.bindings)
+    }
+
     /// The declared Udon heap type for a slot of this M# type.
     fn heap_type(&self, ty: &Type) -> String {
         match ty {
@@ -2027,6 +2039,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 SymbolKind::Enum => "SystemInt32".into(),
                 _ => "SystemObjectArray".into(),
             },
+            // a tuple is an `object[]`, like a struct
+            Type::Tuple(_) => "SystemObjectArray".into(),
             Type::Array { element, rank: 1 } => {
                 let name = format!("{}Array", self.heap_type_component(element));
                 if self.nodes.has_type(&name) {
@@ -2550,8 +2564,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.is_delegate_type(&ty) || self.nullable_inner(&ty).is_some() {
             return false;
         }
-        // ... and Unity does not serialize an array of arrays either, so a
-        // jagged field is the program's own, not the inspector's
+        // ... and Unity serializes neither an array of arrays nor a tuple,
+        // so those fields are the program's own, not the inspector's
+        if matches!(ty, Type::Tuple(_)) {
+            return false;
+        }
         if let Type::Array { element, .. } = &ty
             && matches!(**element, Type::Array { .. })
         {
@@ -3028,6 +3045,7 @@ mod expressions;
 mod functions;
 mod network;
 mod nullable;
+mod tuples;
 mod patterns;
 mod programs;
 mod runtime;

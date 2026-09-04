@@ -607,8 +607,8 @@ fn parse_foreach<'input, 'allocator>(
         }
     };
 
-    let name = match lexer.eat_ident() {
-        Some(name) => Ok(name),
+    let name = match super::pattern::parse_variable_designation(lexer, errors, allocator) {
+        Some(designation) => Ok(designation),
         None => {
             errors.push(recover_until_balanced(
                 lexer,

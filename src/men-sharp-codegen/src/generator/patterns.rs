@@ -27,15 +27,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         self.bind_pattern_variable(ctx, name.value, local, value_type);
                     }
                     Ok(VariableDesignation::Discard(_)) => {}
-                    _ => {
-                        self.error(
-                            ctx,
-                            "deconstructing `var (a, b)` patterns are not supported by the Udon \
-                             backend yet",
-                            span,
-                        );
-                        return None;
+                    // `var (a, b)`: a deconstruction that always matches
+                    Ok(designation @ VariableDesignation::Parenthesized { .. }) => {
+                        self.bind_designation(ctx, designation, value, &value_type, &None, span);
                     }
+                    Err(()) => return None,
                 }
                 Some(self.bool_constant(true))
             }
@@ -233,10 +229,55 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.program.code.push(Op::Label(end));
                 Some(result)
             }
+            // `(0, var y)`: the elements, position by position. The checker
+            // has already refused every shape but a tuple's.
+            Pattern::Positional {
+                pattern_type: None,
+                subpatterns,
+                property_subpatterns,
+                designation,
+                ..
+            } if property_subpatterns.is_empty()
+                && Self::tuple_elements(&value_type).is_some() =>
+            {
+                let result = self.temp("SystemBoolean");
+                let no = self.bool_constant(false);
+                self.copy(no, result);
+                let end = self.fresh_label("positional_pattern_end");
+
+                let elements = Self::tuple_elements(&value_type)
+                    .map(<[men_sharp_semantics::TupleElement]>::to_vec)
+                    .unwrap_or_default();
+                for (position, subpattern) in subpatterns.iter().enumerate() {
+                    // `(x: 0, y: 1)`: a name picks the element by name
+                    let index = match &subpattern.name {
+                        Some(name) => {
+                            men_sharp_semantics::tuple_element_index(&elements, name.value)?
+                        }
+                        None => position,
+                    };
+                    let element = self.substitute(&elements.get(index)?.element, &ctx.key.bindings);
+                    let at = self.tuple_slot(index);
+                    let read = self.get_element(ctx, value, at, &element, span.clone());
+                    let matched = self.lower_pattern(ctx, read, &element, &subpattern.pattern)?;
+                    self.program.code.push(Op::Push(matched));
+                    self.program.code.push(Op::JumpIfFalse(Target::Label(end)));
+                }
+
+                if let Some(name) = designation {
+                    let local = self.temp_for(&value_type);
+                    self.copy(value, local);
+                    self.bind_pattern_variable(ctx, name.value, local, value_type);
+                }
+                let yes = self.bool_constant(true);
+                self.copy(yes, result);
+                self.program.code.push(Op::Label(end));
+                Some(result)
+            }
             Pattern::Positional { .. } | Pattern::List { .. } | Pattern::Slice { .. } => {
                 self.error(
                     ctx,
-                    "positional and list patterns are not supported by the Udon backend yet",
+                    "a positional pattern works on a tuple; on a type of your own it would need                      a `Deconstruct` method, which the Udon backend does not call yet. List and                      slice patterns are not supported either",
                     span,
                 );
                 None
@@ -255,7 +296,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.bind_local(ctx, name, slot, ty);
     }
 
-    fn bool_constant(&mut self, value: bool) -> DataId {
+    pub(super) fn bool_constant(&mut self, value: bool) -> DataId {
         self.constant(
             "SystemBoolean",
             if value { "true" } else { "false" },

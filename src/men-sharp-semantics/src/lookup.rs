@@ -128,6 +128,9 @@ impl TypeSystem<'_, '_> {
                 roots
             }
             Type::ByRef { element, .. } => self.lookup_roots(element),
+            // a tuple's elements are positions, resolved by the checker; what
+            // it has as members is what every value has
+            Type::Tuple(_) => self.well_known("Object").into_iter().collect(),
             // dynamic defers everything; Error stays quiet; nothing else has members
             _ => Vec::new(),
         }

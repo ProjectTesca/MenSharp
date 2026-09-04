@@ -501,6 +501,13 @@ public static class MenSharpProxy
     /// `[SerializeField]`, minus `[NonSerialized]` — which is also exactly
     /// what the compiler exports. Walked class by class because GetFields
     /// never returns a base class's private fields.
+    private static bool IsTuple(Type type)
+    {
+        return type.IsGenericType
+            && type.FullName != null
+            && type.FullName.StartsWith("System.ValueTuple`", StringComparison.Ordinal);
+    }
+
     private static IEnumerable<FieldInfo> SerializedFields(Type type)
     {
         for (Type current = type;
@@ -526,6 +533,7 @@ public static class MenSharpProxy
                 // types (a boxed value or null), and jagged arrays
                 if (typeof(Delegate).IsAssignableFrom(field.FieldType)
                     || Nullable.GetUnderlyingType(field.FieldType) != null
+                    || IsTuple(field.FieldType)
                     || (field.FieldType.IsArray
                         && field.FieldType.GetElementType() is Type element
                         && element.IsArray))

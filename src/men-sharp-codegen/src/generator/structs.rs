@@ -83,6 +83,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> DataId {
         if self.is_source_struct(ty) {
             self.allocate_default_struct(ctx, ty, span)
+        } else if Self::tuple_elements(ty).is_some() {
+            self.default_tuple(ctx, ty, span)
         } else {
             self.default_value(ty)
         }
@@ -171,8 +173,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Option<DataId> {
         let value = self.lower_expression(ctx, expression)?;
         let ty = self.type_of(ctx, expression);
-        if self.is_source_struct(&ty) && !Self::is_fresh_value(expression) {
+        if Self::is_fresh_value(expression) {
+            return Some(value);
+        }
+        // a value type living in an `object[]` — a struct or a tuple — is
+        // copied into whatever holds it next
+        if self.is_source_struct(&ty) {
             return Some(self.clone_struct(ctx, value, &ty, expression.span()));
+        }
+        if Self::tuple_elements(&ty).is_some() {
+            return Some(self.clone_tuple(ctx, value, &ty, expression.span()));
         }
         Some(value)
     }
@@ -204,7 +214,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Some(_) => false,
             None => matches!(
                 primary.left,
-                PrimaryLeft::New(_) | PrimaryLeft::Default { .. }
+                PrimaryLeft::New(_) | PrimaryLeft::Default { .. } | PrimaryLeft::Tuple { .. }
             ),
         }
     }

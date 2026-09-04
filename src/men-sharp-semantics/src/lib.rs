@@ -58,7 +58,7 @@ pub use symbol::{
 };
 pub use types::{
     DefaultArgument, ExternalTypeId, FunctionSignature, MemberSignature, ParameterPassing,
-    ParameterSignature, TupleElement, Type, TypeTarget, TypeVariance,
+    ParameterSignature, TupleElement, Type, TypeTarget, TypeVariance, tuple_element_index,
 };
 
 #[cfg(test)]
