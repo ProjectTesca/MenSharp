@@ -52,6 +52,16 @@ namespace MenSharp
         public static Task Run(Func<Task> body) => body();
     }
 
+    /// What awaiting a faulted task of *another* behaviour throws. The
+    /// exception that behaviour raised cannot cross a program boundary: its
+    /// type is a number that means something only inside the program that
+    /// made it, so what arrives is the text it printed as.
+    public class RemoteTaskException : Exception
+    {
+        public RemoteTaskException() : base("A task from another behaviour faulted.") { }
+        public RemoteTaskException(string message) : base(message) { }
+    }
+
     /// When a task's continuation runs: on M# every task resumes what awaits
     /// it in the same event by default; these make a task that completes
     /// on a later frame or after a delay instead.

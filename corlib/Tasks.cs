@@ -62,8 +62,21 @@ namespace System.Threading.Tasks
         internal Exception __exception;
         internal Action[] __continuations;
         internal int __continuationCount;
+        /// The behaviour whose program made this task. A task can be handed
+        /// to another behaviour, but only its own program may run code for
+        /// it, so everything that would do so checks this first.
+        internal object __owner;
+        /// What `__exception` prints as, recorded where the exception's own
+        /// type is known. A faulted task read from another program can only
+        /// report the text: the exception object itself carries a type id
+        /// that means nothing outside the program that raised it.
+        internal string __exceptionText;
 
-        public Task() { }
+        public Task() { __owner = MenSharp.Internal.Programs.SelfBehaviour(); }
+
+        /// Was this task made by this program? Only then may its
+        /// continuations be run here, or its exception rethrown as itself.
+        internal bool __IsMine() { return MenSharp.Internal.Programs.IsSelf(__owner); }
 
         public bool IsCompleted { get { return __state != 0; } }
         public bool IsCompletedSuccessfully { get { return __state == 1; } }
@@ -170,8 +183,16 @@ namespace System.Threading.Tasks
         {
             if (__state != 0)
             {
+                // already done: this program runs it, in its own queue
                 MenSharp.Scheduler.__Enqueue(continuation);
                 return;
+            }
+            if (!__IsMine())
+            {
+                // the other program will fire this from its own queue, and
+                // a code address of ours means nothing there — so give it
+                // one that sends ours back to us instead
+                continuation = MenSharp.Internal.Programs.RemoteContinuation(continuation);
             }
             if (__continuations == null)
             {
@@ -202,6 +223,7 @@ namespace System.Threading.Tasks
             if (__state != 0) { return; }
             __state = 2;
             __exception = exception;
+            __exceptionText = exception == null ? "" : exception.ToString();
             __Fire();
         }
 
@@ -217,7 +239,14 @@ namespace System.Threading.Tasks
 
         internal void __Rethrow()
         {
-            if (__state == 2) { throw __exception; }
+            if (__state != 2) { return; }
+            if (!__IsMine())
+            {
+                // the exception object belongs to the other program: its
+                // type cannot be tested here, so only the text crosses
+                throw new MenSharp.RemoteTaskException(__exceptionText);
+            }
+            throw __exception;
         }
     }
 
@@ -651,7 +680,14 @@ namespace MenSharp
                 Action next = ready[readyHead];
                 ready[readyHead] = null;
                 readyHead++;
-                next();
+                if (Internal.Programs.IsRemoteContinuation(next))
+                {
+                    Internal.Programs.SendResume(next);
+                }
+                else
+                {
+                    next();
+                }
             }
             readyHead = 0;
             readyCount = 0;
@@ -661,6 +697,12 @@ namespace MenSharp
         /// time or frame has come.
         public static void __OnResume()
         {
+            // another behaviour may have sent one of our continuations home
+            Action incoming = Internal.Programs.TakeIncomingResume();
+            if (incoming != null)
+            {
+                __Enqueue(incoming);
+            }
             float now = Internal.Programs.Now();
             int frame = Internal.Programs.FrameCount();
             int i = 0;

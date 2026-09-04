@@ -651,10 +651,44 @@ private async void Blink(CancellationToken token)
 `source.CancelAfter(milliseconds)`, `CancellationToken.None` and `task.IsCanceled`
 work as in .NET.
 
-What does not cross a program boundary: a task holds code addresses of the
-program that made it, so awaiting a task returned by *another* behaviour's
-method, or passing one to it, is an error — have that behaviour call back
-into yours when it is done. Task-typed fields are not inspector variables.
+A task crosses a behaviour boundary, so one behaviour can await another's
+work directly:
+
+```csharp
+public class Door : MenSharpBehaviour
+{
+    public async Task<int> Open(int by)
+    {
+        await Scheduler.Delay(1f);
+        return by * 2;
+    }
+}
+
+public class Switch : MenSharpBehaviour
+{
+    public Door door;
+    public async void Interact()
+    {
+        int opened = await door.Open(21);   // resumes here when the door is done
+    }
+}
+```
+
+The task travels as data, and every part of it that would need the *owning*
+program's code — running a continuation, rethrowing its exception as itself —
+checks who owns it first. So a continuation you register on another
+behaviour's task is handed back to you rather than run over there, and it
+arrives at the end of the frame rather than in the middle of that behaviour's
+event: nothing is ever re-entered. Tasks kept in variables, `Task.WhenAll`
+over a mix of local and remote ones, and an already-finished remote task all
+behave like any other.
+
+Two things do not cross. An exception cannot: its type is a number that means
+something only inside the program that raised it, so awaiting a faulted remote
+task throws `MenSharp.RemoteTaskException` carrying the text the original
+printed as. And a Task-typed *field* is not an exported variable, so read one
+through a method instead. Task-typed fields are not inspector variables
+either.
 
 ## Iterators
 

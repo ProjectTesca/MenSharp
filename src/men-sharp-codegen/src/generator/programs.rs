@@ -586,28 +586,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return Piece::Error;
         }
-        // a task's continuations are code addresses too: an `async` method
-        // of another behaviour can be called, but not awaited, from here
-        let crosses_task = self.is_task_type(&call.signature.return_type)
-            || call
-                .signature
-                .parameters
-                .iter()
-                .any(|parameter| self.is_task_type(&parameter.parameter_type));
-        if crosses_task {
-            let name = self.declarations.table.symbol(symbol).name;
-            self.error(
-                ctx,
-                format!(
-                    "`{name}` takes or returns a Task, which cannot cross into another \
-                     program yet: a task's continuations are code addresses of the program \
-                     that made it. Have the other behaviour call back into this one when \
-                     it is done (an event, or a method of this behaviour)"
-                ),
-                span,
-            );
-            return Piece::Error;
-        }
+        // A task *may* cross: it is an object[] whose field positions are
+        // fixed by the mini-corlib both programs compile, and every piece of
+        // it that would need this program's code addresses — running a
+        // continuation, rethrowing the exception as itself — checks the
+        // owner first. See the `tasks` module.
         let Some(layout) = self.export_layout(symbol) else {
             self.error(
                 ctx,
@@ -711,8 +694,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.error(
                 ctx,
                 format!(
-                    "`{name}` is a Task, which cannot cross into another program: its \
-                     continuations are code addresses of the program that made it"
+                    "`{name}` is a Task-typed field, and those are not exported variables, \
+                     so another behaviour cannot read one. Return it from a method instead \
+                     (`await other.Ready()`), which does cross"
                 ),
                 span,
             );

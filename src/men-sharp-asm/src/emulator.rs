@@ -39,6 +39,9 @@ pub enum Value {
     /// The emulator has no scene, so it keeps the requested Udon type name and
     /// lets any extern that touches it fail loudly rather than pretend.
     SelfComponent(Rc<str>),
+    /// Another program in the same [`crate::World`], by index: what an
+    /// UdonBehaviour reference is once the programs are wired together.
+    Behaviour(usize),
 }
 
 impl Value {
@@ -137,6 +140,7 @@ impl Value {
             Value::Array(_) => "System.Object[]".into(),
             Value::Type(name) => name.to_string(),
             Value::SelfComponent(udon_type) => format!("<self:{udon_type}>"),
+            Value::Behaviour(index) => format!("<behaviour {index}>"),
         }
     }
 }
@@ -158,6 +162,12 @@ pub enum EmulatorError {
         index: i32,
         length: usize,
     },
+    /// A program reached for another one that is not in this world — or a
+    /// value that is not a behaviour reference at all.
+    NoSuchProgram {
+        target: usize,
+        what: String,
+    },
 }
 
 pub struct Emulator {
@@ -177,11 +187,54 @@ pub struct Emulator {
     pub delayed: Vec<DelayedEvent>,
 }
 
+/// The other programs a running one can reach: raising their events and
+/// reading and writing their exported variables, which is all Udon lets one
+/// behaviour do to another. A program run on its own has none.
+pub trait Peers {
+    fn send_event(&mut self, target: usize, event: &str) -> Result<(), EmulatorError>;
+    fn get_variable(&mut self, target: usize, name: &str) -> Result<Value, EmulatorError>;
+    fn set_variable(
+        &mut self,
+        target: usize,
+        name: &str,
+        value: Value,
+    ) -> Result<(), EmulatorError>;
+}
+
+/// No other programs: what [`Emulator::run`] uses.
+pub struct Alone;
+
+impl Peers for Alone {
+    fn send_event(&mut self, target: usize, event: &str) -> Result<(), EmulatorError> {
+        Err(EmulatorError::NoSuchProgram {
+            target,
+            what: event.to_string(),
+        })
+    }
+
+    fn get_variable(&mut self, target: usize, name: &str) -> Result<Value, EmulatorError> {
+        Err(EmulatorError::NoSuchProgram {
+            target,
+            what: name.to_string(),
+        })
+    }
+
+    fn set_variable(&mut self, target: usize, name: &str, _: Value) -> Result<(), EmulatorError> {
+        Err(EmulatorError::NoSuchProgram {
+            target,
+            what: name.to_string(),
+        })
+    }
+}
+
 /// One pending `SendCustomEventDelayed…` call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct DelayedEvent {
     pub event: String,
     pub due: Due,
+    /// The program it is raised on, when the sender named one. `None` means
+    /// the sender itself, which is every event the scheduler delays.
+    pub target: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -271,6 +324,16 @@ impl Emulator {
         !self.delayed.is_empty()
     }
 
+    /// Joins a world at `index`: every `this` reference to the behaviour
+    /// itself becomes a reference other programs can be handed.
+    pub fn adopt_as(&mut self, index: usize) {
+        for value in &mut self.heap {
+            if matches!(value, Value::SelfComponent(name) if &**name == "VRCUdonUdonBehaviour") {
+                *value = Value::Behaviour(index);
+            }
+        }
+    }
+
     /// The value of a named heap slot — how tests read program results.
     pub fn value_of(&self, name: &str) -> Option<&Value> {
         self.names.get(name).map(|&index| &self.heap[index])
@@ -290,6 +353,16 @@ impl Emulator {
     }
 
     pub fn run(&mut self, assembled: &Assembled, entry: &str) -> Result<(), EmulatorError> {
+        self.run_with(assembled, entry, &mut Alone)
+    }
+
+    /// [`Emulator::run`] with the other programs of a world in reach.
+    pub fn run_with(
+        &mut self,
+        assembled: &Assembled,
+        entry: &str,
+        peers: &mut dyn Peers,
+    ) -> Result<(), EmulatorError> {
         let start = *assembled
             .entry_addresses
             .get(entry)
@@ -367,7 +440,7 @@ impl Emulator {
                 }
                 Resolved::Extern(signature) => {
                     let signature = signature.clone();
-                    self.call_extern(&signature)?;
+                    self.call_extern(&signature, peers)?;
                 }
             }
             pc += 1;
@@ -386,7 +459,7 @@ impl Emulator {
         Ok(self.stack.split_off(self.stack.len() - count))
     }
 
-    fn call_extern(&mut self, signature: &str) -> Result<(), EmulatorError> {
+    fn call_extern(&mut self, signature: &str, peers: &mut dyn Peers) -> Result<(), EmulatorError> {
         // Binary integer/float operators and comparisons share one shape:
         // IN a, IN b, OUT result.
         macro_rules! binary_i32 {
@@ -599,6 +672,30 @@ impl Emulator {
                 self.heap[args[1]] = Value::Single(value);
                 Ok(())
             }
+            // ---- talking to another program ----
+            "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEvent__SystemString__SystemVoid" =>
+            {
+                let args = self.pop_arguments(2)?;
+                let event = self.heap[args[1]].as_str()?.to_string();
+                let target = self.behaviour_at(args[0], &event)?;
+                peers.send_event(target, &event)
+            }
+            "VRCUdonCommonInterfacesIUdonEventReceiver.__SetProgramVariable__SystemString_SystemObject__SystemVoid" =>
+            {
+                let args = self.pop_arguments(3)?;
+                let name = self.heap[args[1]].as_str()?.to_string();
+                let value = self.heap[args[2]].clone();
+                let target = self.behaviour_at(args[0], &name)?;
+                peers.set_variable(target, &name, value)
+            }
+            "VRCUdonCommonInterfacesIUdonEventReceiver.__GetProgramVariable__SystemString__SystemObject" =>
+            {
+                let args = self.pop_arguments(3)?;
+                let name = self.heap[args[1]].as_str()?.to_string();
+                let target = self.behaviour_at(args[0], &name)?;
+                self.heap[args[2]] = peers.get_variable(target, &name)?;
+                Ok(())
+            }
             // ---- time and delayed events ----
             "UnityEngineTime.__get_time__SystemSingle" => {
                 let args = self.pop_arguments(1)?;
@@ -615,9 +712,11 @@ impl Emulator {
                 let args = self.pop_arguments(4)?;
                 let event = self.heap[args[1]].as_str()?.to_string();
                 let seconds = self.heap[args[2]].as_f32()?;
+                let target = self.behaviour_index(args[0]);
                 self.delayed.push(DelayedEvent {
                     event,
                     due: Due::Time(self.time + seconds),
+                    target,
                 });
                 Ok(())
             }
@@ -626,9 +725,12 @@ impl Emulator {
                 let args = self.pop_arguments(4)?;
                 let event = self.heap[args[1]].as_str()?.to_string();
                 let frames = self.heap[args[2]].as_i32()?;
+                let target = self.behaviour_index(args[0]);
                 self.delayed.push(DelayedEvent {
                     event,
-                    due: Due::Frame(self.frame + frames.max(1)),
+                    // zero frames means "at the end of this one"
+                    due: Due::Frame(self.frame + frames.max(0)),
+                    target,
                 });
                 Ok(())
             }
@@ -924,6 +1026,7 @@ impl Emulator {
                     Value::Array(_) => "System.Object[]",
                     Value::Type(_) => "System.Type",
                     Value::SelfComponent(name) => &name.clone(),
+                    Value::Behaviour(_) => "VRC.Udon.UdonBehaviour",
                 };
                 self.heap[args[1]] = Value::Type(Rc::from(name));
                 Ok(())
@@ -951,6 +1054,7 @@ impl Emulator {
                     Value::Str(_) => Some("System.String"),
                     Value::Array(_) => Some("System.Object[]"),
                     Value::Type(_) => Some("System.Type"),
+                    Value::Behaviour(_) => Some("VRC.Udon.UdonBehaviour"),
                     Value::SelfComponent(_) => Some("<self>"),
                 };
                 let is = match actual {
@@ -1006,6 +1110,10 @@ impl Emulator {
                     (Value::Int32(a), Value::Int32(b)) => a == b,
                     (Value::Boolean(a), Value::Boolean(b)) => a == b,
                     (Value::Str(a), Value::Str(b)) => a == b,
+                    // two references to the same behaviour, and the `this`
+                    // reference a program run on its own resolves to
+                    (Value::Behaviour(a), Value::Behaviour(b)) => a == b,
+                    (Value::SelfComponent(a), Value::SelfComponent(b)) => a == b,
                     _ => false,
                 };
                 let wanted = equal != signature.contains("op_Inequality");
@@ -1139,6 +1247,26 @@ impl Emulator {
                 Ok(())
             }
             other => Err(EmulatorError::UnknownExtern(other.to_string())),
+        }
+    }
+
+    /// The program a behaviour-typed slot names.
+    fn behaviour_at(&self, address: usize, what: &str) -> Result<usize, EmulatorError> {
+        match &self.heap[address] {
+            Value::Behaviour(index) => Ok(*index),
+            other => Err(EmulatorError::NoSuchProgram {
+                target: usize::MAX,
+                what: format!("{what} on {}", other.display()),
+            }),
+        }
+    }
+
+    /// ... or `None` when the slot is this program's own `this`, which is
+    /// what every delayed event the scheduler raises names.
+    fn behaviour_index(&self, address: usize) -> Option<usize> {
+        match &self.heap[address] {
+            Value::Behaviour(index) => Some(*index),
+            _ => None,
         }
     }
 

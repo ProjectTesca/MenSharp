@@ -8,12 +8,14 @@
 
 pub mod emulator;
 pub mod program;
+pub mod world;
 
-pub use emulator::{Emulator, EmulatorError, Value};
+pub use emulator::{Alone, DelayedEvent, Due, Emulator, EmulatorError, Peers, Value};
 pub use program::{
     AssembleError, Assembled, DataId, DataSymbol, EntryPoint, HALT_ADDRESS, HeapInit, LabelId,
     NetworkCallable, Op, Program, Resolved, SourceMark, SourceMarkKind, Target, UdonType,
 };
+pub use world::World;
 
 #[cfg(test)]
 mod tests {

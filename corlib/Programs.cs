@@ -78,6 +78,47 @@ namespace MenSharp.Internal
         {
         }
 
+        // ------------------------------- crossing to another behaviour
+
+        /// Is this behaviour reference the program's own?
+        public static bool IsSelf(object behaviour)
+        {
+            return false;
+        }
+
+        /// This program's own UdonBehaviour: what a task records as its
+        /// owner, so a program can tell its own tasks from another's.
+        public static object SelfBehaviour()
+        {
+            return null;
+        }
+
+        /// Wraps a continuation so that the program holding it sends it
+        /// back here instead of jumping into it: a code address means
+        /// nothing outside the program that made it.
+        public static System.Action RemoteContinuation(System.Action local)
+        {
+            return local;
+        }
+
+        /// Was this continuation made by `RemoteContinuation`?
+        public static bool IsRemoteContinuation(System.Action continuation)
+        {
+            return false;
+        }
+
+        /// Hands a remote continuation back to the behaviour that made it.
+        public static void SendResume(System.Action continuation)
+        {
+        }
+
+        /// The continuation another program left here, if any; taking it
+        /// clears the slot.
+        public static System.Action TakeIncomingResume()
+        {
+            return null;
+        }
+
         // ------------------------------------------------- the searches
 
         public static T GetComponent<T>(object transform)

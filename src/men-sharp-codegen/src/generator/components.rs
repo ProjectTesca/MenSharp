@@ -248,6 +248,122 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 );
                 Some(Piece::Value(out, self.corlib_type("Int32")))
             }
+            // ---- crossing to another behaviour (see `tasks`) ----
+            "SelfBehaviour" => {
+                let slot = self.self_behaviour_slot();
+                let out = self.temp("SystemObject");
+                self.copy(slot, out);
+                Some(Piece::Value(out, self.corlib_type("Object")))
+            }
+            "IsSelf" => {
+                let mine = self.self_behaviour_slot();
+                let out = self.temp("SystemBoolean");
+                self.call_extern(
+                    ctx,
+                    "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean",
+                    &[*values.first()?, mine, out],
+                    span,
+                );
+                Some(Piece::Value(out, self.corlib_type("Boolean")))
+            }
+            // `object[] { null, us, the real continuation }` — element 0 is
+            // a code address in every ordinary delegate, so a null there is
+            // what tells the two apart
+            "RemoteContinuation" => {
+                let out = self.temp("SystemObjectArray");
+                let size = self.int_constant(3);
+                self.call_extern(
+                    ctx,
+                    "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
+                    &[size, out],
+                    span.clone(),
+                );
+                let null = self.constant("SystemObject", "null", HeapInit::Null);
+                let zero = self.int_constant(0);
+                self.set_element(ctx, out, zero, null, span.clone());
+                let one = self.int_constant(1);
+                let mine = self.self_behaviour_slot();
+                self.set_element(ctx, out, one, mine, span.clone());
+                let two = self.int_constant(2);
+                self.set_element(ctx, out, two, *values.first()?, span);
+                let action = self.substitute(&call.signature.return_type, &ctx.key.bindings);
+                Some(Piece::Value(out, action))
+            }
+            "IsRemoteContinuation" => {
+                let continuation = *values.first()?;
+                let out = self.temp("SystemBoolean");
+                let false_constant =
+                    self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
+                self.copy(false_constant, out);
+                let done = self.fresh_label("not_remote");
+                let null = self.constant("SystemObject", "null", HeapInit::Null);
+                let missing = self.temp("SystemBoolean");
+                self.call_extern(
+                    ctx,
+                    "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean",
+                    &[continuation, null, missing],
+                    span.clone(),
+                );
+                self.jump_if(missing, done);
+                let zero = self.int_constant(0);
+                let object = self.corlib_type("Object");
+                let head = self.get_element(ctx, continuation, zero, &object, span.clone());
+                self.call_extern(
+                    ctx,
+                    "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean",
+                    &[head, null, out],
+                    span,
+                );
+                self.program.code.push(Op::Label(done));
+                Some(Piece::Value(out, self.corlib_type("Boolean")))
+            }
+            "SendResume" => {
+                let continuation = *values.first()?;
+                let object = self.corlib_type("Object");
+                let one = self.int_constant(1);
+                let owner = self.get_element(ctx, continuation, one, &object, span.clone());
+                let two = self.int_constant(2);
+                let action = self.get_element(ctx, continuation, two, &object, span.clone());
+                // an extern reads the slot's declared type, not the value's
+                let receiver = self.temp(BEHAVIOUR_HEAP_TYPE);
+                self.copy(owner, receiver);
+                self.set_program_variable(
+                    ctx,
+                    receiver,
+                    super::tasks::INCOMING_RESUME,
+                    action,
+                    span.clone(),
+                );
+                let event = self.string_constant(super::tasks::RESUME_EVENT);
+                // ... at the end of the frame, not now: the other program is
+                // running its own event, and calling into it here is the
+                // re-entry the guard exists to stop
+                let none = self.int_constant(0);
+                let timing = self.constant(
+                    "VRCUdonCommonEnumsEventTiming",
+                    "VRC.Udon.Common.Enums.EventTiming#0",
+                    HeapInit::EnumValue {
+                        dotnet_type: "VRC.Udon.Common.Enums.EventTiming".into(),
+                        value: 0,
+                    },
+                );
+                self.call_extern(
+                    ctx,
+                    "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEventDelayedFrames__SystemString_SystemInt32_VRCUdonCommonEnumsEventTiming__SystemVoid",
+                    &[receiver, event, none, timing],
+                    span,
+                );
+                Some(Piece::Void)
+            }
+            "TakeIncomingResume" => {
+                let slot = self.incoming_resume_slot();
+                let out = self.temp("SystemObjectArray");
+                self.copy(slot, out);
+                let null = self.constant("SystemObjectArray", "null", HeapInit::Null);
+                self.copy(null, slot);
+                let action = self.substitute(&call.signature.return_type, &ctx.key.bindings);
+                Some(Piece::Value(out, action))
+            }
             "LogError" => {
                 self.call_extern(
                     ctx,

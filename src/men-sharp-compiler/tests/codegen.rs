@@ -8945,3 +8945,233 @@ fn a_compound_assignment_reads_its_target_before_the_right_side() {
         other => panic!("Cells = {other:?}"),
     }
 }
+
+/// Compiles each named behaviour from `sources` and wires them into one
+/// world, in the order given — a behaviour's index is its reference.
+fn world_of(source: &str, classes: &[&str]) -> Option<men_sharp_asm::World> {
+    let mut world = men_sharp_asm::World::new();
+    for class in classes {
+        let mut sources = vec![SourceCode::new("test.cs", source)];
+        sources.extend(Compiler::corlib_sources());
+        let program = compile_behaviour(sources, class)?;
+        assert!(
+            program.output.errors.is_empty(),
+            "codegen errors for {class}: {:#?}",
+            program.output.errors
+        );
+        let assembled = program.output.program.assemble().unwrap();
+        let emulator = Emulator::new(&program.output.program, &assembled);
+        world.add(class, assembled, emulator);
+    }
+    Some(world)
+}
+
+#[test]
+fn two_behaviours_really_talk_to_each_other() {
+    let source = r#"
+        using MenSharp;
+        namespace Game
+        {
+            public class Lamp : MenSharpBehaviour
+            {
+                public int Level;
+                public string Log = "";
+                public void Brighten() { Level++; Log += "b"; }
+                public int Add(int a, int b) { Log += "a"; return a + b; }
+                public int Doubled { get { return Level * 2; } set { Level = value / 2; } }
+            }
+
+            public class Switch : MenSharpBehaviour
+            {
+                public Lamp lamp;
+                public string Result = "";
+                public void Interact()
+                {
+                    lamp.Brighten();
+                    lamp.Brighten();
+                    Result += lamp.Level + ";";
+                    Result += lamp.Add(2, 3) + ";";
+                    lamp.Doubled = 10;
+                    Result += lamp.Level + ";" + lamp.Doubled + ";";
+                    Result += lamp.Log;
+                }
+            }
+        }
+        "#;
+    let Some(mut world) = world_of(source, &["Game.Lamp", "Game.Switch"]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let lamp = world.index_of("Game.Lamp").unwrap();
+    let switch = world.index_of("Game.Switch").unwrap();
+    world
+        .program_mut(switch)
+        .set_value("lamp", Value::Behaviour(lamp));
+
+    world.raise(switch, "_interact").unwrap();
+
+    match world.program(switch).value_of("Result") {
+        Some(Value::Str(text)) => assert_eq!(&**text, "2;5;5;10;bba"),
+        other => panic!("Result = {other:?}"),
+    }
+    match world.program(lamp).value_of("Level") {
+        Some(Value::Int32(level)) => assert_eq!(*level, 5),
+        other => panic!("Level = {other:?}"),
+    }
+}
+
+#[test]
+fn one_behaviour_awaits_another() {
+    let source = r#"
+        using System;
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour
+            {
+                public string Log = "";
+                public async Task<int> Open(int by)
+                {
+                    Log += "start" + by + ";";
+                    await Scheduler.Delay(1f);
+                    Log += "opened;";
+                    return by * 2;
+                }
+
+                public async Task Stick()
+                {
+                    await Scheduler.NextFrame();
+                    throw new InvalidOperationException("stuck");
+                }
+            }
+
+            public class Switch : MenSharpBehaviour
+            {
+                public Door door;
+                public string Result = "";
+                public string Fault = "";
+                public async void Interact()
+                {
+                    Result += "call;";
+                    int opened = await door.Open(21);
+                    Result += "got" + opened + ";";
+                    try { await door.Stick(); }
+                    catch (RemoteTaskException e) { Result += "caught;"; Fault = e.Message; }
+                    Result += "end";
+                }
+            }
+        }
+        "#;
+    let Some(mut world) = world_of(source, &["Game.Door", "Game.Switch"]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let door = world.index_of("Game.Door").unwrap();
+    let switch = world.index_of("Game.Switch").unwrap();
+    world
+        .program_mut(switch)
+        .set_value("door", Value::Behaviour(door));
+
+    let result = |world: &men_sharp_asm::World| match world.program(switch).value_of("Result") {
+        Some(Value::Str(text)) => text.to_string(),
+        other => panic!("Result = {other:?}"),
+    };
+    let door_log = |world: &men_sharp_asm::World| match world.program(door).value_of("Log") {
+        Some(Value::Str(text)) => text.to_string(),
+        other => panic!("Log = {other:?}"),
+    };
+
+    // the call crosses and the door starts working; the switch is suspended
+    world.raise(switch, "_interact").unwrap();
+    assert_eq!(result(&world), "call;");
+    assert_eq!(door_log(&world), "start21;");
+
+    // the door's delay comes up: it finishes, and hands the switch's own
+    // continuation back to it rather than running it itself
+    world.advance(1.0, 60).unwrap();
+    assert_eq!(door_log(&world), "start21;opened;");
+    assert_eq!(result(&world), "call;got42;");
+
+    // ... and a task that faulted over there is caught over here
+    world.advance(0.0, 1).unwrap();
+    assert_eq!(result(&world), "call;got42;caught;end");
+    // the exception itself cannot cross, so what arrives is its text
+    match world.program(switch).value_of("Fault") {
+        Some(Value::Str(text)) => assert!(
+            text.contains("InvalidOperationException") && text.contains("stuck"),
+            "{text}"
+        ),
+        other => panic!("Fault = {other:?}"),
+    }
+    assert!(!world.has_pending_events());
+}
+
+#[test]
+fn remote_tasks_are_ordinary_tasks_everywhere_else() {
+    let source = r#"
+        using System.Threading.Tasks;
+        using MenSharp;
+        namespace Game
+        {
+            public class Worker : MenSharpBehaviour
+            {
+                public int Jobs;
+                public Task<int> Slow(int n)
+                {
+                    Jobs++;
+                    return Delayed(n);
+                }
+                async Task<int> Delayed(int n)
+                {
+                    await Scheduler.Delay(1f);
+                    return n;
+                }
+                public Task<int> Ready(int n) { return Task.FromResult(n); }
+            }
+
+            public class Boss : MenSharpBehaviour
+            {
+                public Worker worker;
+                public string Result = "";
+                public async void Interact()
+                {
+                    // a remote task kept in a variable, awaited later
+                    Task<int> first = worker.Slow(1);
+                    Task<int> second = worker.Slow(2);
+                    Result += "queued" + worker.Jobs + ";";
+
+                    // one that is already finished takes the fast path and
+                    // never leaves this program
+                    Result += "ready" + await worker.Ready(9) + ";";
+
+                    // ... and the ordinary combinators work over both
+                    await Task.WhenAll(first, second, Scheduler.Delay(0.5f));
+                    Result += "all" + (first.Result + second.Result) + ";";
+                    Result += "end";
+                }
+            }
+        }
+        "#;
+    let Some(mut world) = world_of(source, &["Game.Worker", "Game.Boss"]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let worker = world.index_of("Game.Worker").unwrap();
+    let boss = world.index_of("Game.Boss").unwrap();
+    world
+        .program_mut(boss)
+        .set_value("worker", Value::Behaviour(worker));
+
+    let result = |world: &men_sharp_asm::World| match world.program(boss).value_of("Result") {
+        Some(Value::Str(text)) => text.to_string(),
+        other => panic!("Result = {other:?}"),
+    };
+
+    world.raise(boss, "_interact").unwrap();
+    assert_eq!(result(&world), "queued2;ready9;");
+
+    world.advance(1.0, 60).unwrap();
+    assert_eq!(result(&world), "queued2;ready9;all3;end");
+    assert!(!world.has_pending_events());
+}

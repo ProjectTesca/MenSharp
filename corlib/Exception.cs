@@ -157,6 +157,19 @@ namespace System.Collections.Generic
     }
 }
 
+namespace MenSharp
+{
+    /// What awaiting a faulted task of *another* behaviour throws. The
+    /// exception that behaviour raised cannot cross: its type is a number
+    /// that means something only inside the program that made it, so what
+    /// arrives is the text it printed as.
+    public class RemoteTaskException : System.Exception
+    {
+        public RemoteTaskException() : base("A task from another behaviour faulted.") { }
+        public RemoteTaskException(string message) : base(message) { }
+    }
+}
+
 namespace System.Threading.Tasks
 {
     public class TaskCanceledException : OperationCanceledException

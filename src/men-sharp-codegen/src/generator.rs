@@ -125,6 +125,7 @@ pub fn generate(
         async_snapshots: Vec::new(),
         resume_thunks: HashMap::new(),
         self_behaviour: None,
+        incoming_resume: None,
     };
     generator.run(entry_path);
     CodegenOutput {
@@ -417,6 +418,9 @@ struct Generator<'a, 'ast> {
     resume_thunks: HashMap<FunctionKey, LabelId>,
     /// The slot holding the program's own UdonBehaviour, once made.
     self_behaviour: Option<DataId>,
+    /// The exported slot another program leaves a continuation of ours in,
+    /// once made. See `tasks`.
+    incoming_resume: Option<DataId>,
 }
 
 /// Per-function compilation state.

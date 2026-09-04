@@ -43,6 +43,8 @@ const SCHEDULER_PATH: [&str; 2] = ["MenSharp", "Scheduler"];
 const ITERATOR_PATH: [&str; 3] = ["MenSharp", "Internal", "Iterator"];
 const STEPPING_PATH: [&str; 4] = ["MenSharp", "Internal", "Iterators", "Stepping"];
 const GET: &str = "SystemObjectArray.__Get__SystemInt32__SystemObject";
+/// The exported variable a remote continuation is handed over in.
+pub(super) const INCOMING_RESUME: &str = "__mensharp_resume";
 
 /// The state of an iterator body (`yield return`) while it is being
 /// compiled: the `Iterator<T>` it made on entry, its type and element type.
@@ -760,6 +762,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 })
             });
         self.self_behaviour = Some(slot);
+        slot
+    }
+
+    /// The exported slot a *remote* continuation arrives in: another
+    /// program writes it with `SetProgramVariable` and then raises
+    /// [`RESUME_EVENT`], which is how a task of ours that another behaviour
+    /// was holding gets its continuation back into our own queue.
+    pub(super) fn incoming_resume_slot(&mut self) -> DataId {
+        if let Some(slot) = self.incoming_resume {
+            return slot;
+        }
+        let slot = self.program.add_data(DataSymbol {
+            name: INCOMING_RESUME.into(),
+            udon_type: "SystemObjectArray".into(),
+            init: HeapInit::Null,
+            export: true,
+            sync: None,
+        });
+        self.incoming_resume = Some(slot);
         slot
     }
 
