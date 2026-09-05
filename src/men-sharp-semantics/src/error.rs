@@ -127,6 +127,13 @@ pub enum SemanticErrorKind {
     NotIndexable {
         type_name: String,
     },
+    /// `a[i]` on an `int[,]`, or `a[i, j]` on an `int[]` (CS0022).
+    WrongNumberOfIndices {
+        expected: u32,
+    },
+    /// `{ { 1, 2 }, { 3 } }` for an `int[,]`: every row of a rectangular
+    /// array initializer has the same length (CS0847).
+    RaggedArrayInitializer,
     /// `foreach` over something with no element type.
     NotEnumerable {
         type_name: String,

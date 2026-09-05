@@ -44,8 +44,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// Types whose values carry a type id: classes, structs and interfaces
     /// of the user's — except behaviours, which are program references.
     pub(super) fn has_type_id(&self, ty: &Type) -> bool {
-        // a tuple carries one too, so a boxed one is still itself
-        if matches!(ty, Type::Tuple(_)) {
+        // a tuple carries one too, so a boxed one is still itself; so does
+        // a rectangular array
+        if matches!(ty, Type::Tuple(_)) || Self::rectangular_rank(ty).is_some() {
             return true;
         }
         let Type::Named {
@@ -293,6 +294,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if matches!(to, Type::Tuple(_)) {
             return self.tuple_type_test(ctx, value, &to, span);
         }
+        if Self::rectangular_rank(&to).is_some() {
+            return self.rectangular_type_test(ctx, value, &to, span);
+        }
         if self.has_type_id(&to) {
             let test = self.type_test_for(ctx, &to)?;
             return self.call_function(ctx, &test, None, &[value], &[], span);
@@ -402,7 +406,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // a tuple's test is written where it is used: there is no subtype
         // chain to walk, only the shape's own id
         let inline_tuple = matches!(to, Type::Tuple(_));
-        let test = if external_downcast || inline_tuple {
+        let inline_rectangular = Self::rectangular_rank(&to).is_some();
+        let test = if external_downcast || inline_tuple || inline_rectangular {
             None
         } else {
             match self.type_test_for(ctx, &to) {
@@ -423,6 +428,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let ok = match test {
             Some(test) => self.call_function(ctx, &test, None, &[source], &[], span.clone()),
             None if inline_tuple => self.tuple_type_test(ctx, source, &to, span.clone()),
+            None if inline_rectangular => {
+                self.rectangular_type_test(ctx, source, &to, span.clone())
+            }
             None => {
                 let Some(wanted) = self.external_type_constant(ctx, &to, &span) else {
                     self.program.code.push(Op::Label(done));

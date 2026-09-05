@@ -770,6 +770,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let element = match declared {
             Type::Error => return,
             Type::Array { element, rank: 1 } => (**element).clone(),
+            Type::Array { element, rank } => {
+                let element = (**element).clone();
+                self.check_rectangular_initializer(initializer, &element, *rank);
+                return;
+            }
             other => {
                 let kind = SemanticErrorKind::TypeMismatch {
                     expected: self.display(other),
@@ -803,6 +808,83 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 // `{ { 1, 2 }, { 3, 4 } }`: a jagged or rectangular array
                 CollectionElement::Nested(nested) => {
                     self.error(SemanticErrorKind::UnsupportedExpression, nested.span());
+                }
+            }
+        }
+    }
+
+    /// `{ { 1, 2 }, { 3, 4 } }` for a `T[,]`: `rank` levels of braces,
+    /// every row at one level as long as its siblings, and the leaves
+    /// convertible to `T`.
+    fn check_rectangular_initializer(
+        &mut self,
+        initializer: &'ast men_sharp_parser::ast::Initializer<'ast, 'ast>,
+        element: &Type,
+        rank: u32,
+    ) {
+        use men_sharp_parser::ast::Initializer;
+        let elements = match initializer {
+            Initializer::Collection { elements, .. } => *elements,
+            Initializer::Object { elements: [], .. } => &[][..],
+            Initializer::Object { .. } => {
+                let kind = SemanticErrorKind::TypeMismatch {
+                    expected: format!(
+                        "{}[{}]",
+                        self.display(element),
+                        ",".repeat(rank as usize - 1)
+                    ),
+                    found: "object initializer".to_string(),
+                };
+                self.error(kind, initializer.span());
+                return;
+            }
+        };
+        // one expected length per level, fixed by the first row seen there
+        let mut lengths: Vec<Option<usize>> = vec![None; rank as usize];
+        self.check_rectangular_level(
+            elements,
+            element,
+            rank,
+            0,
+            &mut lengths,
+            &initializer.span(),
+        );
+    }
+
+    fn check_rectangular_level(
+        &mut self,
+        elements: &'ast [men_sharp_parser::ast::CollectionElement<'ast, 'ast>],
+        element: &Type,
+        rank: u32,
+        depth: usize,
+        lengths: &mut [Option<usize>],
+        span: &Range<usize>,
+    ) {
+        use men_sharp_parser::ast::{CollectionElement, Initializer};
+        match lengths[depth] {
+            Some(expected) if expected != elements.len() => {
+                self.error(SemanticErrorKind::RaggedArrayInitializer, span.clone());
+            }
+            Some(_) => {}
+            None => lengths[depth] = Some(elements.len()),
+        }
+        let innermost = depth + 1 == rank as usize;
+        for written in elements {
+            match (written, innermost) {
+                (CollectionElement::Expression(expression), true) => {
+                    let literal = Self::is_integer_literal(expression);
+                    let ty = self.check_expression_expecting(expression, Some(element));
+                    self.require_convertible(&ty, element, literal, expression.span());
+                }
+                (CollectionElement::Nested(Initializer::Collection { elements, span }), false) => {
+                    self.check_rectangular_level(elements, element, rank, depth + 1, lengths, span);
+                }
+                // a leaf where a row was due, or a row where a leaf was
+                (CollectionElement::Expression(expression), false) => {
+                    self.error(SemanticErrorKind::RaggedArrayInitializer, expression.span());
+                }
+                (CollectionElement::Nested(nested), _) => {
+                    self.error(SemanticErrorKind::RaggedArrayInitializer, nested.span());
                 }
             }
         }
@@ -5762,6 +5844,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
             Initializer::Collection { elements, .. } => {
+                if let Type::Array { element, rank } = ty
+                    && *rank > 1
+                {
+                    let element = (**element).clone();
+                    self.check_rectangular_initializer(initializer, &element, *rank);
+                    return;
+                }
                 if let Type::Array { element, .. } = ty {
                     for item in *elements {
                         if let CollectionElement::Expression(expression) = item {
@@ -5970,8 +6059,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         node: Option<EntityID>,
     ) -> Meaning<'ast> {
         match &receiver {
-            Type::Array { element, .. } => {
+            Type::Array { element, rank } => {
                 self.require_integer_indices(&call_arguments);
+                if call_arguments.len() != *rank as usize {
+                    let kind = SemanticErrorKind::WrongNumberOfIndices { expected: *rank };
+                    self.error(kind, span.clone());
+                    return Meaning::Error;
+                }
                 Meaning::Value((**element).clone())
             }
             Type::Error => Meaning::Error,
@@ -6570,7 +6664,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     /// for the code generator.
     fn element_type_of(&mut self, collection: &Type, span: Range<usize>, node: EntityID) -> Type {
         match collection {
-            Type::Array { element, rank: 1 } => return (**element).clone(),
+            // any rank: a rectangular array is walked element by element,
+            // in row-major order (§13.9.5)
+            Type::Array { element, .. } => return (**element).clone(),
             Type::Error | Type::Dynamic => return Type::Error,
             _ if self.system().is_string(collection) => return self.corlib("Char"),
             _ => {}

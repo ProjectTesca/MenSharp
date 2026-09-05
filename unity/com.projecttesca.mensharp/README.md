@@ -1217,6 +1217,17 @@ both levels, and `foreach (int[] row in grid)` walks the rows. Unity does not
 serialize an array of arrays, so a jagged field is never an inspector
 variable — fill it in `Start()`.
 
+A rectangular array (`int[,]`, `float[,,]`) works as in C# too: `new int[2, 3]`,
+the nested initializer `int[,] grid = { { 1, 2, 3 }, { 4, 5, 6 } }`, `grid[i, j]`
+(each index checked against its own dimension, so `grid[0, 3]` throws
+`IndexOutOfRangeException` rather than reading the next row), `foreach` in
+row-major order, `Length`, `Rank`, `GetLength(d)`, `GetUpperBound(d)`,
+`Clone()`, `is int[,]` and casts. Udon has no such type, so one is built
+from an `object[]` holding a flat `T[]` and the dimension lengths — which
+means it cannot be passed where a `System.Array` is expected, other
+`System.Array` members on it are compile errors, and a rectangular field is
+never an inspector variable either.
+
 `a[^1]` counts back from the end and `a[1..3]` takes a slice, on arrays and
 strings:
 
@@ -1319,14 +1330,12 @@ wrong thing:
   type does the same job. `static` local functions that use a variable of the
   method around them (CS8421), and local functions that use a variable written
   below them (CS0841), are errors here as they are in C#;
-- multi-dimensional arrays (`int[,]`) — Udon has no type for one; a jagged
-  array (`int[][]`) does the same job and works;
 - `Index` and `Range` as values (`Index i = ^1;`): `^i` and `i..j` work where
   they are written, on arrays and strings, and nowhere else — Udon has no
   such types to pass around, and no `Span<T>` for a slice that does not copy;
 - `ulong` literals (`1UL`), and integer literals too big for `long`;
-- nested array braces (`{ { 1, 2 }, { 3, 4 } }`) — jagged and rectangular
-  arrays are not there yet;
+- a rectangular array as a `System.Array` (`Array.Sort(grid)`, `Array.Copy`
+  on one) — see *foreach, List<T> and Dictionary<K, V>*;
 - awaiting a task across a program boundary — see *async/await*.
 
 Target-typed `new()` (`List<int> values = new();`, `Counter c = new(5);`) and

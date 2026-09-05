@@ -2156,8 +2156,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 SymbolKind::Enum => "SystemInt32".into(),
                 _ => "SystemObjectArray".into(),
             },
-            // a tuple is an `object[]`, like a struct
+            // a tuple is an `object[]`, like a struct — and so is a
+            // rectangular array, which Udon has no type of its own for
             Type::Tuple(_) => "SystemObjectArray".into(),
+            Type::Array { rank, .. } if *rank > 1 => "SystemObjectArray".into(),
             Type::Array { element, rank: 1 } => {
                 let name = format!("{}Array", self.heap_type_component(element));
                 if self.nodes.has_type(&name) {
@@ -2267,6 +2269,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let layout = Layout {
                 type_id,
                 size: elements.len() + 1,
+                slots: HashMap::new(),
+            };
+            self.layouts.insert(ty.clone(), layout.clone());
+            self.type_order.push(ty.clone());
+            return Some(layout);
+        }
+        // a rectangular array too: type id, the flat data, one length per
+        // dimension (see `rectangular`)
+        if let Some(rank) = Self::rectangular_rank(ty) {
+            let type_id = self.type_order.len() as i32;
+            let layout = Layout {
+                type_id,
+                size: 2 + rank as usize,
                 slots: HashMap::new(),
             };
             self.layouts.insert(ty.clone(), layout.clone());
@@ -2707,8 +2722,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if matches!(ty, Type::Tuple(_)) {
             return false;
         }
-        if let Type::Array { element, .. } = &ty
-            && matches!(**element, Type::Array { .. })
+        if let Type::Array { element, rank } = &ty
+            && (matches!(**element, Type::Array { .. }) || *rank > 1)
         {
             return false;
         }
@@ -3187,6 +3202,7 @@ mod nullable;
 mod patterns;
 mod programs;
 mod records;
+mod rectangular;
 mod runtime;
 mod structs;
 mod tasks;

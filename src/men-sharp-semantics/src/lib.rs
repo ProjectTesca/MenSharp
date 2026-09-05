@@ -1859,6 +1859,47 @@ mod tests {
     }
 
     #[test]
+    fn rectangular_arrays_take_one_index_per_dimension_and_even_rows() {
+        checked!(
+            check,
+            r#"
+            public class Body
+            {
+                int[,] grid = { { 1, 2 }, { 3, 4 } };
+                int[,] ragged = { { 1, 2 }, { 3 } };
+
+                int Run(int[] flat)
+                {
+                    int ok = grid[1, 0] + flat[0];
+                    var made = new int[2, 3];
+                    var written = new int[,] { { 1 }, { 2 } };
+                    int[,,] cube = new int[1, 2, 3];
+                    cube[0, 1, 2] = written[1, 0];
+                    int wrong = grid[1];
+                    int alsoWrong = flat[1, 2];
+                    return ok + made[0, 0] + wrong + alsoWrong;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 3, "{kinds:?}");
+        assert!(matches!(
+            kinds[0],
+            SemanticErrorKind::RaggedArrayInitializer
+        ));
+        assert_eq!(
+            *kinds[1],
+            SemanticErrorKind::WrongNumberOfIndices { expected: 2 }
+        );
+        assert_eq!(
+            *kinds[2],
+            SemanticErrorKind::WrongNumberOfIndices { expected: 1 }
+        );
+    }
+
+    #[test]
     fn global_usings_are_visible_compilation_wide() {
         declarations!(
             declarations,

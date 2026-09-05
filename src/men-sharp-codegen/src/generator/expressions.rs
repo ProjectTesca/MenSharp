@@ -306,6 +306,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Type::Array { element, rank: 1 } = &collection_type {
             let element = (**element).clone();
             self.lower_foreach_over_array(ctx, statement, value, collection_type, element);
+        } else if let Type::Array { element, rank } = &collection_type
+            && *rank > 1
+        {
+            // a rectangular array is walked in row-major order — the order
+            // its flat data already is in
+            let element = (**element).clone();
+            self.check_not_null(ctx, value, span.clone());
+            let data = self.rectangular_data(ctx, value, &collection_type, span);
+            let data_type = Self::rectangular_data_type(&collection_type);
+            self.lower_foreach_over_array(ctx, statement, data, data_type, element);
         } else if self.heap_type(&collection_type) == "SystemString" {
             // Udon exposes no indexer on `string`; its character array is
             // one extern away and the loop is an ordinary array walk
@@ -819,6 +829,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> DataId {
         if let Some(converted) = self.convert_nullable(ctx, source, from, to, span.clone()) {
             return converted;
+        }
+        // a rectangular array is an `object[]` of the compiler's own shape:
+        // `System.Array`'s externs would read that shape, not the elements
+        if Self::rectangular_rank(from).is_some()
+            && self
+                .extern_type_name(to)
+                .is_some_and(|name| name == "SystemArray")
+        {
+            self.error(
+                ctx,
+                "a rectangular array cannot be used as a `System.Array` on Udon, which has no                  such array: use its `Length`/`GetLength`/`Clone` directly",
+                span,
+            );
+            return source;
         }
         // `DataToken t = 1;` — a conversion operator from metadata is an
         // extern like any other
@@ -1427,6 +1451,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // a source enum: its member's name
         if let Some(symbol) = self.source_enum(ty) {
             return self.enum_to_string(ctx, slot, symbol, span);
+        }
+        // a rectangular array prints as its type name, as any array does
+        if Self::rectangular_rank(ty).is_some() {
+            return self.string_constant(&self.display_type(ty));
         }
         // a value that may be an object of the user's: its own `ToString`
         if self.has_type_id(ty)
@@ -2166,13 +2194,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some((slot, ty)) = receiver else {
             return Place::Error;
         };
-        if matches!(&ty, Type::Array { rank, .. } if *rank > 1) {
-            self.error(
-                ctx,
-                "multi-dimensional arrays (`int[,]`) are not supported by the Udon backend: a jagged array (`int[][]`) works",
-                span,
-            );
-            return Place::Error;
+        if Self::rectangular_rank(&ty).is_some() {
+            return self.rectangular_element_place(ctx, slot, &ty, arguments, span);
         }
         // `a[1..2] = x`: a slice is a fresh array, not a place (CS0131)
         if let Some(Expression::Range(range)) = Self::single_index_expression(arguments) {
@@ -3104,6 +3127,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         None => Piece::Error,
                     };
                 }
+                // `grid.Length`, `grid.Rank`: `System.Array`'s members on
+                // a rectangular array, which Udon's `Array` externs cannot
+                // read (the object is an `object[]` of another shape)
+                if let Some((slot, ty)) = &receiver
+                    && Self::rectangular_rank(ty).is_some()
+                    && let PrimaryRight::Member { name: Ok(name), .. } = right
+                    && matches!(name.value, "Length" | "LongLength" | "Rank")
+                {
+                    let (slot, ty) = (*slot, ty.clone());
+                    return self.rectangular_member(ctx, slot, &ty, name.value, span.clone());
+                }
                 match self.bodies.targets.get(&EntityID::from(right)) {
                     Some(ResolvedTarget::Member(member)) => {
                         let member = member.clone();
@@ -3240,6 +3274,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // dispatching, so an override calling its base does not re-enter itself
         non_virtual: bool,
     ) -> Piece {
+        // `grid.GetLength(0)`: `System.Array`'s methods on a rectangular
+        // array are lowered by hand — see `rectangular`
+        if let Some((slot, ty)) = &receiver
+            && Self::rectangular_rank(ty).is_some()
+            && let MemberOrigin::External { member, .. } = &call.origin
+        {
+            let (slot, ty) = (*slot, ty.clone());
+            let name = member.name.clone();
+            return self.rectangular_call(ctx, slot, &ty, &name, arguments, span);
+        }
         // `ref`/`out` slots standing in for a field, element or property: the
         // extern writes the slot, and afterwards the slot is written home
         let mut write_backs: Vec<(Place, DataId)> = Vec::new();
@@ -4052,14 +4096,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // `new int[2, 3]` — a rectangular array, which Udon has no type
             // for. `new int[2][]` is a jagged one: an array of arrays, and
             // those it does have
-            if new_expression.array_sizes.len() > 1 {
-                self.error(
-                    ctx,
-                    "multi-dimensional arrays (`int[,]`) are not supported by the Udon backend: a jagged array (`int[][]`) works",
-                    span,
-                );
-                return Piece::Error;
-            }
             let element = new_expression
                 .created_type
                 .as_ref()
@@ -4077,6 +4113,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.error(ctx, "could not resolve the array element type", span);
                 return Piece::Error;
             };
+            // `new int[2, 3]`: a rectangular array, built out of an `object[]`
+            if new_expression.array_sizes.len() > 1 {
+                let array_type = Type::Array {
+                    element: Box::new(element),
+                    rank: new_expression.array_sizes.len() as u32,
+                };
+                return self.lower_new_rectangular(
+                    ctx,
+                    &array_type,
+                    new_expression.array_sizes,
+                    &new_expression.initializer,
+                    span,
+                );
+            }
             let array_type = Type::Array {
                 element: Box::new(element),
                 rank: 1,
@@ -4129,6 +4179,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.fill_array_initializer(ctx, slot, &created, elements, span);
             }
             return Piece::Value(slot, created);
+        }
+        // `new int[,] { { 1, 2 }, { 3, 4 } }`: the nesting gives the lengths
+        if Self::rectangular_rank(&created).is_some() {
+            return match &new_expression.initializer {
+                Some(initializer) => {
+                    match self.lower_rectangular_shorthand(ctx, &created, initializer, span) {
+                        Some(slot) => Piece::Value(slot, created),
+                        None => Piece::Error,
+                    }
+                }
+                None => {
+                    self.error(
+                        ctx,
+                        "a rectangular array needs its lengths or an initializer",
+                        span,
+                    );
+                    Piece::Error
+                }
+            };
         }
 
         let target = self
@@ -4454,6 +4523,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         initializer: &'ast men_sharp_parser::ast::Initializer<'ast, 'ast>,
         span: Range<usize>,
     ) -> Option<DataId> {
+        if Self::rectangular_rank(array_type).is_some() {
+            return self.lower_rectangular_shorthand(ctx, array_type, initializer, span);
+        }
         if !matches!(array_type, Type::Array { rank: 1, .. }) {
             // the checker said why; nothing sensible to build
             return None;

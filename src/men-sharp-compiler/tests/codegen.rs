@@ -9666,6 +9666,104 @@ fn a_nullable_annotation_on_an_unconstrained_type_parameter_is_the_parameter_its
 }
 
 #[test]
+fn rectangular_arrays_index_by_dimension_and_walk_in_row_major_order() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static string log = "";
+
+                static int Sum(int[,] grid)
+                {
+                    int s = 0;
+                    foreach (int v in grid) s += v;
+                    return s;
+                }
+
+                public static void Main()
+                {
+                    int[,] a = new int[2, 3];
+                    a[0, 0] = 1;
+                    a[1, 2] = 6;
+                    a[0, 1] += 4;
+                    int[,] b = { { 1, 2, 3 }, { 4, 5, 6 } };
+                    var c = new int[,] { { 7, 8 }, { 9, 10 }, { 11, 12 } };
+                    string[,] names = new string[1, 2];
+                    names[0, 1] = "x";
+                    int[,,] cube = new int[2, 3, 4];
+                    cube[1, 2, 3] = 5;
+                    object boxed = b;
+                    bool isGrid = boxed is int[,];
+                    bool isString = boxed is string;
+                    int[,] back = (int[,])boxed;
+                    var copy = (int[,])b.Clone();
+                    copy[0, 0] = 100;
+                    long total = 0;
+                    foreach (var v in cube) total += v;
+                    int walked = 0;
+                    foreach (var v in b) walked = walked * 10 + v;
+                    log = a[0, 0] + "," + a[0, 1] + "," + a[1, 2] + "," + a.Length + ","
+                        + a.GetLength(0) + "," + a.GetLength(1) + "," + a.Rank
+                        + "|" + Sum(b) + "," + b.GetUpperBound(1) + "," + c[2, 1] + "," + c.Length
+                        + "|" + names[0, 1] + "," + (names[0, 0] == null)
+                        + "|" + cube.Length + "," + cube[1, 2, 3] + "," + total + "," + cube.Rank
+                        + "|" + isGrid + "," + isString + "," + back[1, 1] + "," + copy[0, 0] + "," + b[0, 0]
+                        + "|" + walked + "|" + b;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "log"),
+        "1,4,6,6,2,3,2|21,2,12,6|x,True|24,5,5,3|True,False,5,100,1|123456|System.Int32[,]"
+    );
+}
+
+#[test]
+fn a_rectangular_index_past_its_own_dimension_throws() {
+    let Some((program, result)) = run_sources_result(
+        vec![SourceCode::new(
+            "test.cs",
+            r#"
+            namespace Game
+            {
+                public class Program
+                {
+                    public static int after;
+                    public static void Main()
+                    {
+                        int[,] a = new int[2, 3];
+                        // flat index 3 exists, but column 3 does not
+                        a[0, 3] = 1;
+                        after = 1;
+                    }
+                }
+            }
+            "#,
+        )],
+        "Main",
+    ) else {
+        return;
+    };
+    match result {
+        Err(men_sharp_asm::EmulatorError::Exception(message)) => {
+            assert!(message.contains("IndexOutOfRangeException"), "{message}");
+        }
+        Err(other) => panic!("expected a halt, got {other:?}\n{program}"),
+        Ok(emulator) => panic!(
+            "no halt: after = {:?}\n{program}",
+            emulator.value_of("after")
+        ),
+    }
+}
+
+#[test]
 fn records_have_value_equality_to_string_with_and_deconstruct() {
     let Some(emulator) = run(
         r#"

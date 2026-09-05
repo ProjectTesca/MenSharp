@@ -397,7 +397,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// Jumps to `fail` unless the value is an `object[]` of that length —
     /// what a tuple of the shape in hand looks like at run time.
-    fn check_object_array_of(
+    pub(super) fn check_object_array_of(
         &mut self,
         ctx: &mut Ctx<'ast>,
         value: DataId,
