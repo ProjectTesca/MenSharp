@@ -64,6 +64,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             (Role::EnumToString, _) => {
                 (vec![self.corlib_type("Int32")], self.corlib_type("String"))
             }
+            (Role::RecordToString, _) => (Vec::new(), self.corlib_type("String")),
             (Role::TypeTest, _) => (
                 vec![self.corlib_type("Object")],
                 self.corlib_type("Boolean"),
@@ -144,7 +145,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::DefaultConstructor => name.push_str("_defaultctor"),
             Role::StructEquals => name.push_str("_equals"),
             Role::StructHashCode => name.push_str("_hashcode"),
-            Role::EnumToString => name.push_str("_tostring"),
+            Role::EnumToString | Role::RecordToString => name.push_str("_tostring"),
             Role::Dispatcher => name.push_str("_dispatch"),
             Role::Lambda(_) => name.push_str("_lambda"),
             Role::LocalFunction(id) => {
@@ -342,6 +343,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             (Role::StructEquals, _) => self.emit_struct_equals(&mut ctx),
             (Role::StructHashCode, _) => self.emit_struct_hash_code(&mut ctx),
             (Role::EnumToString, _) => self.emit_enum_to_string(&mut ctx),
+            (Role::RecordToString, _) => self.emit_record_to_string(&mut ctx),
             (Role::UnhandledException, _) => self.emit_unhandled_exception_body(&mut ctx),
             (Role::Constructor, Some(SyntaxRef::Constructor(declaration))) => {
                 self.bind_parameters(
@@ -590,10 +592,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     Role::Getter => AccessorKind::Get,
                     _ => AccessorKind::Set,
                 };
-                let accessor = list
-                    .accessors
-                    .iter()
-                    .find(|accessor| accessor.kind.value == wanted);
+                // `init` is a setter that C# lets only constructors and
+                // initializers call; on Udon it is a setter
+                let accessor = list.accessors.iter().find(|accessor| {
+                    accessor.kind.value == wanted
+                        || (wanted == AccessorKind::Set
+                            && accessor.kind.value == AccessorKind::Init)
+                });
                 match accessor {
                     // `{ get; set; }` with storage of its own: reached as a
                     // function only through dispatch (an override of a

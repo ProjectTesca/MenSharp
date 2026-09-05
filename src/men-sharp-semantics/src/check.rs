@@ -1433,6 +1433,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             self.check_implicit_constructor(symbol, span);
             self.check_operator_pairs(symbol);
             self.check_union_attribute(symbol);
+            // `class C(int x)` — a C# 12 primary constructor on a class or
+            // struct: its parameters would be captured as hidden fields, which
+            // is not modelled; a record's is desugared by the parser
+            if let Some(parameters) = &declaration.primary_constructor
+                && !matches!(
+                    declaration.kind.value,
+                    men_sharp_parser::ast::ClassKind::Record
+                        | men_sharp_parser::ast::ClassKind::RecordStruct
+                )
+            {
+                self.error(
+                    SemanticErrorKind::UnsupportedExpression,
+                    parameters.span.clone(),
+                );
+            }
         }
         for nested in &node.nested {
             self.check_type_declaration(nested);
@@ -3175,9 +3190,37 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 self.error(SemanticErrorKind::UnsupportedExpression, range.span.clone());
                 Type::Error
             }
+            // `p with { X = 1 }`: a copy of a record (or struct) with the
+            // listed members assigned — an object initializer on the copy
             Expression::With(with) => {
+                use men_sharp_parser::ast::Initializer;
                 let ty = self.check_expression(&with.value);
-                self.error(SemanticErrorKind::UnsupportedExpression, with.span.clone());
+                let copyable = matches!(
+                    &ty,
+                    Type::Named { target: TypeTarget::Source(symbol), .. }
+                    if matches!(
+                        self.resolver.declarations.table.symbol(*symbol).kind,
+                        SymbolKind::Record | SymbolKind::RecordStruct | SymbolKind::Struct
+                    )
+                );
+                if !copyable {
+                    if !matches!(ty, Type::Error) {
+                        let kind = SemanticErrorKind::WithNeedsRecord {
+                            type_name: self.display(&ty),
+                        };
+                        self.error(kind, with.value.span());
+                    }
+                    return Type::Error;
+                }
+                match &with.initializer {
+                    Ok(initializer @ Initializer::Object { .. }) => {
+                        self.check_initializer_value(initializer, &ty);
+                    }
+                    Ok(other) => {
+                        self.error(SemanticErrorKind::UnsupportedExpression, other.span());
+                    }
+                    Err(()) => {}
+                }
                 ty
             }
             Expression::Query(query) => {
@@ -5627,9 +5670,19 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         initializer: &'ast Option<men_sharp_parser::ast::Initializer<'ast, 'ast>>,
         ty: &Type,
     ) {
+        if let Some(initializer) = initializer {
+            self.check_initializer_value(initializer, ty);
+        }
+    }
+
+    fn check_initializer_value(
+        &mut self,
+        initializer: &'ast men_sharp_parser::ast::Initializer<'ast, 'ast>,
+        ty: &Type,
+    ) {
         use men_sharp_parser::ast::{CollectionElement, Initializer, InitializerTarget};
         match initializer {
-            Some(Initializer::Object { elements, .. }) => {
+            Initializer::Object { elements, .. } => {
                 for element in *elements {
                     // `new D { [k] = v }` is `d[k] = v`: the indexer binds like
                     // any element access, recorded on the element
@@ -5708,7 +5761,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                 }
             }
-            Some(Initializer::Collection { elements, .. }) => {
+            Initializer::Collection { elements, .. } => {
                 if let Type::Array { element, .. } = ty {
                     for item in *elements {
                         if let CollectionElement::Expression(expression) = item {
@@ -5734,7 +5787,6 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.check_collection_element(item, ty);
                 }
             }
-            None => {}
         }
     }
 

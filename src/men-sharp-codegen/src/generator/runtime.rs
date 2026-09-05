@@ -548,7 +548,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 bindings,
             });
         }
-        if self.is_source_struct(ty) && name != "ToString" {
+        // a struct or record with none of its own: the synthesized
+        // field-wise `Equals`/`GetHashCode`; a record's `ToString` too
+        let record = self.is_source_record(ty);
+        if record || (self.is_source_struct(ty) && name != "ToString") {
             let Type::Named {
                 target: TypeTarget::Source(symbol),
                 ..
@@ -556,12 +559,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             else {
                 return None;
             };
+            let role = match name {
+                "Equals" => Role::StructEquals,
+                "GetHashCode" => Role::StructHashCode,
+                _ if record => Role::RecordToString,
+                _ => return None,
+            };
             return Some(FunctionKey {
                 symbol: *symbol,
-                role: match name {
-                    "Equals" => Role::StructEquals,
-                    _ => Role::StructHashCode,
-                },
+                role,
                 bindings: self.struct_bindings(ty),
             });
         }

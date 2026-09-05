@@ -9627,6 +9627,108 @@ fn casting_a_fraction_to_an_integer_truncates_as_in_csharp() {
 }
 
 #[test]
+fn records_have_value_equality_to_string_with_and_deconstruct() {
+    let Some(emulator) = run(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public record Point(int X, int Y);
+            public record Named(string Name, Point At)
+            {
+                public int Extra = 3;
+                public int Twice => X2 * 2;
+                public int X2 { get; set; } = 5;
+                private int hidden = 9;
+                public static int S = 1;
+            }
+            public record Empty();
+            public record Plain { public int A { get; init; } }
+            public abstract record Shape(string Tag);
+            public record Circle(string Tag, float R) : Shape(Tag);
+            public record Some<T>(T Value);
+            public record struct PS(int X, int Y);
+            public readonly record struct RS(int X, double D);
+            public record Nested(Point Inner, bool Flag, string Nothing);
+
+            public class Program
+            {
+                public static string log = "";
+                static void Log(object o) { log += o; log += "\n"; }
+
+                public static void Main()
+                {
+                    var p = new Point(1, 2);
+                    Log(p);
+                    Log(new Named("bea", p));
+                    Log(new Empty());
+                    Log(new Plain { A = 4 });
+                    Log(new Circle("c", 2.5f));
+                    Log(new Some<int>(7));
+                    Log(new Some<string>("s"));
+                    Log(new PS(1, 2));
+                    Log(new RS(1, 2.5));
+                    Log(new Nested(p, true, null));
+                    Log((p == new Point(1, 2)) + " " + p.Equals(new Point(1, 3)) + " "
+                        + (p.GetHashCode() == new Point(1, 2).GetHashCode()));
+                    Shape s1 = new Circle("c", 1f);
+                    Shape s2 = new Circle("c", 1f);
+                    Log(s1 == s2);
+                    var q = p with { Y = 9 };
+                    Log(q + " " + p);
+                    var (x, y) = q;
+                    Log(x + "," + y);
+                    var ps = new PS(1, 2);
+                    ps.X = 5;
+                    var ps2 = ps with { Y = 7 };
+                    Log(ps + " " + ps2 + " " + (ps == new PS(5, 2)));
+                    var d = new Dictionary<Point, string>();
+                    d[new Point(1, 2)] = "a";
+                    Log(d[p]);
+                    object o = p;
+                    Log(o.Equals(new Point(1, 2)) + " " + o);
+                    Log(new Named("bea", p) with { Extra = 1 } == new Named("bea", p));
+                    Log(p != q);
+                    Log(p == null);
+                    Point n = null;
+                    Log(n == null);
+                    Log(q is Point(1, var second) ? "second " + second : "no");
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    let expected = "\
+Point { X = 1, Y = 2 }
+Named { Name = bea, At = Point { X = 1, Y = 2 }, Extra = 3, Twice = 10, X2 = 5 }
+Empty { }
+Plain { A = 4 }
+Circle { Tag = c, R = 2.5 }
+Some { Value = 7 }
+Some { Value = s }
+PS { X = 1, Y = 2 }
+RS { X = 1, D = 2.5 }
+Nested { Inner = Point { X = 1, Y = 2 }, Flag = True, Nothing =  }
+True False True
+True
+Point { X = 1, Y = 9 } Point { X = 1, Y = 2 }
+1,9
+PS { X = 5, Y = 2 } PS { X = 5, Y = 7 } True
+a
+True Point { X = 1, Y = 2 }
+False
+True
+False
+True
+second 9
+";
+    assert_eq!(string_of(&emulator, "log"), expected);
+}
+
+#[test]
 fn a_union_switch_dispatches_on_the_runtime_type() {
     let Some(emulator) = run(
         r#"

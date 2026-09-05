@@ -24,6 +24,8 @@ pub enum ParseErrorKind {
     UnclosedTypeBody,
     InvalidTypeMember,
     MissingBaseType,
+    /// `record Derived : Base(1)` with no primary constructor of its own.
+    BaseArgumentsWithoutPrimaryConstructor,
     MissingEnumMemberName,
     MissingDelegateName,
     MissingSemicolonInDelegate,

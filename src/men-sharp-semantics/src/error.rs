@@ -139,6 +139,10 @@ pub enum SemanticErrorKind {
     },
     /// `[Union]` on something other than an abstract class or an interface.
     UnionNotAbstract,
+    /// `x with { ... }` on something that is not a record or a struct.
+    WithNeedsRecord {
+        type_name: String,
+    },
     /// A type below a `[Union]` whose type arguments the union's do not fix
     /// (`class Weird<U> : Option<int>`): its cases cannot be listed.
     UnionCaseUndetermined {

@@ -542,6 +542,10 @@ pub struct PropertyDeclaration<'input, 'allocator> {
     pub body: FunctionBody<'input, 'allocator>,
     /// `public int X { get; set; } = 1;`
     pub initializer: Option<InitializerValue<'input, 'allocator>>,
+    /// Synthesized from a record's positional parameter (see the parser's
+    /// `record` module). C# does not declare one when a base type already
+    /// has a member of that name, which only name binding can tell.
+    pub positional: bool,
     pub span: Range<usize>,
 }
 
@@ -777,7 +781,7 @@ pub enum Variance {
 }
 
 /// A generic argument list, `<int, string>`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct GenericsInfo<'input, 'allocator> {
     pub types: &'allocator [TypeRef<'input, 'allocator>],
     /// `typeof(List<>)` and `typeof(Dictionary<,>)` name a type by arity only,
@@ -826,7 +830,7 @@ pub enum ConstraintBound<'input, 'allocator> {
 // types
 // ============================================================================
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TypeRef<'input, 'allocator> {
     pub base: TypeRefBase<'input, 'allocator>,
     /// `?`, `[]`, `[,]` and `*`, in written order, so `int[][,]?` keeps its shape.
@@ -834,7 +838,7 @@ pub struct TypeRef<'input, 'allocator> {
     pub span: Range<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum TypeRefBase<'input, 'allocator> {
     Name(NameType<'input, 'allocator>),
     Predefined(Spanned<PredefinedType>),
@@ -851,14 +855,14 @@ pub enum TypeRefBase<'input, 'allocator> {
 }
 
 /// A possibly qualified, possibly generic name: `global::System.Collections.Generic.List<int>`.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NameType<'input, 'allocator> {
     pub global: Option<Range<usize>>,
     pub segments: &'allocator [NameSegment<'input, 'allocator>],
     pub span: Range<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct NameSegment<'input, 'allocator> {
     pub name: Ident<'input>,
     pub generics: Option<GenericsInfo<'input, 'allocator>>,
@@ -890,13 +894,13 @@ impl TypeSuffix {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TupleType<'input, 'allocator> {
     pub elements: &'allocator [TupleTypeElement<'input, 'allocator>],
     pub span: Range<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct TupleTypeElement<'input, 'allocator> {
     pub element_type: TypeRef<'input, 'allocator>,
     pub name: Option<Ident<'input>>,

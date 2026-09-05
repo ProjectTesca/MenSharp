@@ -5,14 +5,14 @@ use bumpalo::Bump;
 
 use crate::{
     ast::{
-        Accessor, AccessorKind, AccessorList, Attribute, AttributeSection, AttributeTarget,
-        BaseTypeList, ClassDeclaration, ClassKind, ConstructorDeclaration, ConstructorInitializer,
-        ConstructorInitializerKind, ConversionKind, DelegateDeclaration, DestructorDeclaration,
-        Documents, EnumDeclaration, EnumMember, EventDeclaration, ExternAliasDirective,
-        FieldDeclaration, FunctionBody, Ident, IndexerDeclaration, MethodDeclaration, Modifier,
-        NameSegment, NameType, NamespaceDeclaration, NamespaceMember, OperatorDeclaration,
-        OperatorSymbol, Parameter, ParameterList, PropertyDeclaration, Spanned, TypeDeclaration,
-        TypeMember, UsingDirective, VariableDeclarator,
+        Accessor, AccessorKind, AccessorList, ArgumentList, Attribute, AttributeSection,
+        AttributeTarget, BaseTypeList, ClassDeclaration, ClassKind, ConstructorDeclaration,
+        ConstructorInitializer, ConstructorInitializerKind, ConversionKind, DelegateDeclaration,
+        DestructorDeclaration, Documents, EnumDeclaration, EnumMember, EventDeclaration,
+        ExternAliasDirective, FieldDeclaration, FunctionBody, Ident, IndexerDeclaration,
+        MethodDeclaration, Modifier, NameSegment, NameType, NamespaceDeclaration, NamespaceMember,
+        OperatorDeclaration, OperatorSymbol, Parameter, ParameterList, PropertyDeclaration,
+        Spanned, TypeDeclaration, TypeMember, UsingDirective, VariableDeclarator,
     },
     error::{ParseErrorKind, error_here, recover_until, recover_until_balanced},
     lexer::{Lexer, TokenKind},
@@ -22,7 +22,7 @@ use crate::{
             parse_argument_list, parse_expression, parse_expression_or_recover,
             parse_initializer_value, parse_parameter_modifiers,
         },
-        parse_documents, peek_greater_run, skip_documents,
+        parse_documents, peek_greater_run, record, skip_documents,
         statement::parse_block,
         types::{
             parse_generics_define, parse_generics_info, parse_type, parse_type_or_recover,
@@ -495,7 +495,7 @@ fn parse_type_declaration<'input, 'allocator>(
                 }
             };
 
-            let underlying_type = parse_base_type_list(lexer, errors, allocator);
+            let (underlying_type, _) = parse_base_type_list(lexer, errors, allocator);
             let members = parse_enum_members(lexer, errors, allocator);
 
             Some(TypeDeclaration::Enum(EnumDeclaration {
@@ -606,7 +606,7 @@ fn parse_type_declaration<'input, 'allocator>(
                 .then(|| parse_parameter_list(lexer, errors, allocator).ok())
                 .flatten();
 
-            let base_types = parse_base_type_list(lexer, errors, allocator);
+            let (base_types, base_arguments) = parse_base_type_list(lexer, errors, allocator);
             let constraints = parse_type_parameter_constraints(lexer, errors, allocator);
 
             let is_unsafe = has_unsafe(modifiers);
@@ -614,11 +614,11 @@ fn parse_type_declaration<'input, 'allocator>(
                 lexer.unsafe_depth += 1;
             }
 
-            let members = if lexer.eat(TokenKind::Semicolon).is_some() {
+            let declared = if lexer.eat(TokenKind::Semicolon).is_some() {
                 // `record Point(int X, int Y);` has no body at all
-                Ok(&[] as &[TypeMember])
+                Ok(Vec::new_in(allocator))
             } else if lexer.kind() == TokenKind::BraceLeft {
-                Ok(parse_type_members(lexer, errors, allocator))
+                Ok(parse_type_members_vec(lexer, errors, allocator))
             } else {
                 errors.push(recover_until(
                     lexer,
@@ -631,6 +631,31 @@ fn parse_type_declaration<'input, 'allocator>(
             if is_unsafe {
                 lexer.unsafe_depth -= 1;
             }
+
+            // a positional record declares members it never wrote down
+            let is_record = matches!(class_kind, ClassKind::Record | ClassKind::RecordStruct);
+            let members = match (declared, &primary_constructor, &name) {
+                (Ok(declared), Some(parameters), Ok(name)) if is_record => {
+                    Ok(record::with_positional_members(
+                        allocator,
+                        class_kind,
+                        modifiers,
+                        name,
+                        parameters,
+                        base_arguments,
+                        declared,
+                    ))
+                }
+                (declared, _, _) => {
+                    if let Some(arguments) = &base_arguments {
+                        errors.push(crate::error::ParseError {
+                            kind: ParseErrorKind::BaseArgumentsWithoutPrimaryConstructor,
+                            span: arguments.span.clone(),
+                        });
+                    }
+                    declared.map(|declared| alloc_slice(allocator, declared))
+                }
+            };
 
             Some(TypeDeclaration::Class(ClassDeclaration {
                 documents,
@@ -650,20 +675,34 @@ fn parse_type_declaration<'input, 'allocator>(
     }
 }
 
-/// `: Base, IFoo` on a type, or `: byte` on an enum.
+/// `: Base, IFoo` on a type, or `: byte` on an enum. A record's base may
+/// take arguments — `: Base(X)` — which are handed back separately: they
+/// belong to the record's primary constructor, not to the type list.
+#[allow(clippy::type_complexity)]
 fn parse_base_type_list<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
     errors: &mut Errors,
     allocator: &'allocator Bump,
-) -> Option<BaseTypeList<'input, 'allocator>> {
+) -> (
+    Option<BaseTypeList<'input, 'allocator>>,
+    Option<ArgumentList<'input, 'allocator>>,
+) {
     let anchor = lexer.cast_anchor();
-    let colon = lexer.eat(TokenKind::Colon)?;
+    let Some(colon) = lexer.eat(TokenKind::Colon) else {
+        return (None, None);
+    };
 
     let mut types = Vec::new_in(allocator);
+    let mut arguments = None;
 
     loop {
         match parse_type(lexer, errors, allocator) {
-            Some(base_type) => types.push(base_type),
+            Some(base_type) => {
+                if types.is_empty() && lexer.kind() == TokenKind::ParenthesisLeft {
+                    arguments = Some(parse_argument_list(lexer, errors, allocator, false));
+                }
+                types.push(base_type);
+            }
             None => {
                 errors.push(recover_until(
                     lexer,
@@ -679,11 +718,14 @@ fn parse_base_type_list<'input, 'allocator>(
         }
     }
 
-    Some(BaseTypeList {
-        colon,
-        types: alloc_slice(allocator, types),
-        span: anchor.elapsed(lexer),
-    })
+    (
+        Some(BaseTypeList {
+            colon,
+            types: alloc_slice(allocator, types),
+            span: anchor.elapsed(lexer),
+        }),
+        arguments,
+    )
 }
 
 #[allow(clippy::type_complexity)]
@@ -758,11 +800,11 @@ fn parse_enum_members<'input, 'allocator>(
 // type members
 // ============================================================================
 
-fn parse_type_members<'input, 'allocator>(
+fn parse_type_members_vec<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
     errors: &mut Errors,
     allocator: &'allocator Bump,
-) -> &'allocator [TypeMember<'input, 'allocator>] {
+) -> BumpVec<'allocator, TypeMember<'input, 'allocator>> {
     lexer.eat(TokenKind::BraceLeft);
 
     let mut members = Vec::new_in(allocator);
@@ -818,7 +860,7 @@ fn parse_type_members<'input, 'allocator>(
         lexer.eat(TokenKind::BraceRight);
     }
 
-    alloc_slice(allocator, members)
+    members
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1126,6 +1168,7 @@ fn parse_type_member<'input, 'allocator>(
                     documents,
                     attributes,
                     modifiers,
+                    positional: false,
                     property_type: member_type,
                     explicit_interface,
                     name,

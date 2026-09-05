@@ -98,6 +98,66 @@ impl TypeSystem<'_, '_> {
         remove_hidden(out)
     }
 
+    /// A record's positional property that C# would not have declared: a
+    /// base type already has a member of that name (`record Circle(string
+    /// Tag, float R) : Shape(Tag)` reuses `Shape.Tag`). The parser
+    /// synthesizes every positional property, since it cannot see bases;
+    /// this is where the ones that should not exist are taken out again.
+    pub fn is_hidden_positional(&self, property: SymbolId) -> bool {
+        let entry = self.declarations.table.symbol(property);
+        if entry.kind != SymbolKind::Property {
+            return false;
+        }
+        let positional = entry.declarations.iter().any(|site| {
+            matches!(&site.syntax, crate::symbol::SyntaxRef::Property(declaration) if declaration.positional)
+        });
+        if !positional {
+            return false;
+        }
+        let Some(owner) = entry.parent else {
+            return false;
+        };
+        let mut queue: Vec<SymbolId> = vec![owner];
+        let mut seen: HashSet<SymbolId> = HashSet::new();
+        while let Some(current) = queue.pop() {
+            if !seen.insert(current) {
+                continue;
+            }
+            for base in self
+                .signatures
+                .base_types
+                .get(&current)
+                .into_iter()
+                .flatten()
+            {
+                let Type::Named {
+                    target: TypeTarget::Source(base),
+                    ..
+                } = base
+                else {
+                    continue;
+                };
+                if self.is_interface(&Type::Named {
+                    target: TypeTarget::Source(*base),
+                    arguments: Vec::new(),
+                }) {
+                    continue;
+                }
+                if !self
+                    .declarations
+                    .table
+                    .symbol(*base)
+                    .members_named(entry.name)
+                    .is_empty()
+                {
+                    return true;
+                }
+                queue.push(*base);
+            }
+        }
+        false
+    }
+
     /// Where lookup starts for each shape of receiver.
     fn lookup_roots(&self, receiver: &Type) -> Vec<Type> {
         match receiver {
@@ -232,7 +292,10 @@ impl TypeSystem<'_, '_> {
                     .members_named(name)
                 {
                     let member = self.declarations.table.symbol(id);
-                    if member.is_explicit_implementation || member.kind == SymbolKind::Namespace {
+                    if member.is_explicit_implementation
+                        || member.kind == SymbolKind::Namespace
+                        || self.is_hidden_positional(id)
+                    {
                         continue;
                     }
 

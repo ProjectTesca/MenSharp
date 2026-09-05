@@ -166,6 +166,9 @@ enum Role {
     /// `string (int)`: the name of a source enum's value, or its number.
     /// `symbol` is the enum. See `enums`.
     EnumToString,
+    /// The synthesized `string ToString()` of a record (`Point { X = 1, Y
+    /// = 2 }`). `symbol` is the record. See `records`.
+    RecordToString,
     /// The synthesized virtual-dispatch stub for `symbol`: compares the
     /// receiver's type id and jumps to the right override. A role of its own so
     /// it never collides with the method's own body — which it would otherwise
@@ -1220,10 +1223,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .iter()
             .any(|site| match &site.syntax {
                 SyntaxRef::Property(property) => match &property.body {
-                    FunctionBody::Accessors(accessors) => accessors
-                        .accessors
-                        .iter()
-                        .any(|accessor| accessor.kind.value == AccessorKind::Set),
+                    FunctionBody::Accessors(accessors) => {
+                        accessors.accessors.iter().any(|accessor| {
+                            matches!(accessor.kind.value, AccessorKind::Set | AccessorKind::Init)
+                        })
+                    }
                     _ => false,
                 },
                 _ => false,
@@ -2345,7 +2349,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let kind = member_symbol.kind;
             let stores_value = match kind {
                 SymbolKind::Field | SymbolKind::Event => true,
-                SymbolKind::Property => self.is_auto_property(member),
+                SymbolKind::Property => {
+                    self.is_auto_property(member)
+                        && !self.type_system().is_hidden_positional(member)
+                }
                 _ => false,
             };
             if stores_value {
@@ -3179,6 +3186,7 @@ mod network;
 mod nullable;
 mod patterns;
 mod programs;
+mod records;
 mod runtime;
 mod structs;
 mod tasks;

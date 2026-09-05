@@ -412,6 +412,54 @@ A switch expression no arm matches throws `SwitchExpressionException`, as in
 C#. Positional patterns (`is (0, var y)`, `Point(var x, var y)` through a
 `Deconstruct`) and list patterns (`[1, .., var last]`) work too.
 
+## Records
+
+`record` and `record struct` work as in C#, positional and nominal:
+
+```csharp
+public record Point(int X, int Y);
+public record struct Cell(int Row, int Column);          // mutable properties
+public readonly record struct Ratio(int Num, int Den);   // init-only
+public abstract record Shape(string Tag);
+public record Circle(string Tag, float R) : Shape(Tag);
+public record Some<T>(T Value);
+
+var p = new Point(1, 2);
+var q = p with { Y = 9 };            // a copy with Y changed
+var (x, y) = q;                      // Deconstruct
+bool same = p == new Point(1, 2);    // value equality: true
+string text = p.ToString();          // "Point { X = 1, Y = 2 }"
+var keys = new Dictionary<Point, string>();   // hashes by value
+if (q is Point(1, var second)) { ... }        // positional pattern
+```
+
+A positional parameter becomes a public `{ get; init; }` property (`{ get;
+set; }` on a `record struct`), the constructor fills them, `Deconstruct`
+reads them back, and a parameter's default value (`record R(int Count =
+0)`) is the constructor's. Members you write yourself go alongside. `Equals`,
+`GetHashCode` and `==`/`!=` compare every field and the runtime type, as .NET
+does (a `Circle` never equals a `Square` with the same fields), `ToString`
+prints the public fields and properties base-first in declaration order, and
+`with` copies the object shallowly — nested structs are copied, references
+shared — then assigns the listed members. Each of those can be overridden by
+writing the member yourself. A derived positional record reuses a base
+member of the same name (`Circle(string Tag, ...) : Shape(Tag)` has one `Tag`,
+`Shape`'s), as in C#.
+
+The `IsExternalInit` marker type that `init` accessors need, and which
+.NET Standard 2.1 lacks, ships in the MenSharp runtime assembly — no
+polyfill of your own is needed (if a package of yours already declares one,
+Unity's compiler picks either; both are empty).
+
+Unity 2022.3 compiles C# 9, which has `record` but not `record struct` or
+`with` on a struct (C# 10): MenSharp accepts them, Unity's compiler does
+not, so they stay out of scripts Unity has to compile.
+
+Not enforced: `init` accessors are settable anywhere here — Unity's compiler
+is what rejects `p.X = 5` outside a constructor or initializer. Not
+supported: primary constructors on classes and structs that are not records
+(`class C(int x)`, C# 12) — a compile error.
+
 ## Unions: closed hierarchies and exhaustive switch
 
 C# has no tagged union, but an abstract class (or an interface) with a fixed

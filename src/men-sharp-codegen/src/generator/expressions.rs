@@ -792,6 +792,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             Expression::Is(is) => self.lower_is(ctx, is),
             Expression::Switch(switch) => self.lower_switch_expression(ctx, switch, expression),
+            Expression::With(with) => self.lower_with(ctx, with),
             Expression::Throw(throw) => self.lower_throw_expression(ctx, throw),
             Expression::As(as_expression) => self.lower_as(ctx, as_expression, expression),
             other => {
@@ -1243,6 +1244,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 _ => {}
             }
+        }
+
+        // a record compares by value: its synthesized `Equals`
+        if matches!(operator, Equal | NotEqual) && self.is_source_record(&operand_type) {
+            return self.record_equality(
+                ctx,
+                left.0,
+                right.0,
+                &operand_type,
+                operator == NotEqual,
+                span,
+            );
         }
 
         let out = self.temp_for(result_type);
@@ -4553,7 +4566,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// (`__set_X` externs, which for a struct like `Vector3` write the heap
     /// value back in place) and indexers all go through the same place
     /// machinery an assignment uses.
-    fn apply_object_initializer(
+    pub(super) fn apply_object_initializer(
         &mut self,
         ctx: &mut Ctx<'ast>,
         object: DataId,

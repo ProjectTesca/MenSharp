@@ -1789,6 +1789,44 @@ mod tests {
     }
 
     #[test]
+    fn records_desugar_to_members_and_with_needs_a_record() {
+        checked!(
+            check,
+            r#"
+            public record Point(int X, int Y);
+            public record struct Cell(int Row);
+            public record Labelled(string Label, int X, int Y) : Point(X, Y);
+            public class NotARecord(int x) { }
+
+            public class Body
+            {
+                int Run(Point p, string s, Cell c)
+                {
+                    var q = p with { X = 1 };
+                    var t = s with { Length = 1 };
+                    var (a, b) = p;
+                    c.Row = 2;
+                    var l = new Labelled("l", 1, 2);
+                    Point copy = new Point(1, 2) with { Y = 3 };
+                    p.Deconstruct(out int i, out int j);
+                    return p.X + q.Y + a + b + l.X + copy.Y + i + j + c.Row;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 2, "{kinds:?}");
+        assert!(matches!(kinds[0], SemanticErrorKind::UnsupportedExpression));
+        assert_eq!(
+            *kinds[1],
+            SemanticErrorKind::WithNeedsRecord {
+                type_name: "System.String".to_string()
+            }
+        );
+    }
+
+    #[test]
     fn global_usings_are_visible_compilation_wide() {
         declarations!(
             declarations,

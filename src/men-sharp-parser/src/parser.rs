@@ -38,6 +38,7 @@ pub(crate) mod expression;
 pub(crate) mod interpolation;
 pub(crate) mod pattern;
 pub(crate) mod query;
+pub(crate) mod record;
 pub(crate) mod statement;
 pub(crate) mod types;
 
