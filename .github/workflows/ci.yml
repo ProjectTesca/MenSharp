@@ -37,7 +37,18 @@ jobs:
 
   unity-integration:
     name: Unity / VRChat SDK integration
-    runs-on: ubuntu-latest
+    # Runs on GitHub's runners with GameCI's Unity container by default. Two
+    # repository variables move it to a self-hosted runner:
+    #   MENSHARP_UNITY_RUNNER  a runner label (`self-hosted`, or a runner's
+    #                          name such as `msci-01`); the runner needs
+    #                          Docker for the GameCI path, and the licence
+    #                          secrets below still apply
+    #   MENSHARP_UNITY_EDITOR  the path of a Unity 2022.3.22f1 editor binary
+    #                          installed on that runner; the tests then run
+    #                          through tools/test-unity.sh with that editor
+    #                          and its own activation, no container, no
+    #                          licence secrets
+    runs-on: ${{ vars.MENSHARP_UNITY_RUNNER || 'ubuntu-latest' }}
     timeout-minutes: 45
     # GameCI needs the Unity licence secrets, which a pull request from a
     # fork cannot see
@@ -75,10 +86,11 @@ jobs:
         uses: actions/cache@v4
         with:
           path: tests/unity-project/Library
-          key: unity-library-${{ hashFiles('tests/unity-project/Packages/vpm-manifest.json', 'tests/unity-project/Packages/manifest.json', 'tests/unity-project/ProjectSettings/ProjectVersion.txt') }}
-          restore-keys: unity-library-
+          key: unity-library-${{ runner.os }}-${{ hashFiles('tests/unity-project/Packages/vpm-manifest.json', 'tests/unity-project/Packages/manifest.json', 'tests/unity-project/ProjectSettings/ProjectVersion.txt') }}
+          restore-keys: unity-library-${{ runner.os }}-
 
-      - name: Run SDK-backed Unity tests
+      - name: Run SDK-backed Unity tests (GameCI container)
+        if: vars.MENSHARP_UNITY_EDITOR == ''
         uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9
         with:
           projectPath: tests/unity-project
@@ -88,6 +100,13 @@ jobs:
           artifactsPath: artifacts/unity-tests
           githubToken: ${{ secrets.GITHUB_TOKEN }}
           checkName: MenSharp Unity integration tests
+
+      - name: Run SDK-backed Unity tests (editor on the runner)
+        if: vars.MENSHARP_UNITY_EDITOR != ''
+        run: ./tools/test-unity.sh
+        env:
+          UNITY_EDITOR: ${{ vars.MENSHARP_UNITY_EDITOR }}
+          MENSHARP_SKIP_VPM_RESOLVE: "1"
 
       - name: Upload Unity logs and NUnit results
         if: always()

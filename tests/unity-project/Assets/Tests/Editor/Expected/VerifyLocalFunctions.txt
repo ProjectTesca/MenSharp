@@ -1,0 +1,8 @@
+[verify-local] 1 basics: Twice(3)=6 above its declaration, Twice(4)=8, Step(1)=11, Step(x:0,by:5)=5
+[verify-local] 2 recursion: Fact(5)=120, Even(10)=True, Odd(7)=True
+[verify-local] 3 capture: total=10, word='hi!bye!', loop='<0><1><2>'
+[verify-local] 4 ref/out: left=2 right=1, 48 -> high=4 low=8
+[verify-local] 5 static/nesting: Pure(0)=1, Reads()=7, Outer()=240
+[verify-local] 6 transitive: counter=3 (a lambda and a caller that never name it)
+[verify-local] 7 delegate: group(6)=12, this: Doubled=6
+[verify-local] 8 try: Risky(4)=25, Risky(0)=-1 caught 'zero'

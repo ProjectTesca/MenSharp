@@ -1,0 +1,7 @@
+[verify-iter] 1 lazy: made;start;make0;got0;make1;got2;end;
+[verify-iter] 2 again: sum=4 (body ran 3 times), local=10,11, words=xa,xb,stopa, repeat=rr
+[verify-iter] 3 tree: 1234, counter=9
+[verify-iter] 4 broken: caught mid, after=False
+[verify-iter] 5 cancel: early canceled=True, blinks before stop=3
+[verify-iter] 6 stopped: stopped at 3, token-less blink still going True
+[verify-iter] 7 timed: wait stopped, guarded faulted=True, elapsed ~N

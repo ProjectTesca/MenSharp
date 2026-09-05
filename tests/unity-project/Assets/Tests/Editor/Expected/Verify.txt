@@ -1,0 +1,81 @@
+[verify] ---- Start ----
+[verify] 1a gameObject.name = Verify   (expect: Verify)
+[verify] 1b transform.name  = Verify    (expect: Verify)
+[verify] 2  typeof(BoxCollider) = UnityEngine.BoxCollider   (expect: UnityEngine.BoxCollider)
+[verify] 3  GetComponent<BoxCollider>() = Verify   (expect: Verify)
+[verify] 4a target.label = target   (expect: target)
+[verify] 4b wrote target.poked = 10, read back 10
+[verify] target: Poke() ran, poked=11
+[verify] 4c after Poke(), target.poked = 11   (expect: 11)
+[verify] target: Slide(4) ran, poked=15
+[verify] 21a after Slide(4), target.poked = 15   (expect: 15)
+[verify] 21b target.Add(20, 22) = 42   (expect: 42)
+[verify] 21c target.Take(5, out rest) = True, rest = 10   (expect: True, 10)
+[verify] 21d target.Take(100, out deficit) = False, deficit = -85   (expect: False, -85)
+[verify] 21e target.Describe("ab", 3) = ababab   (expect: ababab)
+[verify] target: Level setter ran, level=7
+[verify] 21f target.Level = 7 after writing 7 (setter should have logged)   (expect: 7)
+[verify] 9a int.TryParse("123", out parsed) → 123   (expect: 123)
+[verify] 12b Dial setter ran: 0 -> 42 (change #1)
+[verify] 12a wrote target.dial = 42; read back 42, setter ran 1 time(s)   (expect: 42, 1)
+[verify] 13 Fib(12) = 144   (expect: 144)
+[verify] 14a switch over own enum picked 2   (expect: 2)
+[verify] 14b KeyCode.Space as int = 32, equal check = True   (expect: 32, True)
+[verify] 9b Physics.Raycast hit Verify at distance 0.5   (expect: Verify, 0.5)
+a
+b
+o
+k
+0
+1
+a=1
+b=2
+ワン!
+にゃー！
+ワン!
+にゃー！
+ワン!
+にゃー！
+生きてるワン！
+生きてるにゃー！
+生きてるワン！
+生きてるにゃー！
+[verify] 15a ctor chain (this→base): v=5 w=3 own=7   (expect: 5, 3, 7)
+[verify] 15b implicit ctor → base(): v=5 w=1 virtual-from-base-ctor=2   (expect: 5, 1, 2)
+[verify] 15c static ctor after field initializers: Cfg.seed=62 Cfg.twice=20   (expect: 62, 20)
+[verify] 15d explicit implementations: IA=1 IB=2 public=3   (expect: 1, 2, 3)
+[verify] 15e object members: ToString=Kid7 Equals=True hash=7 concat=<Kid7>   (expect: Kid7, True, 7, <Kid7>)
+[verify] 15f inherited ToString via base type: Base5   (expect: Base5)
+[verify] 15g struct via object: ToString=Pt Equals=True notEqual=False   (expect: Pt, True, False)
+[verify] 15h boxed int via object: ToString=5 is int=True is string=False   (expect: 5, True, False)
+[verify] 15i as: Kid null   (expect: Kid, null)
+[verify] 15j is: True False 1   (expect: True, False, 1)
+[verify] 15k is-pattern bound: own=7   (expect: 7)
+[verify] 15l checked cast that succeeds: own=7   (expect: 7)
+[verify] 15m struct through interface: is Cat=True is Dog=False   (expect: True, False)
+[verify] 15n engine is: BoxCollider=True Collider=True Component=True SphereCollider=False Rigidbody=False   (expect: True, True, True, False, False)
+[verify] 15o engine as: Collider=Verify Rigidbody=null   (expect: Verify, null)
+[verify] 15p engine is-pattern: enabled=True   (expect: True)
+[verify] 15q engine checked cast: Verify   (expect: Verify)
+[verify] 15r a *failed* cast halts the behaviour: click the VerifyCrash object to see it
+[verify] 16a operators: sum=(21,42) neg=(-1,-2) inc=(12,23)   (expect: (21,42), (-1,-2), (12,23))
+[verify] 16b comparisons: ==:True !=:True Equals:True   (expect: True, True, True)
+[verify] 16c engine operators still work: (1.00, 3.00, 1.00)   (expect: (1.0, 3.0, 1.0))
+[verify] 17a default bodies: Hi plain | YO loud | Good day polite | Hi unit3 | Mx   (expect: Hi plain | YO loud | Good day polite | Hi unit3 | Mx)
+[verify] 17b static dispatch to a default body: Hi unit7   (expect: Hi unit7)
+[verify] 18a constants: True True True True False   (expect: True, True, True, True, False)
+[verify] 18b relational: True True True   (expect: True, True, True)
+[verify] 18c property patterns: True True False True   (expect: True, True, False, True)
+[verify] 19a switch patterns: kid7 | null | base5 | big int   (expect: kid7 | null | base5 | big int)
+[verify] 20a throw/catch/when/finally: caught door 3 is locked (finally ran)   (expect: caught door 3 is locked (finally ran))
+[verify] 20b runtime checks: index null divide cast key   (expect: index null divide cast key)
+[verify] 20c ToString with stack trace:
+DoorLockedException: door 3 is locked
+   at Verify.OpenDoor in Assets/MenSharp/Verify.cs:L:C
+   at Verify.Start in Assets/MenSharp/Verify.cs:L:C   (expect: DoorLockedException: door 3 is locked, then `at Verify.OpenDoor in Assets/MenSharp/Verify.cs:<line>:<col>` and `at Verify.Start ...`)
+[verify] 20d an *uncaught* exception halts the behaviour: click the VerifyCrash object to see it
+[verify] ---- Interact ----
+[verify] 5a cloning Clone Me
+[verify] 5b got Clone Me(Clone), active=True — click again to Destroy it
+[verify] 6b synced=1 dial=0.25 local=1
+[verify] 7  SendCustomEvent("Echo") arrived

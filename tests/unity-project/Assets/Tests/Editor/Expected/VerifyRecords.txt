@@ -1,0 +1,4 @@
+[verify-record] 1 tostring: Point { X = 1, Y = 2 } / Circle { Tag = c, R = 2.5 } / Some { Value = 7 } / Cell { Row = 1, Column = 2 }
+[verify-record] 2 equality: True False True True True
+[verify-record] 3 with: Point { X = 1, Y = 9 } Point { X = 1, Y = 2 } / 1,9 / Cell { Row = 5, Column = 7 }
+[verify-record] 4 dictionary: a True circle 2.5

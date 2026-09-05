@@ -1,0 +1,10 @@
+[verify-u#] 1 counter.label = u#, count = 0, mode = Slow
+[verify-u#] Bump(3) ran, count=3
+[verify-u#] 2 after Bump(3), counter.count = 3
+[verify-u#] 3 counter.Add(20, 22) = 42
+[verify-u#] 4 counter.Take(1, out rest) = True, rest = 2
+[verify-u#] Level setter ran, level=9
+[verify-u#] 5 counter.Level = 9, counter.Doubled = 6
+[verify-u#] 6 counter.Describe() = u#:3:1
+[verify-u#] Interact on the UdonSharp side: count=3, level=9, mode=1
+[verify-u#] 7 UCounterMath.Triple(4) = 12   (expect: 12; a U# helper class compiled into this program)

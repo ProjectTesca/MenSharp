@@ -1,0 +1,5 @@
+[verify-jagged] 1 rows: length=3, row 0 null before assignment=True, grid[0]={10,20}
+[verify-jagged] 2 write: grid[1][0]=30, grid[1][1]=20, grid[0].Length=2
+[verify-jagged] 3 written out: {1}{2,3}, widest=2, static table {1,2}{3}
+[verify-jagged] 4 strings/deep: words[0][1]=b, deep[0][0][0]=7
+[verify-jagged] 5 passed around: sum=6, foreach total=6

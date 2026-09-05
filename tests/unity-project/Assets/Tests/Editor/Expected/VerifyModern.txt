@@ -1,0 +1,4 @@
+[verify-modern] 1 new(): a.Count=1, b.Count=5, field=1, made=7, list={1,2,3}
+[verify-modern] 2 new() struct: p.X=9, maybe.X=2, map k=5
+[verify-modern] 3 ??=: made once ('made'), a.Count=7, name=anon, count=5
+[verify-modern] 4 ??= places: array[0].Count=1, dict k=1, field kept=3

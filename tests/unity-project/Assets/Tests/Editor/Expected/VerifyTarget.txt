@@ -1,0 +1,1 @@
+[verify] 11 [SerializeField] secret = 5   (expect: 5, or the Inspector value)

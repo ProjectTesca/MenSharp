@@ -1,0 +1,4 @@
+[verify-string] 1 read: word[0]=h, word[4]=o, last=o, At("abc",1)=b
+[verify-string] 2 compare: word[1]=='e' True, letters=5, built='hello' matches True
+[verify-string] 3 mixed: "abc"[2]=c, Substring(1,3)[1]=l, ToCharArray()[0]=h, field[0]=h
+[verify-string] 4 bounds: word[9] threw IndexOutOfRangeException, word[-1] threw too

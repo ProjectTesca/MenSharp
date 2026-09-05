@@ -1,0 +1,7 @@
+[verify-cleanup] 1 to the end: open;1;mid;2;close;
+[verify-cleanup] 2 break: open;1;close;
+[verify-cleanup] 3 return: got1 after open;close;
+[verify-cleanup] 4 exception: open;close;caught boom;
+[verify-cleanup] 5 nested: inner;outer;
+[verify-cleanup] 6 yield break: e1;efin;
+[verify-cleanup] 7 never started: nothing ran, log empty True

@@ -6,7 +6,9 @@
     "ProjectTesca.MenSharp.Editor",
     "ProjectTesca.MenSharp.Runtime",
     "VRC.Udon",
-    "VRC.Udon.Editor"
+    "VRC.Udon.Editor",
+    "UdonSharp.Editor",
+    "UdonSharp.Runtime"
   ],
   "includePlatforms": [
     "Editor"

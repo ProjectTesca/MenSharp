@@ -1,0 +1,4 @@
+[verify-union] 1 areas: 12 12 / C B
+[verify-union] 2 events: joined bea / tick 7
+[verify-union] 3 option: some 7 / none
+[verify-union] 4 enum+bool: locked / no

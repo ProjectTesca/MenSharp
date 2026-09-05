@@ -1,0 +1,5 @@
+[verify-arrays] 1 local: {10,20,30} length=3, sum=60, empty length=0
+[verify-arrays] 2 behaviour field: names={a,b}, levels sum=6
+[verify-arrays] 3 class field: {1,2,3} length=3, empty length=0
+[verify-arrays] 4 conversions: floats={1, 2.5}, longs sum=3, strings={x,y}
+[verify-arrays] 5 same as new[]: True, writes stick: {10,99,30}

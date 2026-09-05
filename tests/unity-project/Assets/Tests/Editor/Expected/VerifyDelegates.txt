@@ -1,0 +1,10 @@
+[verify-delegates] 1 lambda: f(2)=3, f.Invoke(3)=4, DlOp(4)=12
+[verify-delegates] 2 method group: Twice(5)=10, counter.Bump x2 -> 11, virtual Twice(11)=22
+[verify-delegates] 3 closure: captured 10 -> 12; per-iteration makers 3,4,7; nested 7
+[verify-delegates] 4 recursion through a delegate: fact(5)=120
+[verify-delegates] 5 generics: Best(3,9)=9, longer=yyy, holder=9
+[verify-delegates] 6 List<T>: sorted=1245, find=4, removed=2, converted=<1><5>
+[verify-delegates] 7 multicast: log=ababaaba0a, equal=1111
+[verify-delegates] 8 events: hits=3, seen=3, quiet=1
+[verify-delegates] 9 null delegate threw NullReferenceException; ?. skipped: 7
+[verify-delegates] 10 behaviour closure: clicks=2, log=hit1hit2

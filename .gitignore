@@ -27,3 +27,6 @@
 /tests/unity-project/*.csproj
 /tests/unity-project/*.sln
 /artifacts/unity-tests/
+/tests/unity-project/Assets/UdonSharp/UCounter.asset
+/tests/unity-project/Assets/UdonSharp/UCounter.asset.meta
+/tests/unity-project/mono_crash.*

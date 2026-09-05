@@ -1,0 +1,4 @@
+[verify-enum] 1 names: High High Low Mid 9
+[verify-enum] 2 interpolated: state=High next=Mid generic High;3;
+[verify-enum] 3 flags: Front, Side / None / Both / Both, Side / 8
+[verify-enum] 4 sorted: Low,Mid,High max High boxed 6

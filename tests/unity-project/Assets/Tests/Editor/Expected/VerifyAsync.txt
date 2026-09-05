@@ -1,0 +1,7 @@
+[verify-async] 1 start: sync part done, IsCompleted=False
+[verify-async] 2 after 1s: elapsed ~N, frames advanced True
+[verify-async] 3 helpers: doubled=84, both=x+y, first=x, delay(ms) ok, yield ok
+[verify-async] 4 exceptions: caught later, faulted=True, finally ran, async void fine
+[verify-async] 5 timing: same-tick order a,b | next frame later True, after 0.5s ~N
+[verify-async] 6 source: got mail (from Ring), lambda=6, local=hi!, counter=2
+[verify-async] 7 done: total ~Ns, run 1

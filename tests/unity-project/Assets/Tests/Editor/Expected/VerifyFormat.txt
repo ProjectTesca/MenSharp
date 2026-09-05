@@ -1,0 +1,4 @@
+[verify-format] 1 numbers: 1.2|1.235|1|00042|2A|1,234,567|1.23
+[verify-format] 2 align: [   42][42   ][    1.23][   ][ab   |  cd]
+[verify-format] 3 engine: (1.0, 2.0, 3.0) and 01:30
+[verify-format] 4 plain: no format still works: 42 and 1.234567

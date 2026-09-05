@@ -1,0 +1,4 @@
+[verify-crash] 1 before the cast: shape is Square = False   (expect: False)
+Unhandled exception: System.InvalidCastException: the object is not a `Square`
+   at VerifyCrash.Interact in Assets/MenSharp/VerifyCrash.cs:L:C
+[<color=yellow>UdonBehaviour</color>] An exception occurred during Udon execution, this UdonBehaviour will be halted.

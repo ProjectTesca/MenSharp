@@ -1,0 +1,5 @@
+[verify-data] 1 list: count=3, [0]=1, [1]=two, [2]=3.5, after write [0]=9
+[verify-data] 2 dictionary: count=2, a=1, b=hello, has a=True
+[verify-data] 3 tokens: t=text (String), n=42 (Int), list token type=DataList
+[verify-data] 4 vector: v[0]=1, v[1]=2, v[2]=3, after v[1]=9 -> (1.00, 9.00, 3.00)
+[verify-data] 5 json: {"n":7} -> n=7, round trip ok=True

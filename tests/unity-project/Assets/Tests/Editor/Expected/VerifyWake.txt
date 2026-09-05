@@ -1,0 +1,4 @@
+[verify-wake] 0 click
+[verify-wake] 2 next frame
+[verify-wake] 1 one second later
+[verify-wake] 3 two seconds later

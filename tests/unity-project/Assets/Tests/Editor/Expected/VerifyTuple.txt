@@ -1,0 +1,7 @@
+[verify-tuple] 1 values: pair=(1, a), named x=2 y=3, Item1=2, sum=9, printed (4, b)
+[verify-tuple] 2 copies: copy.x=100 leaves the original at 2
+[verify-tuple] 3 apart: var (a,b)=1/a, (c,d)=1/a, (int e,string f)=1/a, discard=a, nested 1+2 n
+[verify-tuple] 4 equality: (1,2)==(1,2) True, (1,2)!=(1,3) True, dictionary key found: cell
+[verify-tuple] 5 patterns: is (0, var h) -> 5, switch -> up5, switch expression -> left
+[verify-tuple] 6 loops: foreach var (n, s) -> 7z, whole.Item1 -> 7
+[verify-tuple] 7 boxed: printed (1, a), equal True, different False, cast back 1/2, bad cast caught

@@ -1,0 +1,4 @@
+[verify-deconstruct] 1 class: (x, y)=3/4, (px, py)=3/4, struct (w, h)=2/5
+[verify-deconstruct] 2 patterns: is (3, var found) -> 4, switch -> p7, switch expression -> unit
+[verify-deconstruct] 3 dictionary: ann=30, bob=41, total=71
+[verify-deconstruct] 4 nested: outer (1, 2), inner sum=3, named pair a=3 b=4

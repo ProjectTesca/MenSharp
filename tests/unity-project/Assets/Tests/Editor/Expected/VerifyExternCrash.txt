@@ -1,0 +1,2 @@
+[verify-extern-crash] 1 before the call
+[<color=yellow>UdonBehaviour</color>] An exception occurred during Udon execution, this UdonBehaviour will be halted.

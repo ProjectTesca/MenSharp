@@ -1,0 +1,9 @@
+[verify-gc] 1 GetComponent<VerifyTarget>() found = True, label = target
+[verify-gc] 2 GetComponents<VerifyTarget>().Length = 1
+[verify-gc] 3 GetComponent<UCounter>() found = True
+[verify-u#] Bump(1) ran, count=1
+[verify-gc] 4 TryGetComponent<UCounter> = True
+[verify-gc] 5 GetComponentsInChildren<VerifyTarget>(true).Length = 1
+[verify-gc] 6 GetComponent<VerifyCrash>() = null   (expect: True)   True
+[verify] target: Poke() ran, poked=1
+[verify-gc] 7 target.poked after Poke() through the found reference = 1

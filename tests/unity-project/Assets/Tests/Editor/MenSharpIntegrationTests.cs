@@ -7,7 +7,6 @@ using System.Reflection;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.SceneManagement;
-using UnityEditorInternal;
 using UnityEngine;
 using UnityEngine.TestTools;
 using VRC.Udon;
@@ -98,7 +97,7 @@ public class MenSharpIntegrationTests
         // comes out of that in edit mode with Udon never initialised. Let it
         // happen here, where the runner knows how to resume the test.
         AssetDatabase.Refresh();
-        if (ScriptReloadPending())
+        if (MenSharpTestScene.ScriptReloadPending())
         {
             yield return new WaitForDomainReload();
         }
@@ -148,34 +147,18 @@ public class MenSharpIntegrationTests
         AssetDatabase.DeleteAsset(GeneratedScene);
     }
 
-    // the check the test framework's own WaitForDomainReload loops on; it
-    // is internal to the editor, hence the reflection
-    private static readonly MethodInfo ScriptReloadRequested = typeof(InternalEditorUtility)
-        .GetMethod("IsScriptReloadRequested", BindingFlags.Static | BindingFlags.NonPublic | BindingFlags.Public);
-
-    private static bool ScriptReloadPending()
-    {
-        if (EditorApplication.isCompiling)
-        {
-            return true;
-        }
-        return ScriptReloadRequested != null && (bool)ScriptReloadRequested.Invoke(null, null);
-    }
-
     private static void BuildRuntimeScene()
     {
-        EnsureFolder("Assets/Tests/Generated");
+        MenSharpTestScene.EnsureFolder("Assets/Tests/Generated");
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
-        GameObject smokeObject = AddProxy("MenSharpRuntimeSmoke");
-        GameObject targetObject = AddProxy("MenSharpRuntimeTarget");
-        GameObject callerObject = AddProxy("MenSharpRuntimeCaller");
-
-        var targetProxy = targetObject.GetComponent(FindType("MenSharpRuntimeTarget"));
-        var callerProxy = callerObject.GetComponent(FindType("MenSharpRuntimeCaller"));
-        FieldInfo targetField = callerProxy.GetType().GetField("target");
-        Assert.IsNotNull(targetField);
-        targetField.SetValue(callerProxy, targetProxy);
+        GameObject smokeObject = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke", "MenSharpRuntimeSmoke", Vector3.zero);
+        GameObject targetObject = MenSharpTestScene.AddProxy("MenSharpRuntimeTarget", "MenSharpRuntimeTarget", Vector3.right * 4);
+        GameObject callerObject = MenSharpTestScene.AddProxy("MenSharpRuntimeCaller", "MenSharpRuntimeCaller", Vector3.right * 8);
+        MenSharpTestScene.Assign(
+            MenSharpTestScene.Proxy(callerObject, "MenSharpRuntimeCaller"),
+            "target",
+            MenSharpTestScene.Proxy(targetObject, "MenSharpRuntimeTarget"));
 
         var targets = new List<GameObject> { smokeObject, targetObject, callerObject };
         MenSharpProxy.SyncThenTransfer(targets, false);
@@ -187,45 +170,6 @@ public class MenSharpIntegrationTests
         Assert.IsTrue(EditorSceneManager.SaveScene(scene, GeneratedScene));
     }
 
-    private static GameObject AddProxy(string typeName)
-    {
-        var target = new GameObject(typeName);
-        Type type = FindType(typeName);
-        Assert.IsTrue(typeof(MenSharp.MenSharpBehaviour).IsAssignableFrom(type), typeName);
-        Assert.IsNotNull(target.AddComponent(type));
-        return target;
-    }
-
-    private static Type FindType(string fullName)
-    {
-        Type found = AppDomain.CurrentDomain.GetAssemblies()
-            .Select(assembly => assembly.GetType(fullName, false))
-            .FirstOrDefault(type => type != null);
-        Assert.IsNotNull(found, $"no loaded type named {fullName}");
-        return found;
-    }
-
-    private static UdonBehaviour FindUdon(string objectName)
-    {
-        GameObject target = GameObject.Find(objectName);
-        Assert.IsNotNull(target, objectName);
-        UdonBehaviour udon = target.GetComponent<UdonBehaviour>();
-        Assert.IsNotNull(udon, objectName);
-        return udon;
-    }
-
-    private static void EnsureFolder(string path)
-    {
-        string current = "Assets";
-        foreach (string segment in path.Split('/').Skip(1))
-        {
-            string next = current + "/" + segment;
-            if (!AssetDatabase.IsValidFolder(next))
-            {
-                AssetDatabase.CreateFolder(current, segment);
-            }
-            current = next;
-        }
-    }
+    private static UdonBehaviour FindUdon(string objectName) => MenSharpTestScene.FindUdon(objectName);
 }
 #endif

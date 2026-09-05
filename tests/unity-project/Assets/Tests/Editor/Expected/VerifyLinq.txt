@@ -1,0 +1,8 @@
+[verify-linq] 1 filter: 50,30,10,90 sum 28 count 3 any True all True min 1 max 9 avg 466
+[verify-linq] 2 elements: 5 8 2 0 8 window 8,1,9 while 5,3,8 / 1,9,2
+[verify-linq] 3 sets: 7,2,9,1,8,3,5 distinct 1,2,3 union 1,2,3,4 intersect 2,3 except 1,3 range 1,2,3,4
+[verify-linq] 4 order: kiwi,pear,apple,fig then kiwi,pear,fig,apple words apple,Banana,fig,pear
+[verify-linq] 5 objects: total 80 weight 2.25 avg 266 names apple,fig dict 30 groups 30:2:apple,fig|20:1:pear
+[verify-linq] 6 comparable: max 2.1 min 1.9 sorted 1.9,2.0,2.1 list 1.9,2.0,2.1 nulls null,1.0,3.0 empty True
+[verify-linq] 7 lazy: built;s1;w1;s2;w2;got20;closed; again 20 aggregate 28 72 6
+[verify-linq] 8 strings: hello has 2 l, reversed c,b,a chars a,b,c,d zip a5,b3 error Sequence contains no elements

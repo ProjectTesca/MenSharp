@@ -1,0 +1,5 @@
+[verify-seq] 1 list: 1,2,3, total 6, direct foreach 6
+[verify-seq] 2 dictionary: keys ann,bob, values total 70, pairs ann=30;bob=40;
+[verify-seq] 3 array: total 15, words p,q, via variable 15, by index 15
+[verify-seq] 4 iterator: 1,4,9,16, total 14, lazy True
+[verify-seq] 5 string: hey and o,k

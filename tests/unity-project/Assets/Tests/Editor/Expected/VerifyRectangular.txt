@@ -1,0 +1,5 @@
+[verify-rect] 1 basics: 1,4,6 / 6 2 3 rank 2
+[verify-rect] 2 init: 21 / 12 / row-major 123456
+[verify-rect] 3 cube: 24 / 0.5 / d
+[verify-rect] 4 object: True / 5 / 100 1 / System.Int32[,]
+[verify-rect] 5 bounds: caught IndexOutOfRangeException

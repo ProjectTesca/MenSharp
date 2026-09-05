@@ -1,0 +1,10 @@
+[verify-nullable] 1 members: a.HasValue=False, b.HasValue=True, b.Value=5, a??100=100, a.GetValueOrDefault(10)=10
+[verify-nullable] 2 lifted: a+b null=True, b+1=6, a==null=True, b==5=True, a<3=False, b>3=True, -b=-5
+[verify-nullable] 3 mutation: b++ -> 6, b+=10 -> 16, (int)b=16, long? wide==16: True
+[verify-nullable] 4 strings: '' '16' '|' 'x=16' 'x='
+[verify-nullable] 5 boxing: is int v -> 16, (int?)boxed -> 16, switch: N S, patterns: WZ
+[verify-nullable] 6 struct?: p==null True, q.Value+(3,4)=(4,6), (p??q).Value.X=1, Vector3? v=(1.00, 2.00, 3.00)
+[verify-nullable] 7 ?.: none?.Count null=True, some?.Count=3, some.Next?.Count ?? 7 = 7
+[verify-nullable] 8 arrays/default: def==null True, arr[0]==null True, arr[1]=9
+[verify-nullable] 9 a.Value threw InvalidOperationException; null==null True; null!=b True
+1
