@@ -1411,6 +1411,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if Self::tuple_elements(ty).is_some() {
             return self.tuple_to_string(ctx, slot, ty, span);
         }
+        // a source enum: its member's name
+        if let Some(symbol) = self.source_enum(ty) {
+            return self.enum_to_string(ctx, slot, symbol, span);
+        }
         // a value that may be an object of the user's: its own `ToString`
         if self.has_type_id(ty)
             || (self.heap_type(ty) == "SystemObject"
@@ -3715,6 +3719,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     };
                     if let Some((slot, receiver_type)) = receiver_value {
                         let receiver_type = self.substitute(&receiver_type, &ctx.key.bindings);
+                        // `rank.ToString()` on a source enum: its name
+                        if member_name == "ToString"
+                            && values.is_empty()
+                            && let Some(symbol) = self.source_enum(&receiver_type)
+                        {
+                            let text = self.enum_to_string(ctx, slot, symbol, span);
+                            return Piece::Value(text, self.corlib_type("String"));
+                        }
                         // a tuple has no type at run time: its `Equals`,
                         // `GetHashCode` and `ToString` are lowered here,
                         // where the shape is known — which is what lets one

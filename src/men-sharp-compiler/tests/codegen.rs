@@ -9486,7 +9486,7 @@ fn linq_orders_stably_by_keys_and_by_the_type_itself() {
                     Log += withNull.Min() + " " + Show(withNull.OrderBy(v => v).Select(v => v == null ? "null" : v.ToString()))
                         + (new Version[0].Max() == null) + ";";
                     Rank[] ranks = new Rank[] { Rank.High, Rank.Low, Rank.Mid };
-                    Log += Show(ranks.OrderBy(r => r).Select(r => (int)r)) + (int)ranks.Max() + ";";
+                    Log += Show(ranks.OrderBy(r => r)) + ranks.Max() + ";";
                     List<int> plain = new List<int>();
                     plain.Add(3); plain.Add(1); plain.Add(2);
                     plain.Sort();
@@ -9505,7 +9505,7 @@ fn linq_orders_stably_by_keys_and_by_the_type_itself() {
         "2.1 1.9 1.9,2.0,2.1,",
         "1.9,2.0,2.1,True1",
         "1.0 null,1.0,3.0,True",
-        "0,1,2,2",
+        "Low,Mid,High,High",
         "1,2,3,a,b,",
     ]
     .join(";")
@@ -9624,4 +9624,40 @@ fn casting_a_fraction_to_an_integer_truncates_as_in_csharp() {
     "#;
     let emulator = run(source, "Main").unwrap();
     assert_eq!(string_of(&emulator, "Log"), "3 -3 2 3 37 8 2.5");
+}
+
+#[test]
+fn a_source_enum_prints_its_member_name() {
+    let source = r#"
+        using System;
+        namespace Game
+        {
+            public enum Rank { Low, Mid = 5, High, Peak = 5 }
+
+            [Flags]
+            public enum Doors { None = 0, Front = 1, Back = 2, Side = 4, Both = 3 }
+
+            public class Program
+            {
+                public static string Log = "";
+                static string Show<T>(T item) { return item + ";"; }
+                public static void Main()
+                {
+                    Rank r = Rank.High;
+                    Log += r + "," + r.ToString() + "," + Rank.Low + "," + Rank.Peak + "," + (Rank)9 + ";";
+                    Log += $"{r} {Rank.Mid}" + ";";
+                    Log += Show(r) + Show(Rank.Low) + Show(3);
+                    Doors d = Doors.Front | Doors.Side;
+                    Log += d + "," + Doors.None + "," + (Doors)3 + "," + (Doors)7 + "," + (Doors)8 + "," + Doors.Back + ";";
+                    object boxed = r;
+                    Log += boxed + ";";
+                }
+            }
+        }
+    "#;
+    let emulator = run(source, "Main").unwrap();
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "High,High,Low,Mid,9;High Mid;High;Low;3;Front, Side,None,Both,Both, Side,8,Back;6;"
+    );
 }

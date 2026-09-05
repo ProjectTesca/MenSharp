@@ -1067,6 +1067,13 @@ switch (state)
 `switch` takes constant case labels and `default`; pattern matching (`case > 0`,
 `case string s`, `when` guards) is a compile error for now.
 
+An enum value prints as its name, as in C#: `"state: " + state`,
+`$"{state}"`, `state.ToString()` and a `T` that is an enum inside a generic
+method all give `Open`. A value no member has prints as its number, and a
+`[Flags]` enum is decomposed the way .NET does it (`Front, Side`). The one
+difference from C#: an enum stored in an `object` has lost its type (on Udon
+it is a boxed `int`), so `object o = state; o.ToString()` prints the number.
+
 ## foreach, List<T> and Dictionary<K, V>
 
 `foreach` walks arrays, strings (by `char`), `List<T>`, `Dictionary<K, V>`

@@ -162,6 +162,9 @@ enum Role {
     /// The synthesized field-wise `int GetHashCode()` of a struct that
     /// declares none. `symbol` is the struct.
     StructHashCode,
+    /// `string (int)`: the name of a source enum's value, or its number.
+    /// `symbol` is the enum. See `enums`.
+    EnumToString,
     /// The synthesized virtual-dispatch stub for `symbol`: compares the
     /// receiver's type id and jumps to the right override. A role of its own so
     /// it never collides with the method's own body — which it would otherwise
@@ -2651,6 +2654,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 SyntaxRef::Property(property) => Some(property.attributes),
                 SyntaxRef::Method(method) => Some(method.attributes),
                 SyntaxRef::Class(class) => Some(class.attributes),
+                SyntaxRef::Enum(declaration) => Some(declaration.attributes),
                 _ => None,
             })
             .collect()
@@ -3162,6 +3166,7 @@ fn event_slot_type(dotnet: &str) -> String {
 mod comparers;
 mod components;
 mod delegates;
+mod enums;
 mod exceptions;
 mod expressions;
 mod functions;
