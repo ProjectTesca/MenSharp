@@ -766,10 +766,84 @@ it by index with nothing allocated, and `foreach` over a `List<T>` still
 binds to its concrete enumerator, so the common loops cost no dispatch.
 
 It is the compiler's own `IEnumerable<T>`, with `GetEnumerator` on it and
-nothing else: a sequence can be enumerated and passed around, not `.ToList()`ed
-or LINQ-ed. (`foreach (Transform child in transform)` needs the engine's
-non-generic enumerator, which Udon does not expose — walk
+nothing else — and the LINQ operators below as extension methods on it.
+(`foreach (Transform child in transform)` needs the engine's non-generic
+enumerator, which Udon does not expose — walk
 `transform.childCount`/`GetChild(i)` instead.)
+
+## LINQ
+
+`using System.Linq;` and the query operators work on every sequence — arrays,
+`List<T>`, `Dictionary<K, V>`, strings, iterators and each other's results:
+
+```csharp
+using System.Linq;
+
+int[] scores = new int[] { 40, 85, 62, 91 };
+int passed = scores.Count(s => s >= 60);
+int best = scores.Max();
+string top = scores.Where(s => s >= 60).OrderByDescending(s => s)
+    .Select(s => s.ToString()).Aggregate((a, b) => a + "," + b);
+
+List<Player> players = ...;
+Player leader = players.OrderByDescending(p => p.Score).ThenBy(p => p.Name).First();
+Dictionary<string, Player> byName = players.ToDictionary(p => p.Name);
+foreach (IGrouping<int, Player> team in players.GroupBy(p => p.Team))
+{
+    Debug.Log($"team {team.Key}: {team.Count()} players, {team.Sum(p => p.Score)} points");
+}
+```
+
+What is there, with the signatures of .NET's `Enumerable`:
+
+- **Filtering and projection:** `Where`, `Select` (both also with an index),
+  `SelectMany` (both forms), `Distinct`, `Union`, `Intersect`, `Except`.
+- **Partitioning and joining:** `Take`, `Skip`, `TakeWhile`, `SkipWhile`,
+  `Concat`, `Append`, `Prepend`, `Zip` (with a result selector),
+  `DefaultIfEmpty`, `Reverse`.
+- **Ordering:** `OrderBy`, `OrderByDescending`, `ThenBy`, `ThenByDescending`
+  — a stable sort, like .NET's, by however many keys you chain.
+- **Grouping:** `GroupBy` (key, key + element selector, key + result
+  selector); each group is an `IGrouping<K, T>` with a `Key`.
+- **Elements:** `First`, `Last`, `Single`, `ElementAt` and their `OrDefault`
+  forms, `Any`, `All`, `Contains`, `SequenceEqual`, `Count`, `LongCount`.
+- **Aggregation:** `Sum`, `Average`, `Min`, `Max` for `int`, `long`, `float`
+  and `double` (directly and through a selector), `Min`/`Max` of anything
+  orderable, and `Aggregate` (all three forms).
+- **Conversion and generation:** `ToArray`, `ToList`, `ToDictionary` (with and
+  without an element selector), `AsEnumerable`, `Enumerable.Range`, `Repeat`,
+  `Empty`.
+
+The deferred operators are as lazy as .NET's: nothing runs until the result
+is enumerated, each element flows through the whole chain before the next is
+read, and leaving a `foreach` early closes the chain (an iterator's
+`finally` blocks run). Enumerating the same query again runs it again.
+
+**Ordering and equality.** `OrderBy`, `Min`, `Max` and `List<T>.Sort()` order
+values by the type's own `CompareTo`: numbers, `string`, `char`, `bool`,
+enums, and any class or struct of yours that implements `IComparable<T>`.
+Ordering something that has none is a compile error naming the type — order
+by a key instead (`OrderBy(x => x.Name)`), or implement the interface.
+`Distinct`, `Contains`, `GroupBy` and `ToDictionary` compare with the value's
+`Equals`/`GetHashCode`, as `Dictionary<K, V>` does. `null` orders before
+everything and is skipped by `Min`/`Max`, as in .NET.
+
+`List<T>` gained the members these lean on: `Sort()`, `Contains`, `IndexOf`,
+`ToArray`, `AddRange`, and the `List(IEnumerable<T>)` and `List(int)`
+constructors.
+
+Not there: the overloads that take an `IComparer<T>`/`IEqualityComparer<T>`,
+the `Nullable` numeric ones, `Cast`/`OfType` (Udon cannot test a box against
+one of your classes), `ToHashSet`/`ToLookup`, and `Join`/`GroupJoin`. Each is
+an ordinary "no such method" error. A null source is not checked for
+`ArgumentNullException`; it fails at its first `GetEnumerator` like any null
+receiver.
+
+A word on cost: every deferred operator is an iterator, so each element
+costs a resumed continuation per stage of the chain (a few hundred Udon
+instructions), and `OrderBy` computes every key once and sorts positions.
+For a hot per-frame loop over a large array, a plain `for` is still cheaper;
+for the everyday "find, filter, sort, sum" of a world script, LINQ is fine.
 
 ## Delegates, lambdas and events
 

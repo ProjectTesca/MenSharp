@@ -276,7 +276,7 @@ impl TypeSystem<'_, '_> {
         widening.next().is_none().then_some(first)
     }
 
-    fn is_standard_implicit_conversion(&self, from: &Type, to: &Type) -> bool {
+    pub fn is_standard_implicit_conversion(&self, from: &Type, to: &Type) -> bool {
         // recovery and dynamic swallow everything
         if matches!(from, Type::Error | Type::Dynamic) || matches!(to, Type::Error | Type::Dynamic)
         {

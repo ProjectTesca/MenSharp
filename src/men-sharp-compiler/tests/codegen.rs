@@ -9316,3 +9316,312 @@ fn a_wake_up_that_arrives_early_still_leaves_a_way_back() {
         .unwrap_or_else(|error| panic!("{error:?}\n{dump}"));
     assert_eq!(string_of(&emulator, "Log"), "woke");
 }
+
+#[test]
+fn linq_filters_projects_and_aggregates() {
+    let source = r#"
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            public class Item
+            {
+                public string Name;
+                public int Price;
+                public float Weight;
+                public Item(string name, int price, float weight) { Name = name; Price = price; Weight = weight; }
+            }
+
+            public class Program
+            {
+                public static string Log = "";
+
+                static string Show<T>(IEnumerable<T> items)
+                {
+                    string text = "";
+                    foreach (T item in items) { text += item + ","; }
+                    return text;
+                }
+
+                public static void Main()
+                {
+                    int[] numbers = new int[] { 5, 3, 8, 1, 9, 2 };
+                    Log += Show(numbers.Where(n => n % 2 == 1).Select(n => n * 10)) + ";";
+                    Log += numbers.Sum() + " " + numbers.Count() + " " + numbers.Count(n => n > 4) + " "
+                        + numbers.Any(n => n > 8) + " " + numbers.All(n => n > 0) + " "
+                        + numbers.Min() + " " + numbers.Max() + " " + (int)(numbers.Average() * 100) + ";";
+                    Log += numbers.First() + " " + numbers.First(n => n > 5) + " " + numbers.Last() + " "
+                        + numbers.LastOrDefault(n => n > 100) + " " + numbers.FirstOrDefault(n => n > 100) + " "
+                        + numbers.ElementAt(2) + " " + numbers.Single(n => n == 8) + ";";
+                    Log += Show(numbers.Skip(2).Take(3)) + Show(numbers.TakeWhile(n => n > 2)) + Show(numbers.SkipWhile(n => n > 2)) + ";";
+                    Log += Show(numbers.Concat(new int[] { 7 }).Reverse()) + Show(new int[] { 1, 2, 2, 3, 1 }.Distinct()) + numbers.Contains(8) + numbers.Contains(4) + ";";
+                    Log += Show(Enumerable.Range(1, 4)) + Show(Enumerable.Repeat("x", 2)) + Enumerable.Empty<int>().Count() + ";";
+                    Log += numbers.Aggregate((a, b) => a + b) + " " + numbers.Aggregate(100, (a, b) => a - b) + " "
+                        + numbers.Aggregate("", (s, n) => s + n, s => s.Length) + ";";
+                    Log += Show(numbers.Prepend(0).Take(2)) + Show(numbers.Append(0).Skip(5)) + Show(Enumerable.Empty<int>().DefaultIfEmpty()) + ";";
+                    Log += Show(numbers.Select((n, i) => n * i)) + Show(numbers.Where((n, i) => i % 2 == 0)) + ";";
+
+                    List<Item> items = new List<Item>();
+                    items.Add(new Item("apple", 30, 1.5f));
+                    items.Add(new Item("pear", 20, 0.5f));
+                    items.Add(new Item("fig", 30, 0.25f));
+                    Log += items.Sum(x => x.Price) + " " + items.Sum(x => x.Weight) + " " + items.Max(x => x.Price) + " "
+                        + items.Min(x => x.Weight) + " " + (int)(items.Average(x => x.Price) * 10) + ";";
+                    Log += items.Select(x => x.Name).Max() + " " + items.Select(x => x.Name).Min() + " "
+                        + Show(items.Where(x => x.Price == 30).Select(x => x.Name)) + ";";
+                    Log += items.ToList().Count + " " + items.ToDictionary(x => x.Name)["fig"].Price + " "
+                        + items.ToDictionary(x => x.Name, x => x.Weight)["pear"] + ";";
+                    Log += numbers.Take(2).SequenceEqual(new int[] { 5, 3 }) + " " + numbers.SequenceEqual(numbers.Reverse()) + " "
+                        + Show(numbers.Zip(new string[] { "a", "b" }, (n, s) => s + n)) + ";";
+                    Log += Show(new int[] { 1, 2, 3 }.Union(new int[] { 3, 4 })) + Show(new int[] { 1, 2, 3 }.Intersect(new int[] { 2, 3, 5 }))
+                        + Show(new int[] { 1, 2, 3 }.Except(new int[] { 2 })) + ";";
+                    Log += Show(new string[] { "ab", "cd" }.SelectMany(s => s.ToCharArray())) + "hello".Count(c => c == 'l') + Show("abc".Reverse()) + ";";
+                    foreach (IGrouping<int, Item> group in items.GroupBy(x => x.Price))
+                    {
+                        Log += group.Key + ":" + group.Count() + ":" + Show(group.Select(x => x.Name)) + "|";
+                    }
+                    Log += ";";
+                    try
+                    {
+                        numbers.Where(n => n > 100).First();
+                    }
+                    catch (InvalidOperationException error)
+                    {
+                        Log += error.Message + ";";
+                    }
+                }
+            }
+        }
+    "#;
+    let emulator = run(source, "Main").unwrap();
+    let expected = [
+        "50,30,10,90,",
+        "28 6 3 True True 1 9 466",
+        "5 8 2 0 0 8 8",
+        "8,1,9,5,3,8,1,9,2,",
+        "7,2,9,1,8,3,5,1,2,3,TrueFalse",
+        "1,2,3,4,x,x,0",
+        "28 72 6",
+        "0,5,2,0,0,",
+        "0,3,16,3,36,10,5,8,9,",
+        "80 2.25 30 0.25 266",
+        "pear apple apple,fig,",
+        "3 30 0.5",
+        "True False a5,b3,",
+        "1,2,3,4,2,3,1,3,",
+        "a,b,c,d,2c,b,a,",
+        "30:2:apple,fig,|20:1:pear,|",
+        "Sequence contains no elements",
+    ]
+    .join(";")
+        + ";";
+    assert_eq!(string_of(&emulator, "Log"), expected);
+}
+
+#[test]
+fn linq_orders_stably_by_keys_and_by_the_type_itself() {
+    let source = r#"
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            public class Item
+            {
+                public string Name;
+                public int Price;
+                public Item(string name, int price) { Name = name; Price = price; }
+            }
+
+            public class Version : IComparable<Version>
+            {
+                public int Major;
+                public int Minor;
+                public Version(int major, int minor) { Major = major; Minor = minor; }
+                public int CompareTo(Version other)
+                {
+                    if (Major != other.Major) { return Major.CompareTo(other.Major); }
+                    return Minor.CompareTo(other.Minor);
+                }
+                public override string ToString() { return Major + "." + Minor; }
+            }
+
+            public enum Rank { Low, Mid, High }
+
+            public class Program
+            {
+                public static string Log = "";
+
+                static string Show<T>(IEnumerable<T> items)
+                {
+                    string text = "";
+                    foreach (T item in items) { text += item + ","; }
+                    return text;
+                }
+
+                public static void Main()
+                {
+                    List<Item> items = new List<Item>();
+                    items.Add(new Item("apple", 30));
+                    items.Add(new Item("pear", 20));
+                    items.Add(new Item("fig", 30));
+                    items.Add(new Item("kiwi", 10));
+                    // equal keys keep their order: apple stays before fig
+                    Log += Show(items.OrderBy(x => x.Price).Select(x => x.Name)) + ";";
+                    Log += Show(items.OrderBy(x => x.Price).ThenByDescending(x => x.Name).Select(x => x.Name)) + ";";
+                    Log += Show(items.OrderByDescending(x => x.Price).ThenBy(x => x.Name).Select(x => x.Name)) + ";";
+                    string[] words = new string[] { "pear", "apple", "fig", "Banana" };
+                    Log += Show(words.OrderBy(s => s)) + Show(words.OrderByDescending(s => s.Length).ThenBy(s => s)) + ";";
+                    Log += Show(new float[] { 2.5f, -1f, 0.5f }.OrderBy(f => f)) + Show(new char[] { 'c', 'a', 'b' }.OrderByDescending(c => c)) + ";";
+
+                    Version[] versions = new Version[] { new Version(2, 1), new Version(1, 9), new Version(2, 0) };
+                    Log += versions.Max() + " " + versions.Min() + " " + Show(versions.OrderBy(v => v)) + ";";
+                    List<Version> list = new List<Version>(versions);
+                    list.Sort();
+                    Log += Show(list) + list.Contains(versions[1]) + list.IndexOf(versions[2]) + ";";
+                    // nulls order first and are skipped by Min/Max; an empty
+                    // sequence of a class gives null instead of throwing
+                    Version[] withNull = new Version[] { new Version(3, 0), null, new Version(1, 0) };
+                    Log += withNull.Min() + " " + Show(withNull.OrderBy(v => v).Select(v => v == null ? "null" : v.ToString()))
+                        + (new Version[0].Max() == null) + ";";
+                    Rank[] ranks = new Rank[] { Rank.High, Rank.Low, Rank.Mid };
+                    Log += Show(ranks.OrderBy(r => r).Select(r => (int)r)) + (int)ranks.Max() + ";";
+                    List<int> plain = new List<int>();
+                    plain.Add(3); plain.Add(1); plain.Add(2);
+                    plain.Sort();
+                    Log += Show(plain) + Show(new string[] { "b", "a" }.OrderBy(s => s).ToList()) + ";";
+                }
+            }
+        }
+    "#;
+    let emulator = run(source, "Main").unwrap();
+    let expected = [
+        "kiwi,pear,apple,fig,",
+        "kiwi,pear,fig,apple,",
+        "apple,fig,pear,kiwi,",
+        "apple,Banana,fig,pear,Banana,apple,pear,fig,",
+        "-1,0.5,2.5,c,b,a,",
+        "2.1 1.9 1.9,2.0,2.1,",
+        "1.9,2.0,2.1,True1",
+        "1.0 null,1.0,3.0,True",
+        "0,1,2,2",
+        "1,2,3,a,b,",
+    ]
+    .join(";")
+        + ";";
+    assert_eq!(string_of(&emulator, "Log"), expected);
+}
+
+#[test]
+fn linq_is_deferred_and_closes_the_source_early() {
+    let source = r#"
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+
+                static IEnumerable<int> Source()
+                {
+                    try
+                    {
+                        for (int i = 1; i <= 5; i++)
+                        {
+                            Log += "s" + i + ";";
+                            yield return i;
+                        }
+                    }
+                    finally
+                    {
+                        Log += "closed;";
+                    }
+                }
+
+                public static void Main()
+                {
+                    IEnumerable<int> query = Source()
+                        .Where(n => { Log += "w" + n + ";"; return n % 2 == 0; })
+                        .Select(n => n * 10);
+                    Log += "built;";
+                    foreach (int value in query.Take(1)) { Log += "got" + value + ";"; }
+                    // a second enumeration runs the chain again from the start
+                    // (read into locals: `Log += query.First()` would read
+                    // Log before the call and drop what the call logged)
+                    int first = query.First();
+                    Log += first + ";";
+                    bool any = Source().Any();
+                    Log += any + ";";
+                }
+            }
+        }
+    "#;
+    let emulator = run(source, "Main").unwrap();
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "built;s1;w1;s2;w2;got20;closed;s1;w1;s2;w2;closed;20;s1;closed;True;"
+    );
+}
+
+#[test]
+fn ordering_a_type_without_an_ordering_is_a_compile_error() {
+    let source = r#"
+        using System.Linq;
+        namespace Game
+        {
+            public class Thing { public int Score; }
+            public class Program
+            {
+                public static Thing Best;
+                public static void Main()
+                {
+                    Thing[] things = new Thing[] { new Thing() };
+                    Best = things.Max();
+                }
+            }
+        }
+    "#;
+    let Some((_, messages)) = codegen_errors(source) else {
+        return;
+    };
+    assert_eq!(messages.len(), 1, "{messages:?}");
+    assert!(
+        messages[0].contains("`Game.Thing` has no ordering")
+            && messages[0].contains("IComparable<Game.Thing>")
+            && messages[0].contains("Max"),
+        "{}",
+        messages[0]
+    );
+}
+
+#[test]
+fn casting_a_fraction_to_an_integer_truncates_as_in_csharp() {
+    let source = r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static string Log = "";
+                public static void Main()
+                {
+                    float f = 3.7f;
+                    double d = -3.7;
+                    double half = 2.5;
+                    long big = 7;
+                    // C# drops the fraction; `Convert.ToInt32` would round
+                    // 3.7 up and 2.5 to the even 2
+                    Log += (int)f + " " + (int)d + " " + (int)half + " " + (long)f + " " + (int)(f * 10) + " ";
+                    big++;
+                    float step = 1.5f;
+                    step++;
+                    Log += big + " " + step;
+                }
+            }
+        }
+    "#;
+    let emulator = run(source, "Main").unwrap();
+    assert_eq!(string_of(&emulator, "Log"), "3 -3 2 3 37 8 2.5");
+}

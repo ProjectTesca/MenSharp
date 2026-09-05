@@ -9,8 +9,8 @@
 // `foreach` binds to the enumerator pattern below (no interface, no
 // dispatch); `IEnumerable<T>` is implemented explicitly beside it, exactly
 // as .NET's List<T> does, so a list can also be passed where a sequence is
-// wanted. Deliberately minimal otherwise: no Sort/Contains (both need
-// comparers, which need interfaces on the object model). The indexer and
+// wanted. `Sort()`, `Contains` and `IndexOf` order and compare through
+// `MenSharp.Internal.Comparers` (see Comparers.cs). The indexer and
 // RemoveAt throw ArgumentOutOfRangeException as .NET's do.
 
 using System;
@@ -26,6 +26,20 @@ namespace System.Collections.Generic
         {
             items = new T[4];
             size = 0;
+        }
+
+        public List(int capacity)
+        {
+            if (capacity < 0) { throw new ArgumentOutOfRangeException("capacity"); }
+            items = new T[capacity < 4 ? 4 : capacity];
+            size = 0;
+        }
+
+        public List(IEnumerable<T> collection)
+        {
+            items = new T[4];
+            size = 0;
+            AddRange(collection);
         }
 
         public int Count => size;
@@ -53,6 +67,53 @@ namespace System.Collections.Generic
             {
                 if (index < 0 || index >= size) { throw new ArgumentOutOfRangeException("index"); }
                 items[index] = value;
+            }
+        }
+
+        public void AddRange(IEnumerable<T> collection)
+        {
+            foreach (T item in collection)
+            {
+                Add(item);
+            }
+        }
+
+        public T[] ToArray()
+        {
+            T[] result = new T[size];
+            System.Array.Copy(items, result, size);
+            return result;
+        }
+
+        public int IndexOf(T item)
+        {
+            for (int i = 0; i < size; i++)
+            {
+                if (MenSharp.Internal.Comparers.Equal(items[i], item)) { return i; }
+            }
+            return -1;
+        }
+
+        public bool Contains(T item)
+        {
+            return IndexOf(item) >= 0;
+        }
+
+        /// Orders the elements by their own ordering (`Comparer<T>.Default`):
+        /// numbers, strings, chars, ... and any class implementing
+        /// `IComparable<T>`. Stable, unlike .NET's.
+        public void Sort()
+        {
+            for (int i = 1; i < size; i++)
+            {
+                T key = items[i];
+                int j = i - 1;
+                while (j >= 0 && MenSharp.Internal.Comparers.Compare(items[j], key) > 0)
+                {
+                    items[j + 1] = items[j];
+                    j--;
+                }
+                items[j + 1] = key;
             }
         }
 

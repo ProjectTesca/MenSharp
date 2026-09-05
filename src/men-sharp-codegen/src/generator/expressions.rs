@@ -839,10 +839,56 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     "SystemSingle" => Some("ToSingle"),
                     "SystemDouble" => Some("ToDouble"),
                     "SystemByte" => Some("ToByte"),
+                    "SystemSByte" => Some("ToSByte"),
+                    "SystemInt16" => Some("ToInt16"),
+                    "SystemUInt16" => Some("ToUInt16"),
                     "SystemUInt32" => Some("ToUInt32"),
+                    "SystemUInt64" => Some("ToUInt64"),
+                    "SystemChar" => Some("ToChar"),
+                    "SystemDecimal" => Some("ToDecimal"),
                     _ => None,
                 };
                 if let Some(method) = method {
+                    // `(int)3.7` is 3 in C#: a fraction is dropped, where
+                    // `Convert.ToInt32` would round it to the nearest even
+                    let (source, from_name) = if matches!(
+                        (from_name.as_str(), method),
+                        (
+                            "SystemSingle" | "SystemDouble",
+                            "ToInt32"
+                                | "ToInt64"
+                                | "ToByte"
+                                | "ToSByte"
+                                | "ToInt16"
+                                | "ToUInt16"
+                                | "ToUInt32"
+                                | "ToUInt64"
+                                | "ToChar"
+                        )
+                    ) {
+                        let double = if from_name == "SystemSingle" {
+                            let widened = self.temp("SystemDouble");
+                            self.call_extern(
+                                ctx,
+                                "SystemConvert.__ToDouble__SystemSingle__SystemDouble",
+                                &[source, widened],
+                                span.clone(),
+                            );
+                            widened
+                        } else {
+                            source
+                        };
+                        let truncated = self.temp("SystemDouble");
+                        self.call_extern(
+                            ctx,
+                            "SystemMath.__Truncate__SystemDouble__SystemDouble",
+                            &[double, truncated],
+                            span.clone(),
+                        );
+                        (truncated, "SystemDouble".to_string())
+                    } else {
+                        (source, from_name.clone())
+                    };
                     let signature = format!("SystemConvert.__{method}__{from_name}__{to_name}");
                     if self.nodes.has_signature(&signature) {
                         let out = self.temp(&to_name);
@@ -859,6 +905,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             self.call_extern(ctx, &signature, &[source, out], span);
                             return out;
                         }
+                    }
+                    // a number that Udon cannot convert: copying the slot as
+                    // it is would leave a value of the wrong type in it
+                    if self.nodes.has_signature(&format!(
+                        "SystemConvert.__ToInt32__{from_name}__SystemInt32"
+                    )) {
+                        let (from_display, to_display) =
+                            (self.display_type(from), self.display_type(to));
+                        self.error(
+                            ctx,
+                            format!(
+                                "Udon has no conversion from `{from_display}` to `{to_display}` \
+                                 (`{signature}` is not exposed)"
+                            ),
+                            span,
+                        );
                     }
                 }
                 source
@@ -1611,7 +1673,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 )
             }
             UnaryOperator::PreIncrement | UnaryOperator::PreDecrement => {
-                let one = self.int_constant(1);
                 let operator = if unary.operator.value == UnaryOperator::PreIncrement {
                     BinaryOperator::Add
                 } else {
@@ -1620,6 +1681,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // the place is found once: `a[Next()]++` moves once
                 let place = self.lower_place(ctx, operand_expression);
                 let (value, ty) = self.read_place(ctx, place.clone(), unary.span.clone())?;
+                let one = self.unit_step(ctx, &ty, unary.span.clone());
                 let updated = self.emit_binary_operator(
                     ctx,
                     operator,
@@ -1641,6 +1703,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 None
             }
         }
+    }
+
+    /// The `1` that `++`/`--` adds, as the operand's own type: a `long`
+    /// steps by an Int64, a `float` by a Single — an Int32 constant handed
+    /// to their externs would halt the VM. A source enum is its Int32.
+    fn unit_step(&mut self, ctx: &mut Ctx<'ast>, ty: &Type, span: Range<usize>) -> DataId {
+        let one = self.int_constant(1);
+        let int = self.corlib_type("Int32");
+        if *ty == int || self.type_system().is_enum_type(ty) {
+            return one;
+        }
+        self.convert(ctx, one, &int, ty, span)
     }
 
     fn lower_assignment(
@@ -2694,7 +2768,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             };
             let old = self.temp_for(&ty);
             self.copy(value, old);
-            let one = self.int_constant(1);
+            let one = self.unit_step(ctx, &ty, span.clone());
             let op = if operator.value == PostfixOperator::Increment {
                 BinaryOperator::Add
             } else {
@@ -3112,7 +3186,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     };
                     let old = self.temp_for(&ty);
                     self.copy(slot, old);
-                    let one = self.int_constant(1);
+                    let one = self.unit_step(ctx, &ty, span.clone());
                     let op = if operator.value == PostfixOperator::Increment {
                         BinaryOperator::Add
                     } else {
@@ -3477,7 +3551,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// emit it. Collection initializers and `foreach` come in here directly,
     /// since their `Add`/`MoveNext` calls have no argument syntax.
     #[allow(clippy::too_many_arguments)]
-    fn dispatch_call(
+    pub(super) fn dispatch_call(
         &mut self,
         ctx: &mut Ctx<'ast>,
         call: &ResolvedCall,
@@ -3490,11 +3564,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Piece {
         let parameter_offset = usize::from(call.is_extension);
         if call.is_extension {
-            let Some((slot, _)) = &receiver else {
+            let Some((slot, receiver_type)) = &receiver else {
                 self.error(ctx, "internal: extension call without a receiver", span);
                 return Piece::Error;
             };
-            values.insert(0, *slot);
+            // the receiver is the first argument, converted like one: an
+            // array passed to `this IEnumerable<T>` becomes a sequence here
+            let (slot, receiver_type) = (*slot, receiver_type.clone());
+            let value = match call.signature.parameters.first() {
+                Some(parameter) => {
+                    let parameter_type =
+                        self.substitute(&parameter.parameter_type, &ctx.key.bindings);
+                    self.convert(ctx, slot, &receiver_type, &parameter_type, span.clone())
+                }
+                None => slot,
+            };
+            values.insert(0, value);
         }
 
         let return_type = self.substitute(&call.signature.return_type, &ctx.key.bindings);
@@ -3509,6 +3594,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // the corlib's program-search intrinsics are lowered in place
                 if let Some(piece) =
                     self.try_program_intrinsic(ctx, call, symbol, &values, span.clone())
+                {
+                    return piece;
+                }
+                // ... and so is `Comparer<T>.Default`
+                if let Some(piece) =
+                    self.try_comparers_intrinsic(ctx, call, symbol, &values, span.clone())
                 {
                     return piece;
                 }

@@ -1396,6 +1396,53 @@ mod tests {
     }
 
     #[test]
+    fn inference_feeds_one_lambda_into_the_next_and_ranks_lambda_returns() {
+        checked!(
+            check,
+            r#"
+            public delegate R Map<T, R>(T value);
+            public delegate R Join<A, B, R>(A a, B b);
+            public class App
+            {
+                R Chain<T, U, R>(T value, Map<T, U> first, Join<T, U, R> second) { return default; }
+                int Sum<T>(T value, Map<T, int> f) { return 0; }
+                long Sum<T>(T value, Map<T, long> f) { return 0; }
+                double Sum<T>(T value, Map<T, double> f) { return 0; }
+
+                void Run()
+                {
+                    // the second lambda's inputs are fixed by the first one's return
+                    int probe_chain = Chain(1, x => x > 0, (x, flag) => flag ? "y" : "n");
+                    // a lambda returning int fits all three; the int overload is the better one
+                    string probe_int = Sum(1, x => x + 1);
+                    string probe_double = Sum(1, x => 2.5);
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 3, "{kinds:?}");
+        for (kind, found) in kinds
+            .iter()
+            .zip(["System.String", "System.Int32", "System.Double"])
+        {
+            assert_eq!(
+                **kind,
+                SemanticErrorKind::TypeMismatch {
+                    expected: if found == "System.String" {
+                        "System.Int32"
+                    } else {
+                        "System.String"
+                    }
+                    .to_string(),
+                    found: found.to_string(),
+                }
+            );
+        }
+    }
+
+    #[test]
     fn natural_lambda_and_best_common_types() {
         checked!(
             check,

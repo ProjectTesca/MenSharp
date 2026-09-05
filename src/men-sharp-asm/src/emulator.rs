@@ -92,6 +92,15 @@ impl Value {
         }
     }
 
+    pub fn as_char(&self) -> Result<char, EmulatorError> {
+        match self {
+            Value::Char(v) => Ok(*v),
+            other => Err(EmulatorError::TypeError(format!(
+                "expected Char, found {other:?}"
+            ))),
+        }
+    }
+
     pub fn as_f32(&self) -> Result<f32, EmulatorError> {
         match self {
             Value::Single(v) => Ok(*v),
@@ -185,6 +194,9 @@ pub struct Emulator {
     /// `SendCustomEventDelayedSeconds`/`Frames` — delivered by
     /// [`Emulator::advance`] once their time or frame has come.
     pub delayed: Vec<DelayedEvent>,
+    /// Label names by address: when set, every jump that lands on one is
+    /// printed to stderr — a call trace for hunting a miscompile.
+    pub trace: Option<HashMap<u32, String>>,
 }
 
 /// The other programs a running one can reach: raising their events and
@@ -291,6 +303,7 @@ impl Emulator {
             time: 0.0,
             frame: 0,
             delayed: Vec::new(),
+            trace: None,
         }
     }
 
@@ -367,7 +380,20 @@ impl Emulator {
             .entry_addresses
             .get(entry)
             .ok_or_else(|| EmulatorError::UnknownEntryPoint(entry.to_string()))?;
+        // the trace is read while the heap is written, so it steps aside
+        let trace = self.trace.take();
+        let result = self.run_from(assembled, start, peers, trace.as_ref());
+        self.trace = trace;
+        result
+    }
 
+    fn run_from(
+        &mut self,
+        assembled: &Assembled,
+        start: u32,
+        peers: &mut dyn Peers,
+        trace: Option<&HashMap<u32, String>>,
+    ) -> Result<(), EmulatorError> {
         // byte address -> instruction index
         let index_of: HashMap<u32, usize> = assembled
             .instructions
@@ -379,6 +405,9 @@ impl Emulator {
         let jump_to = |address: u32| -> Result<Option<usize>, EmulatorError> {
             if address >= assembled.end_address || address == HALT_ADDRESS {
                 return Ok(None); // off the end = halt
+            }
+            if let Some(name) = trace.and_then(|labels| labels.get(&address)) {
+                eprintln!("-> {name}");
             }
             index_of
                 .get(&address)
@@ -503,6 +532,24 @@ impl Emulator {
                 let args = self.pop_arguments(2)?;
                 let a = self.heap[args[0]].as_i32()?;
                 self.heap[args[1]] = Value::Int32(a.wrapping_neg());
+                Ok(())
+            }
+            "SystemInt64.__op_UnaryMinus__SystemInt64__SystemInt64" => {
+                let args = self.pop_arguments(2)?;
+                let a = self.heap[args[0]].as_i64()?;
+                self.heap[args[1]] = Value::Int64(a.wrapping_neg());
+                Ok(())
+            }
+            "SystemSingle.__op_UnaryMinus__SystemSingle__SystemSingle" => {
+                let args = self.pop_arguments(2)?;
+                let a = self.heap[args[0]].as_f32()?;
+                self.heap[args[1]] = Value::Single(-a);
+                Ok(())
+            }
+            "SystemDouble.__op_UnaryMinus__SystemDouble__SystemDouble" => {
+                let args = self.pop_arguments(2)?;
+                let a = self.heap[args[0]].as_f64()?;
+                self.heap[args[1]] = Value::Double(-a);
                 Ok(())
             }
             // ---- Int32 comparisons ----
@@ -798,6 +845,36 @@ impl Emulator {
                 self.heap[args[1]] = Value::Int64(value);
                 Ok(())
             }
+            // .NET rounds a fraction to the nearest even integer here — the
+            // compiler truncates first when lowering a C# cast
+            "SystemConvert.__ToInt32__SystemDouble__SystemInt32"
+            | "SystemConvert.__ToInt32__SystemSingle__SystemInt32" => {
+                let args = self.pop_arguments(2)?;
+                let value = if signature.contains("SystemSingle") {
+                    f64::from(self.heap[args[0]].as_f32()?)
+                } else {
+                    self.heap[args[0]].as_f64()?
+                };
+                self.heap[args[1]] = Value::Int32(round_half_even(value) as i32);
+                Ok(())
+            }
+            "SystemConvert.__ToInt64__SystemDouble__SystemInt64"
+            | "SystemConvert.__ToInt64__SystemSingle__SystemInt64" => {
+                let args = self.pop_arguments(2)?;
+                let value = if signature.contains("SystemSingle") {
+                    f64::from(self.heap[args[0]].as_f32()?)
+                } else {
+                    self.heap[args[0]].as_f64()?
+                };
+                self.heap[args[1]] = Value::Int64(round_half_even(value) as i64);
+                Ok(())
+            }
+            "SystemMath.__Truncate__SystemDouble__SystemDouble" => {
+                let args = self.pop_arguments(2)?;
+                let value = self.heap[args[0]].as_f64()?;
+                self.heap[args[1]] = Value::Double(value.trunc());
+                Ok(())
+            }
             "SystemConvert.__ToInt32__SystemInt64__SystemInt32"
             | "SystemConvert.__ToInt32__SystemObject__SystemInt32" => {
                 let args = self.pop_arguments(2)?;
@@ -872,6 +949,65 @@ impl Emulator {
                     _ => value.is_alphanumeric(),
                 };
                 self.heap[args[1]] = Value::Boolean(result);
+                Ok(())
+            }
+            // ---- CompareTo: what `Comparer<T>.Default` is lowered to ----
+            "SystemInt32.__CompareTo__SystemInt32__SystemInt32" => {
+                binary_i32!(|a: i32, b: i32| Value::Int32(a.cmp(&b) as i32))
+            }
+            "SystemInt64.__CompareTo__SystemInt64__SystemInt32" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_i64()?;
+                let b = self.heap[args[1]].as_i64()?;
+                self.heap[args[2]] = Value::Int32(a.cmp(&b) as i32);
+                Ok(())
+            }
+            "SystemSingle.__CompareTo__SystemSingle__SystemInt32" => {
+                binary_f32!(|a: f32, b: f32| Value::Int32(compare_floats(a as f64, b as f64)))
+            }
+            "SystemDouble.__CompareTo__SystemDouble__SystemInt32" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_f64()?;
+                let b = self.heap[args[1]].as_f64()?;
+                self.heap[args[2]] = Value::Int32(compare_floats(a, b));
+                Ok(())
+            }
+            "SystemChar.__CompareTo__SystemChar__SystemInt32" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_char()?;
+                let b = self.heap[args[1]].as_char()?;
+                self.heap[args[2]] = Value::Int32(a.cmp(&b) as i32);
+                Ok(())
+            }
+            "SystemBoolean.__CompareTo__SystemBoolean__SystemInt32" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_bool()?;
+                let b = self.heap[args[1]].as_bool()?;
+                self.heap[args[2]] = Value::Int32(a.cmp(&b) as i32);
+                Ok(())
+            }
+            "SystemString.__CompareTo__SystemString__SystemInt32" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_str()?;
+                let b = self.heap[args[1]].clone();
+                // a null argument orders first, as in .NET
+                let result = match b {
+                    Value::Null => 1,
+                    other => compare_culture(&a, &other.as_str()?),
+                };
+                self.heap[args[2]] = Value::Int32(result);
+                Ok(())
+            }
+            "SystemSingle.__IsNaN__SystemSingle__SystemBoolean" => {
+                let args = self.pop_arguments(2)?;
+                let value = self.heap[args[0]].as_f32()?;
+                self.heap[args[1]] = Value::Boolean(value.is_nan());
+                Ok(())
+            }
+            "SystemDouble.__IsNaN__SystemDouble__SystemBoolean" => {
+                let args = self.pop_arguments(2)?;
+                let value = self.heap[args[0]].as_f64()?;
+                self.heap[args[1]] = Value::Boolean(value.is_nan());
                 Ok(())
             }
             "SystemString.__Substring__SystemInt32__SystemString"
@@ -986,6 +1122,9 @@ impl Emulator {
             "SystemObject.__ToString__SystemString"
             | "SystemBoolean.__ToString__SystemString"
             | "SystemChar.__ToString__SystemString"
+            | "SystemInt64.__ToString__SystemString"
+            | "SystemSingle.__ToString__SystemString"
+            | "SystemDouble.__ToString__SystemString"
             | "SystemConvert.__ToString__SystemObject__SystemString" => {
                 let args = self.pop_arguments(2)?;
                 let value = self.heap[args[0]].display();
@@ -1405,4 +1544,40 @@ fn is_array_signature(signature: &str, middle: &str) -> bool {
     signature
         .split_once('.')
         .is_some_and(|(ty, rest)| ty.ends_with("Array") && rest.starts_with(middle))
+}
+
+/// `float.CompareTo`/`double.CompareTo`: NaN orders before everything,
+/// including itself being equal to itself.
+fn compare_floats(a: f64, b: f64) -> i32 {
+    match (a.is_nan(), b.is_nan()) {
+        (true, true) => 0,
+        (true, false) => -1,
+        (false, true) => 1,
+        (false, false) => a.partial_cmp(&b).map_or(0, |order| order as i32),
+    }
+}
+
+/// `string.CompareTo`: culture-sensitive in .NET (and on Udon), which for
+/// the letters and digits of test data means case-insensitive first, with
+/// lowercase before uppercase when that is all that differs — the shape
+/// the invariant culture gives, without a collation table.
+fn compare_culture(a: &str, b: &str) -> i32 {
+    let folded = a
+        .chars()
+        .flat_map(char::to_lowercase)
+        .cmp(b.chars().flat_map(char::to_lowercase));
+    match folded {
+        std::cmp::Ordering::Equal => b.cmp(a) as i32,
+        order => order as i32,
+    }
+}
+
+/// `Math.Round(value, MidpointRounding.ToEven)`: what `Convert.ToInt32(double)` does.
+fn round_half_even(value: f64) -> f64 {
+    let rounded = value.round();
+    if (value - value.trunc()).abs() == 0.5 && rounded % 2.0 != 0.0 {
+        rounded - value.signum()
+    } else {
+        rounded
+    }
 }

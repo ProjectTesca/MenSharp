@@ -165,6 +165,23 @@ impl Inference {
                     }
                     return;
                 }
+                // ... and a string is a sequence of its characters
+                if system.is_string(argument)
+                    && self.is_array_interface(system, parameter_target)
+                    && parameter_arguments.len() == 1
+                {
+                    let character = Type::Named {
+                        target: TypeTarget::External(
+                            system
+                                .external
+                                .find_type(&["System"], "Char", 0)
+                                .expect("System.Char is in every reference set"),
+                        ),
+                        arguments: Vec::new(),
+                    };
+                    self.exact(system, &parameter_arguments[0], &character);
+                    return;
+                }
 
                 // find the unique instantiation of the parameter's generic type in
                 // the argument's inheritance closure
@@ -460,7 +477,15 @@ impl Inference {
     /// read-only versions).
     fn is_array_interface(&self, system: &TypeSystem, target: &TypeTarget) -> bool {
         let TypeTarget::External(id) = target else {
-            return false;
+            // the mini-corlib's own `IEnumerable<T>`, which an array converts
+            // to as it does to .NET's
+            return system.is_source_type_path(
+                &Type::Named {
+                    target: *target,
+                    arguments: Vec::new(),
+                },
+                &["System", "Collections", "Generic", "IEnumerable"],
+            );
         };
         [
             "IEnumerable",

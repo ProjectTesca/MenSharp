@@ -332,6 +332,11 @@ impl Compiler {
                 "corlib/Iterators.cs",
                 include_str!("../../../corlib/Iterators.cs"),
             ),
+            SourceCode::new(
+                "corlib/Comparers.cs",
+                include_str!("../../../corlib/Comparers.cs"),
+            ),
+            SourceCode::new("corlib/Linq.cs", include_str!("../../../corlib/Linq.cs")),
             behaviour,
         ]
     }

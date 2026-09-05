@@ -480,6 +480,11 @@ struct CallArgument<'ast> {
     is_integer_literal: bool,
     /// `out var x` / `out int x` — the local to bind once an overload is chosen.
     out_declaration: Option<(&'ast str, bool)>,
+    /// The receiver of an extension-method call, prepended as argument 0:
+    /// only an identity, reference or boxing conversion may take it to the
+    /// `this` parameter (§12.8.10.3), never a user-defined one — `int[]`
+    /// reaches `IEnumerable<int>` but not `Span<int>`.
+    is_receiver: bool,
     span: Range<usize>,
 }
 
@@ -4028,6 +4033,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         modifier: argument.modifier.as_ref().map(|modifier| modifier.value),
                         is_integer_literal: false,
                         out_declaration: None,
+                        is_receiver: false,
                         span: argument.span.clone(),
                     };
                 }
@@ -4038,6 +4044,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     modifier: argument.modifier.as_ref().map(|modifier| modifier.value),
                     is_integer_literal: Self::is_integer_literal(expression),
                     out_declaration: None,
+                    is_receiver: false,
                     span: argument.span.clone(),
                 }
             }
@@ -4058,6 +4065,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     modifier: Some(ArgumentModifier::Out),
                     is_integer_literal: false,
                     out_declaration: Some((name.value, infer)),
+                    is_receiver: false,
                     span: argument.span.clone(),
                 }
             }
@@ -4068,6 +4076,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 modifier: None,
                 is_integer_literal: false,
                 out_declaration: None,
+                is_receiver: false,
                 span: argument.span.clone(),
             },
         }
@@ -4107,6 +4116,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 modifier: None,
                 is_integer_literal: false,
                 out_declaration: None,
+                is_receiver: true,
                 span: span.clone(),
             });
             extension_arguments.extend(arguments);
@@ -4121,8 +4131,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     return Type::Error;
                 }
                 AttemptOutcome::NoMatch { inference_failed } => {
+                    // extension candidates existed, so this is a mismatch,
+                    // not an unknown member
                     self.report_call_failure(
-                        &group,
+                        &extension_group,
                         &extension_arguments[1..],
                         instance_failure || inference_failed,
                         span,
@@ -4272,13 +4284,29 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
         }
 
-        // most exact matches wins; then normal form over expanded; then the
-        // one that fills in the fewest defaults (§12.6.4.3)
+        // most exact matches wins; then a non-generic method over a generic
+        // one (§12.6.4.5: `Min(IEnumerable<int>)` beats `Min<T>(IEnumerable<T>)`
+        // once T is int); then normal form over expanded; then the one that
+        // fills in the fewest defaults (§12.6.4.3); then the more specific
+        // declared parameter types — the fewer type parameters they mention,
+        // the more specific (`Max<T>(…, Func<T, int>)` over
+        // `Max<T, R>(…, Func<T, R>)` when both fit)
         let rank = |applicable: &Applicable| {
+            let candidate = &group.candidates[applicable.selected.candidate];
+            let type_parameter_leaves = match &candidate.signature {
+                Some(MemberSignature::Function(declared)) => declared
+                    .parameters
+                    .iter()
+                    .map(|parameter| type_parameter_leaves(&parameter.parameter_type))
+                    .sum::<usize>(),
+                _ => 0,
+            };
             (
                 applicable.exact,
+                applicable.selected.type_arguments.is_empty(),
                 !applicable.expanded,
                 usize::MAX - applicable.omitted,
+                usize::MAX - type_parameter_leaves,
             )
         };
         let Some(best) = viable.iter().map(rank).max() else {
@@ -4401,36 +4429,60 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
 
                 // phase 2: lambda bodies, typed against now-concrete inputs,
-                // feed their return types back
-                for &(argument_index, parameter_index) in &pairs {
-                    let argument = &arguments[argument_index];
-                    let parameter = &working.parameters[parameter_index];
-                    let ArgumentShape::Lambda(lambda) = &argument.shape else {
-                        continue;
-                    };
-                    let parameter_type = engine.substitute(&parameter.parameter_type);
-                    let Some(delegate) = self.delegate_signature(&parameter_type) else {
-                        return Err(false);
-                    };
-                    if delegate
-                        .parameters
-                        .iter()
-                        .any(|parameter| engine.has_unfixed(&parameter.parameter_type))
+                // feed their return types back — round after round, since
+                // what one lambda returns can be what the next one takes
+                // (`SelectMany(s => s.Items, (s, item) => ...)`): a lambda
+                // waits until every input of its delegate is fixed
+                let mut pending: Vec<(usize, usize)> = pairs
+                    .iter()
+                    .copied()
+                    .filter(|&(argument_index, _)| {
+                        matches!(arguments[argument_index].shape, ArgumentShape::Lambda(_))
+                    })
+                    .collect();
+                loop {
+                    let mut progressed = false;
+                    let mut waiting: Vec<(usize, usize)> = Vec::new();
+                    for (argument_index, parameter_index) in pending {
+                        let argument = &arguments[argument_index];
+                        let parameter = &working.parameters[parameter_index];
+                        let ArgumentShape::Lambda(lambda) = &argument.shape else {
+                            continue;
+                        };
+                        let parameter_type = engine.substitute(&parameter.parameter_type);
+                        let Some(delegate) = self.delegate_signature(&parameter_type) else {
+                            return Err(false);
+                        };
+                        if delegate
+                            .parameters
+                            .iter()
+                            .any(|parameter| engine.has_unfixed(&parameter.parameter_type))
+                        {
+                            waiting.push((argument_index, parameter_index));
+                            continue;
+                        }
+                        if !Self::lambda_shape_matches(lambda, &delegate) {
+                            return Err(false);
+                        }
+                        let Some(returned) = self.probe_lambda_return(lambda, &delegate) else {
+                            return Err(false);
+                        };
+                        let system = self.system();
+                        engine.lower_bound(&system, &delegate.return_type, &returned);
+                        progressed = true;
+                    }
                     {
+                        let system = self.system();
+                        engine.fix_where_possible(&system);
+                    }
+                    if waiting.is_empty() {
+                        break;
+                    }
+                    if !progressed {
+                        // a lambda whose inputs nothing can fix
                         return Err(true);
                     }
-                    if !Self::lambda_shape_matches(lambda, &delegate) {
-                        return Err(false);
-                    }
-                    let Some(returned) = self.probe_lambda_return(lambda, &delegate) else {
-                        return Err(false);
-                    };
-                    let system = self.system();
-                    engine.lower_bound(&system, &delegate.return_type, &returned);
-                }
-                {
-                    let system = self.system();
-                    engine.fix_where_possible(&system);
+                    pending = waiting;
                 }
                 if !engine.all_fixed() {
                     return Err(true);
@@ -4503,13 +4555,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         return Err(false);
                     }
                     let system = self.system();
-                    let convertible = system
-                        .is_implicitly_convertible(ty, &parameter.parameter_type)
-                        || (argument.is_integer_literal
-                            && system
-                                .numeric_kind(&parameter.parameter_type)
-                                .map(|kind| kind.is_integral())
-                                .unwrap_or(false));
+                    let convertible = if argument.is_receiver {
+                        system.is_standard_implicit_conversion(ty, &parameter.parameter_type)
+                    } else {
+                        system.is_implicitly_convertible(ty, &parameter.parameter_type)
+                    } || (argument.is_integer_literal
+                        && system
+                            .numeric_kind(&parameter.parameter_type)
+                            .map(|kind| kind.is_integral())
+                            .unwrap_or(false));
                     if !convertible {
                         return Err(false);
                     }
@@ -4520,6 +4574,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     };
                     if !Self::lambda_shape_matches(lambda, &delegate) {
                         return Err(false);
+                    }
+                    // a body that already has the delegate's return type is
+                    // the better conversion (§12.6.4.5): `Sum(x => x.Price)`
+                    // with an int `Price` is the `Func<T, int>` overload,
+                    // not the long, float or double ones it also fits
+                    if delegate.return_type != Type::Void
+                        && self.probe_lambda_return(lambda, &delegate).as_ref()
+                            == Some(&delegate.return_type)
+                    {
+                        exact += 1;
                     }
                 }
             }
@@ -4647,8 +4711,28 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
 
-            // external static classes with matching extension methods
+            // external static classes with matching extension methods — unless
+            // a source class of the same name shadows the whole class, the way
+            // it shadows the type (CS0436): the corlib's `System.Linq.Enumerable`
+            // stands in for the reference assembly's, extension methods included
             for owner in self.resolver.external.extension_method_owners(path, name) {
+                let display = self.resolver.external.display_name(owner);
+                let simple = display.rsplit('.').next().unwrap_or(&display);
+                let shadowed = namespace_symbol.is_some_and(|namespace_symbol| {
+                    self.resolver
+                        .declarations
+                        .table
+                        .symbol(namespace_symbol)
+                        .members
+                        .iter()
+                        .any(|&member| {
+                            let entry = self.resolver.declarations.table.symbol(member);
+                            entry.kind == SymbolKind::Class && entry.name == simple
+                        })
+                });
+                if shadowed {
+                    continue;
+                }
                 let owner_type = Type::Named {
                     target: TypeTarget::External(owner),
                     arguments: Vec::new(),
@@ -5705,6 +5789,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             modifier: None,
             is_integer_literal: Self::is_integer_literal(expression),
             out_declaration: None,
+            is_receiver: false,
             span: expression.span(),
         }
     }
@@ -5742,6 +5827,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         modifier: None,
                         is_integer_literal: false,
                         out_declaration: None,
+                        is_receiver: false,
                         span: argument.span.clone(),
                     }];
                     return self.index_with(receiver, call_arguments, span, node);
@@ -6304,6 +6390,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 modifier: None,
                 is_integer_literal: false,
                 out_declaration: None,
+                is_receiver: false,
                 span: span.clone(),
             })
             .collect();
@@ -6567,5 +6654,23 @@ fn method_parameter_keys(system: &TypeSystem, candidate: &MemberCandidate) -> Ve
         MemberOrigin::External { .. } => (0..candidate.arity).map(InferenceKey::External).collect(),
         // a local function cannot be generic
         MemberOrigin::LocalFunction(_) => Vec::new(),
+    }
+}
+
+/// How many type parameters a declared parameter type mentions, counting
+/// each occurrence: what makes one parameter list less specific than
+/// another (§12.6.4.5 — a type parameter is less specific than anything
+/// else, and a constructed type is as specific as its arguments).
+fn type_parameter_leaves(ty: &Type) -> usize {
+    match ty {
+        Type::TypeParameter(_) | Type::ExternalMethodTypeParameter(_) => 1,
+        Type::Named { arguments, .. } => arguments.iter().map(type_parameter_leaves).sum(),
+        Type::Array { element, .. } => type_parameter_leaves(element),
+        Type::Nullable(inner) => type_parameter_leaves(inner),
+        Type::Tuple(elements) => elements
+            .iter()
+            .map(|element| type_parameter_leaves(&element.element))
+            .sum(),
+        _ => 0,
     }
 }
