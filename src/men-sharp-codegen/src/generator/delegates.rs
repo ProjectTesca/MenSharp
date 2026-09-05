@@ -313,7 +313,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     self.functions[&thunk.target].name,
                     target_parameters.len(),
                     payload + shape.parameters.len()
-                ),
+                )
+                .into(),
                 file: ctx.file,
                 span: 0..0,
             });
@@ -416,8 +417,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(shape) = self.delegate_shape(&delegate_type, &[]) else {
             self.error(
                 ctx,
-                "this lambda has no delegate type to take: give it one (`Func<int, int> f = \
-                 ...`, `Action a = ...`, or a delegate of your own)",
+                Message::key("codegen.this_lambda_has_no_delegate_type_to"),
                 span,
             );
             return None;
@@ -661,10 +661,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let Some(this) = ctx.this_slot else {
                 self.error(
                     ctx,
-                    format!(
-                        "`{function}` uses the object the enclosing method runs on, which is not \
-                         available here — a `static` local function cannot hand it on"
-                    ),
+                    Message::key("codegen.function_uses_the_object_the_enclosing_method")
+                        .arg("function", function),
                     span,
                 );
                 return None;
@@ -682,11 +680,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let Some(slot) = found else {
                 self.error(
                     ctx,
-                    format!(
-                        "`{function}` uses `{name}` of the enclosing method, which is not \
-                         available at this call: a `static` local function cannot hand it on, \
-                         and a variable declared below has no value yet"
-                    ),
+                    Message::key("codegen.function_uses_name_of_the_enclosing_method")
+                        .arg("function", function)
+                        .arg("name", name),
                     span,
                 );
                 return None;
@@ -759,7 +755,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(shape) = self.delegate_shape(delegate_type, &[]) else {
             self.error(
                 ctx,
-                "a method can only be used as a value where a delegate type is expected",
+                Message::key("codegen.a_method_can_only_be_used_as"),
                 span,
             );
             return None;
@@ -777,8 +773,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let MemberOrigin::Source(symbol) = call.origin else {
             self.error(
                 ctx,
-                "an engine method cannot become a delegate on Udon yet: wrap it in a lambda, \
-                 `x => Method(x)`",
+                Message::key("codegen.an_engine_method_cannot_become_a_delegate"),
                 span,
             );
             return None;
@@ -788,8 +783,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             self.error(
                 ctx,
-                "a method of another behaviour cannot become a delegate: Udon reaches it only \
-                 by name — wrap the call in a lambda instead",
+                Message::key("codegen.a_method_of_another_behaviour_cannot_become"),
                 span,
             );
             return None;
@@ -801,7 +795,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let member = self.declarations.table.symbol(symbol).name;
             self.error(
                 ctx,
-                format!("`{member}` needs an instance to become a delegate"),
+                Message::key("codegen.member_needs_an_instance_to_become_a").arg("member", member),
                 span,
             );
             return None;
@@ -980,7 +974,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             BinaryOperator::Subtract => "Remove",
             BinaryOperator::Equal | BinaryOperator::NotEqual => "AreEqual",
             _ => {
-                self.error(ctx, "this operator is not defined on delegates", span);
+                self.error(
+                    ctx,
+                    Message::key("codegen.this_operator_is_not_defined_on_delegates"),
+                    span,
+                );
                 return None;
             }
         };

@@ -812,7 +812,7 @@ fn constructing_a_behaviour_is_an_error() {
             .output
             .errors
             .iter()
-            .any(|error| error.message.contains("cannot be constructed")),
+            .any(|error| error.message.to_string().contains("cannot be constructed")),
         "{:#?}",
         programs[0].output.errors
     );
@@ -985,11 +985,11 @@ fn assigning_to_a_self_reference_is_an_error() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         messages.iter().any(|message| message.contains("read-only")),
@@ -1225,11 +1225,11 @@ fn a_public_variable_hidden_by_a_derived_class_is_an_error() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         messages.iter().any(|message| message.contains("hides")),
@@ -1266,11 +1266,11 @@ fn calling_a_behaviour_member_on_an_object_is_a_plain_error() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         !messages.iter().any(|message| message.contains("internal:")),
@@ -1762,10 +1762,10 @@ fn a_broken_library_member_message_names_the_reason() {
         &references,
         &["Game", "Program"],
     );
-    let messages: Vec<&str> = output
+    let messages: Vec<String> = output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         messages.iter().any(|message| message
@@ -1898,11 +1898,11 @@ fn an_engine_derived_library_class_cannot_be_used_as_a_type() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         messages
@@ -1942,11 +1942,11 @@ fn a_private_member_of_another_behaviour_is_an_error() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         messages
@@ -2073,11 +2073,11 @@ fn attributes_that_would_change_behaviour_are_errors() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         messages
@@ -2570,10 +2570,10 @@ fn an_event_with_the_wrong_parameters_is_an_error() {
         &["Game", "Program"],
     );
     assert!(
-        output
-            .errors
-            .iter()
-            .any(|error| error.message.contains("built-in event `_midiNoteOn`")),
+        output.errors.iter().any(|error| error
+            .message
+            .to_string()
+            .contains("built-in event `_midiNoteOn`")),
         "{:#?}",
         output.errors
     );
@@ -2744,11 +2744,10 @@ fn a_field_change_callback_without_the_property_is_an_error() {
         return;
     };
     assert!(
-        program
-            .output
-            .errors
-            .iter()
-            .any(|error| error.message.contains("no property of that name")),
+        program.output.errors.iter().any(|error| error
+            .message
+            .to_string()
+            .contains("no property of that name")),
         "{:#?}",
         program.output.errors
     );
@@ -4079,7 +4078,7 @@ fn writing_a_member_of_a_struct_copy_is_an_error() {
         output
             .errors
             .iter()
-            .any(|error| error.message.contains("CS1612")),
+            .any(|error| error.message.to_string().contains("CS1612")),
         "{:#?}",
         output.errors
     );
@@ -5400,7 +5399,8 @@ fn conflicting_default_implementations_are_an_error() {
         output
             .errors
             .iter()
-            .any(|error| error.message.contains("CS8705") && error.message.contains("Game.Both")),
+            .any(|error| error.message.to_string().contains("CS8705")
+                && error.message.to_string().contains("Game.Both")),
         "{:#?}",
         output.errors
     );
@@ -6108,11 +6108,11 @@ fn what_a_network_callable_cannot_be_is_an_error() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     for expected in [
         "must be public: `Hidden`",
@@ -6202,11 +6202,11 @@ fn a_behaviour_outside_the_mensharp_sources_is_an_error() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         messages.iter().any(|message| message
@@ -6595,11 +6595,11 @@ fn what_a_delegate_cannot_do_is_an_error() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     for expected in [
         "an engine method cannot become a delegate on Udon yet",
@@ -6977,11 +6977,11 @@ fn a_local_function_reaching_a_variable_that_has_no_value_yet_is_an_error() {
         eprintln!("skipped: no .NET runtime for reference assemblies");
         return;
     };
-    let messages: Vec<&str> = program
+    let messages: Vec<String> = program
         .output
         .errors
         .iter()
-        .map(|error| error.message.as_str())
+        .map(|error| error.message.to_string())
         .collect();
     assert!(
         messages
@@ -7867,7 +7867,7 @@ fn codegen_errors(source: &str) -> Option<(String, Vec<String>)> {
     let messages = output
         .errors
         .iter()
-        .map(|error| error.message.clone())
+        .map(|error| error.message.to_string())
         .collect();
     Some((output.program.dump(), messages))
 }

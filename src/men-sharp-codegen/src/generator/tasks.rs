@@ -462,8 +462,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let MemberOrigin::Source(symbol) = call.origin else {
             self.error(
                 ctx,
-                "an awaiter from the engine cannot be called on Udon: only tasks and \
-                 awaitables written in M# can be awaited",
+                Message::key("codegen.an_awaiter_from_the_engine_cannot_be"),
                 span,
             );
             return None;
@@ -532,7 +531,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ctx,
                 format!(
                     "internal: the mini-corlib's `{}` has no `{name}`",
-                    self.display_type(&receiver_type)
+                    self.describe_type(&receiver_type)
                 ),
                 span,
             );
@@ -593,7 +592,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ctx,
                 format!(
                     "internal: `{}` has no constructor taking {} argument(s)",
-                    self.display_type(ty),
+                    self.describe_type(ty),
                     arguments.len()
                 ),
                 span,

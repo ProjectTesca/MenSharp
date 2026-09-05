@@ -58,7 +58,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 };
                 match recorded {
                     Err(message) => self.errors.push(CodegenError {
-                        message,
+                        message: message.into(),
                         file,
                         span,
                     }),
@@ -227,10 +227,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if !self.nodes.has_signature(&extern_signature) {
             self.error(
                 ctx,
-                format!(
-                    "`{name}` cannot be called on another behaviour: Udon offers no such \
-                     operation across programs"
-                ),
+                Message::key("codegen.name_cannot_be_called_on_another_behaviour")
+                    .arg("name", name),
                 span,
             );
             return Some(Piece::Error);

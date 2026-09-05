@@ -537,11 +537,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let name = entry.name.to_string();
         self.error(
             ctx,
-            format!(
-                "`{name}` is not public, so it is not part of the other behaviour's \
-                 surface — Udon can only reach another program's public variables and \
-                 public methods"
-            ),
+            Message::key("codegen.name_is_not_public_so_it_is").arg("name", name),
             span.clone(),
         );
         false
@@ -578,10 +574,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let name = self.declarations.table.symbol(symbol).name;
             self.error(
                 ctx,
-                format!(
-                    "`{name}` takes or returns a delegate, which cannot cross into another \
-                     program: a delegate is code addresses of the program that made it"
-                ),
+                Message::key("codegen.name_takes_or_returns_a_delegate_which").arg("name", name),
                 span,
             );
             return Piece::Error;
@@ -594,7 +587,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(layout) = self.export_layout(symbol) else {
             self.error(
                 ctx,
-                "this member cannot be reached on another behaviour",
+                Message::key("codegen.this_member_cannot_be_reached_on_another"),
                 span,
             );
             return Piece::Error;
@@ -681,11 +674,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.is_delegate_type(&ty) {
             self.error(
                 ctx,
-                format!(
-                    "`{name}` is a delegate, which cannot cross into another program: a \
-                     delegate is code addresses of the program that made it. Call a method \
-                     of the other behaviour instead (`other.Method(...)`)"
-                ),
+                Message::key("codegen.name_is_a_delegate_which_cannot_cross").arg("name", name),
                 span,
             );
             return Place::Error;
@@ -693,11 +682,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.is_task_type(&ty) {
             self.error(
                 ctx,
-                format!(
-                    "`{name}` is a Task-typed field, and those are not exported variables, \
-                     so another behaviour cannot read one. Return it from a method instead \
-                     (`await other.Ready()`), which does cross"
-                ),
+                Message::key("codegen.name_is_a_task_typed_field_and").arg("name", name),
                 span,
             );
             return Place::Error;
@@ -713,7 +698,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if member.kind != SymbolKind::Property {
             self.error(
                 ctx,
-                format!("`{name}` cannot be reached on another behaviour"),
+                Message::key("codegen.name_cannot_be_reached_on_another_behaviour")
+                    .arg("name", name),
                 span,
             );
             return Place::Error;
@@ -721,7 +707,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.is_indexer(symbol) {
             self.error(
                 ctx,
-                "an indexer of another behaviour is not supported yet; call a method instead",
+                Message::key("codegen.an_indexer_of_another_behaviour_is_not"),
                 span,
             );
             return Place::Error;
@@ -755,7 +741,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some((event, result)) = getter else {
             self.error(
                 ctx,
-                format!("`{name}` has no getter to raise on the other behaviour"),
+                Message::key("codegen.name_has_no_getter_to_raise_on").arg("name", name),
                 span,
             );
             return None;
@@ -783,7 +769,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some((event, parameter)) = setter else {
             self.error(
                 ctx,
-                format!("`{name}` has no setter to raise on the other behaviour"),
+                Message::key("codegen.name_has_no_setter_to_raise_on").arg("name", name),
                 span,
             );
             return;

@@ -8,3 +8,6 @@ timescope = { workspace = true }
 men-sharp-compiler = { workspace = true }
 men-sharp-parser = { workspace = true }
 men-sharp-semantics = { workspace = true }
+men-sharp-codegen = { workspace = true }
+men-sharp-diagnostics = { workspace = true }
+sys-locale = { workspace = true }

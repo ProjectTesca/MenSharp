@@ -168,7 +168,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     }
                     None => self.error(
                         ctx,
-                        "`break` outside a loop or `switch`",
+                        Message::key("codegen.break_outside_a_loop_or_switch"),
                         statement.span.clone(),
                     ),
                 }
@@ -189,13 +189,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         self.emit_finally_copies(ctx, index + 1);
                         self.program.code.push(Op::Jump(Target::Label(target)));
                     }
-                    None => self.error(ctx, "`continue` outside a loop", statement.span.clone()),
+                    None => self.error(
+                        ctx,
+                        Message::key("codegen.continue_outside_a_loop"),
+                        statement.span.clone(),
+                    ),
                 }
             }
             other => {
                 self.error(
                     ctx,
-                    "this statement is not supported by the Udon backend yet",
+                    Message::key("codegen.this_statement_is_not_supported_by_the"),
                     other.span(),
                 );
             }
@@ -342,8 +346,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         } else {
             self.error(
                 ctx,
-                "`foreach` over this type is not supported by the Udon backend: it has no \
-                 `GetEnumerator()` the compiler can call",
+                Message::key("codegen.foreach_over_this_type_is_not_supported"),
                 span,
             );
         }
@@ -754,8 +757,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Expression::AnonymousMethod(method) => {
                 self.error(
                     ctx,
-                    "anonymous methods (`delegate (...) { ... }`) are not supported by the Udon \
-                     backend yet: write a lambda (`(...) => { ... }`) instead",
+                    Message::key("codegen.anonymous_methods_delegate_are_not_supported_by"),
                     method.span.clone(),
                 );
                 None
@@ -808,7 +810,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             other => {
                 self.error(
                     ctx,
-                    "this expression is not supported by the Udon backend yet",
+                    Message::key("codegen.this_expression_is_not_supported_by_the"),
                     other.span(),
                 );
                 None
@@ -839,7 +841,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             self.error(
                 ctx,
-                "a rectangular array cannot be used as a `System.Array` on Udon, which has no                  such array: use its `Length`/`GetLength`/`Clone` directly",
+                Message::key("codegen.a_rectangular_array_cannot_be_used_as"),
                 span,
             );
             return source;
@@ -937,13 +939,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         "SystemConvert.__ToInt32__{from_name}__SystemInt32"
                     )) {
                         let (from_display, to_display) =
-                            (self.display_type(from), self.display_type(to));
+                            (self.describe_type(from), self.describe_type(to));
                         self.error(
                             ctx,
-                            format!(
-                                "Udon has no conversion from `{from_display}` to `{to_display}` \
-                                 (`{signature}` is not exposed)"
-                            ),
+                            Message::key("codegen.udon_has_no_conversion_from_from_display")
+                                .arg("from_display", from_display)
+                                .arg("to_display", to_display)
+                                .arg("signature", signature),
                             span,
                         );
                     }
@@ -1202,7 +1204,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             _ => {
                 self.error(
                     ctx,
-                    "this operator is not supported by the Udon backend yet",
+                    Message::key("codegen.this_operator_is_not_supported_by_the"),
                     span,
                 );
                 return None;
@@ -1361,7 +1363,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             None => {
                 self.error(
                     ctx,
-                    format!("operator `{name}` is not available on Udon for these operand types"),
+                    Message::key("codegen.operator_name_is_not_available_on_udon")
+                        .arg("name", name),
                     span,
                 );
                 None
@@ -1517,12 +1520,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         self.error(
             ctx,
-            format!(
-                "`{{...:{format}}}`: Udon has no `ToString(string)` for `{}`, so this format \
-                 has nothing to apply it. Format a number and build the text yourself \
-                 (`\"{{\" + value.ToString(\"{format}\") + \"}}\"` works where the type has one)",
-                self.display_type(ty)
-            ),
+            Message::key("codegen.format_udon_has_no_tostring_string_for")
+                .arg("format", format)
+                .arg("a0", self.describe_type(ty)),
             span.clone(),
         );
         self.stringify(ctx, slot, ty, span)
@@ -1543,8 +1543,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(width) = Self::constant_integer(alignment) else {
             self.error(
                 ctx,
-                "the alignment of an interpolated hole must be a whole number written out, as \
-                 in `{value,-8}`: a named constant or an expression is not accepted here yet",
+                Message::key("codegen.the_alignment_of_an_interpolated_hole_must"),
                 span,
             );
             return text;
@@ -1649,7 +1648,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 else {
                     self.error(
                         ctx,
-                        "unary `-` is not available on Udon for this operand type",
+                        Message::key("codegen.unary_is_not_available_on_udon_for"),
                         span,
                     );
                     return None;
@@ -1661,7 +1660,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             _ => {
                 self.error(
                     ctx,
-                    "this operator is not supported by the Udon backend yet",
+                    Message::key("codegen.this_operator_is_not_supported_by_the"),
                     span,
                 );
                 None
@@ -1742,7 +1741,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             _ => {
                 self.error(
                     ctx,
-                    "this operator is not supported by the Udon backend yet",
+                    Message::key("codegen.this_operator_is_not_supported_by_the"),
                     unary.span.clone(),
                 );
                 None
@@ -1803,7 +1802,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             _ => {
                 self.error(
                     ctx,
-                    "this compound assignment is not supported by the Udon backend yet",
+                    Message::key("codegen.this_compound_assignment_is_not_supported_by"),
                     assignment.span.clone(),
                 );
                 return None;
@@ -1875,7 +1874,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Expression::Primary(primary) = expression else {
             self.error(
                 ctx,
-                "this expression cannot be assigned to",
+                Message::key("codegen.this_expression_cannot_be_assigned_to"),
                 expression.span(),
             );
             return Place::Error;
@@ -1926,7 +1925,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         self.member_place(ctx, &member, receiver, span.clone())
                     }
                     _ => {
-                        self.error(ctx, "this member cannot be assigned to", span.clone());
+                        self.error(
+                            ctx,
+                            Message::key("codegen.this_member_cannot_be_assigned_to"),
+                            span.clone(),
+                        );
                         Place::Error
                     }
                 }
@@ -1935,7 +1938,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 arguments, span, ..
             } => self.element_place(ctx, receiver, arguments.arguments, span.clone(), last),
             _ => {
-                self.error(ctx, "this expression cannot be assigned to", last.span());
+                self.error(
+                    ctx,
+                    Message::key("codegen.this_expression_cannot_be_assigned_to"),
+                    last.span(),
+                );
                 Place::Error
             }
         }
@@ -1958,13 +1965,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         self.member_place(ctx, &member, receiver, span.clone())
                     }
                     _ => {
-                        self.error(ctx, "this name cannot be assigned to", span.clone());
+                        self.error(
+                            ctx,
+                            Message::key("codegen.this_name_cannot_be_assigned_to"),
+                            span.clone(),
+                        );
                         Place::Error
                     }
                 }
             }
             other => {
-                self.error(ctx, "this expression cannot be assigned to", other.span());
+                self.error(
+                    ctx,
+                    Message::key("codegen.this_expression_cannot_be_assigned_to"),
+                    other.span(),
+                );
                 Place::Error
             }
         }
@@ -1992,7 +2007,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let name = self.declarations.table.symbol(symbol).name;
         self.error(
             ctx,
-            format!("`{name}` is an instance member with no object to reach it through"),
+            Message::key("codegen.name_is_an_instance_member_with_no").arg("name", name),
             span,
         );
     }
@@ -2017,11 +2032,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     if receiver.is_some() {
                         self.error(
                             ctx,
-                            format!(
-                                "`{}` is only available on the behaviour itself, \
-                                 not through another object",
-                                self.declarations.table.symbol(symbol).name
-                            ),
+                            Message::key("codegen.a0_is_only_available_on_the_behaviour")
+                                .arg("a0", self.declarations.table.symbol(symbol).name),
                             span,
                         );
                         return Place::Error;
@@ -2037,8 +2049,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if matches!(member.kind, SymbolKind::Event) && !self.is_field_like_event(symbol) {
                     self.error(
                         ctx,
-                        "an event with `add`/`remove` accessors is not supported by the Udon \
-                         backend yet: declare it field-like (`public event Action Name;`)",
+                        Message::key("codegen.an_event_with_add_remove_accessors_is"),
                         span,
                     );
                     return Place::Error;
@@ -2080,11 +2091,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     }
                     SymbolKind::Field | SymbolKind::Event => {
                         let Some(layout) = self.layout_of(&declaring) else {
-                            self.error(ctx, "no layout for this receiver", span);
+                            self.error(
+                                ctx,
+                                Message::key("codegen.no_layout_for_this_receiver"),
+                                span,
+                            );
                             return Place::Error;
                         };
                         let Some(&index) = layout.slots.get(&symbol) else {
-                            self.error(ctx, "field is missing from the object layout", span);
+                            self.error(
+                                ctx,
+                                Message::key("codegen.field_is_missing_from_the_object_layout"),
+                                span,
+                            );
                             return Place::Error;
                         };
                         if let Some((slot, receiver_type)) = &receiver
@@ -2148,7 +2167,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     _ => {
                         self.error(
                             ctx,
-                            "this member kind is not supported by the Udon backend yet",
+                            Message::key("codegen.this_member_kind_is_not_supported_by"),
                             span,
                         );
                         Place::Error
@@ -2165,7 +2184,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     return place;
                 }
                 let Some(owner) = self.extern_type_name(&declaring) else {
-                    self.error(ctx, "this type is not available on Udon", span);
+                    self.error(
+                        ctx,
+                        Message::key("codegen.this_type_is_not_available_on_udon"),
+                        span,
+                    );
                     return Place::Error;
                 };
                 Place::ExternalProperty {
@@ -2177,7 +2200,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             // a local function is a call target, never a place
             MemberOrigin::LocalFunction(_) => {
-                self.error(ctx, "a local function is not a value here", span);
+                self.error(
+                    ctx,
+                    Message::key("codegen.a_local_function_is_not_a_value"),
+                    span,
+                );
                 Place::Error
             }
         }
@@ -2201,7 +2228,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Some(Expression::Range(range)) = Self::single_index_expression(arguments) {
             self.error(
                 ctx,
-                "a slice cannot be assigned to: `a[i..j]` makes a copy, so writing to it would change nothing",
+                Message::key("codegen.a_slice_cannot_be_assigned_to_a"),
                 range.span.clone(),
             );
             return Place::Error;
@@ -2227,9 +2254,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             self.error(
                 ctx,
-                "a `string` cannot be written through: `text[i] = c` is not allowed in C# \
-                 either — build a new string (`Substring`, `+`) or work on a `char[]` \
-                 from `ToCharArray()`",
+                Message::key("codegen.a_string_cannot_be_written_through_text"),
                 span,
             );
             return Place::Error;
@@ -2261,7 +2286,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             }
             _ => {
-                self.error(ctx, "this element access cannot be compiled yet", span);
+                self.error(
+                    ctx,
+                    Message::key("codegen.this_element_access_cannot_be_compiled_yet"),
+                    span,
+                );
                 Place::Error
             }
         }
@@ -2395,12 +2424,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Place::Slot(slot, _) => self.copy(value, slot),
             Place::SelfReference { name, .. } => self.error(
                 ctx,
-                format!("`{name}` is read-only: it is what this behaviour is attached to"),
+                Message::key("codegen.name_is_read_only_it_is_what").arg("name", name),
                 span,
             ),
-            Place::ReadOnly { what, .. } => {
-                self.error(ctx, format!("`{what}` cannot be assigned to"), span)
-            }
+            Place::ReadOnly { what, .. } => self.error(
+                ctx,
+                Message::key("codegen.what_cannot_be_assigned_to").arg("what", what),
+                span,
+            ),
             Place::Field { object, index, .. } => self.set_element(ctx, object, index, value, span),
             Place::Element {
                 array,
@@ -2900,7 +2931,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         Piece::Value(slot, self.corlib_type("String"))
                     }
                     None => {
-                        self.error(ctx, "this `nameof` operand is not supported", span.clone());
+                        self.error(
+                            ctx,
+                            Message::key("codegen.this_nameof_operand_is_not_supported"),
+                            span.clone(),
+                        );
                         Piece::Error
                     }
                 }
@@ -2950,7 +2985,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // because the member targets resolve without a receiver value
                 _ if self.is_entry_member(ctx.key.symbol) => Piece::Pending { receiver: None },
                 _ => {
-                    self.error(ctx, "`this` is unavailable here", span.clone());
+                    self.error(
+                        ctx,
+                        Message::key("codegen.this_is_unavailable_here"),
+                        span.clone(),
+                    );
                     Piece::Error
                 }
             },
@@ -2977,7 +3016,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // because the member it names carries its own storage
                 _ if self.is_entry_member(ctx.key.symbol) => Piece::Base { receiver: None },
                 _ => {
-                    self.error(ctx, "`base` is unavailable here", span.clone());
+                    self.error(
+                        ctx,
+                        Message::key("codegen.base_is_unavailable_here"),
+                        span.clone(),
+                    );
                     Piece::Error
                 }
             },
@@ -3000,8 +3043,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     None => {
                         self.error(
                             ctx,
-                            "`typeof` only works for types Udon knows; a user-defined type \
-                             has no `System.Type` on the VM",
+                            Message::key("codegen.typeof_only_works_for_types_udon_knows"),
                             span.clone(),
                         );
                         Piece::Error
@@ -3039,7 +3081,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     None => {
                         self.error(
                             ctx,
-                            "the type of this `default` could not be determined",
+                            Message::key("codegen.the_type_of_this_default_could_not"),
                             span.clone(),
                         );
                         Piece::Error
@@ -3049,7 +3091,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             other => {
                 self.error(
                     ctx,
-                    "this expression is not supported by the Udon backend yet",
+                    Message::key("codegen.this_expression_is_not_supported_by_the"),
                     other.span(),
                 );
                 Piece::Error
@@ -3174,7 +3216,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         )
                     }
                     _ => {
-                        self.error(ctx, "this call could not be resolved", span.clone());
+                        self.error(
+                            ctx,
+                            Message::key("codegen.this_call_could_not_be_resolved"),
+                            span.clone(),
+                        );
                         Piece::Error
                     }
                 }
@@ -3382,7 +3428,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     _ => {
                         self.error(
                             ctx,
-                            "this argument form is not supported by the Udon backend yet",
+                            Message::key("codegen.this_argument_form_is_not_supported_by"),
                             argument.span.clone(),
                         );
                         return Piece::Error;
@@ -3588,7 +3634,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if value.is_none() {
                     self.error(
                         ctx,
-                        "this optional parameter's default has no Udon representation",
+                        Message::key("codegen.this_optional_parameter_s_default_has_no"),
                         span.clone(),
                     );
                 }
@@ -3744,8 +3790,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     if !write_backs.is_empty() {
                         self.error(
                             ctx,
-                            "`ref`/`out` parameters of an external delegate type are not \
-                             supported by the Udon backend yet: declare a delegate of your own",
+                            Message::key("codegen.ref_out_parameters_of_an_external_delegate"),
                             span,
                         );
                         return Piece::Error;
@@ -3848,7 +3893,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         None => {
                             self.error(
                                 ctx,
-                                "this type argument has no `System.Type` Udon can name",
+                                Message::key("codegen.this_type_argument_has_no_system_type"),
                                 span,
                             );
                             return Piece::Error;
@@ -3992,7 +4037,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     Place::SelfReference { .. } => {
                         self.error(
                             ctx,
-                            "this is read-only, so it cannot be a `ref`/`out` argument",
+                            Message::key("codegen.this_is_read_only_so_it_cannot"),
                             argument.span.clone(),
                         );
                         None
@@ -4048,7 +4093,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     Place::SelfReference { .. } => {
                         self.error(
                             ctx,
-                            "this is read-only, so it cannot be a `ref`/`out` argument",
+                            Message::key("codegen.this_is_read_only_so_it_cannot"),
                             argument.span.clone(),
                         );
                         None
@@ -4110,7 +4155,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     self.substitute(&ty, &ctx.key.bindings)
                 });
             let Some(element) = element else {
-                self.error(ctx, "could not resolve the array element type", span);
+                self.error(
+                    ctx,
+                    Message::key("codegen.could_not_resolve_the_array_element_type"),
+                    span,
+                );
                 return Piece::Error;
             };
             // `new int[2, 3]`: a rectangular array, built out of an `object[]`
@@ -4164,7 +4213,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(created) = created else {
             self.error(
                 ctx,
-                "target-typed `new(...)` is not supported by the Udon backend yet",
+                Message::key("codegen.target_typed_new_is_not_supported_by"),
                 span,
             );
             return Piece::Error;
@@ -4192,7 +4241,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 None => {
                     self.error(
                         ctx,
-                        "a rectangular array needs its lengths or an initializer",
+                        Message::key("codegen.a_rectangular_array_needs_its_lengths_or"),
                         span,
                     );
                     Piece::Error
@@ -4214,7 +4263,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             self.error(
                 ctx,
-                "a behaviour cannot be constructed with `new` — Unity creates it when the component is added",
+                Message::key("codegen.a_behaviour_cannot_be_constructed_with_new"),
                 span,
             );
             return Piece::Error;
@@ -4296,7 +4345,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     return Piece::Error;
                 };
                 let Some(owner) = self.extern_type_name(&created) else {
-                    self.error(ctx, "this type is not available on Udon", span);
+                    self.error(
+                        ctx,
+                        Message::key("codegen.this_type_is_not_available_on_udon"),
+                        span,
+                    );
                     return Piece::Error;
                 };
                 let signature = self.substitute_signature(&call.signature, &ctx.key.bindings);
@@ -4307,7 +4360,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         None => {
                             self.error(
                                 ctx,
-                                "a constructor parameter type is not available on Udon",
+                                Message::key(
+                                    "codegen.a_constructor_parameter_type_is_not_available",
+                                ),
                                 span,
                             );
                             return Piece::Error;
@@ -4341,7 +4396,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             _ => {
                 self.error(
                     ctx,
-                    "constructing this type is not supported by the Udon backend yet",
+                    Message::key("codegen.constructing_this_type_is_not_supported_by"),
                     span,
                 );
                 Piece::Error
@@ -4420,7 +4475,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 None => {
                     self.error(
                         ctx,
-                        "an index type of this indexer cannot be represented on Udon",
+                        Message::key("codegen.an_index_type_of_this_indexer_cannot"),
                         span.clone(),
                     );
                     return None;
@@ -4442,7 +4497,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> Place {
         let MemberOrigin::External { member, .. } = &call.origin else {
-            self.error(ctx, "this element access cannot be compiled yet", span);
+            self.error(
+                ctx,
+                Message::key("codegen.this_element_access_cannot_be_compiled_yet"),
+                span,
+            );
             return Place::Error;
         };
         let name = member.name.replace('.', "");
@@ -4450,7 +4509,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(owner) = self.extern_type_name(&declaring) else {
             self.error(
                 ctx,
-                "this indexer's declaring type cannot be represented on Udon",
+                Message::key("codegen.this_indexer_s_declaring_type_cannot_be"),
                 span,
             );
             return Place::Error;
@@ -4467,7 +4526,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 return Place::Error;
             };
             let ArgumentValue::Expression(expression) = &argument.value else {
-                self.error(ctx, "this index is not supported here", span);
+                self.error(
+                    ctx,
+                    Message::key("codegen.this_index_is_not_supported_here"),
+                    span,
+                );
                 return Place::Error;
             };
             let target = parameter.parameter_type.clone();
@@ -4667,7 +4730,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             let MemberOrigin::Source(symbol) = call.origin else {
                                 self.error(
                                     ctx,
-                                    "external indexers are not supported by the Udon backend yet",
+                                    Message::key(
+                                        "codegen.external_indexers_are_not_supported_by_the",
+                                    ),
                                     element.span.clone(),
                                 );
                                 continue;
@@ -4710,8 +4775,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 Ok(InitializerValue::Nested(nested)) => {
                     self.error(
                         ctx,
-                        "a nested initializer inside an object initializer is not supported \
-                         by the Udon backend yet: assign the member a `new` expression",
+                        Message::key("codegen.a_nested_initializer_inside_an_object_initializer"),
                         nested.span(),
                     );
                 }
@@ -4770,7 +4834,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     (Ok(_), true, _) => {
                         self.error(
                             ctx,
-                            "`ulong` literals are not supported by the Udon backend yet",
+                            Message::key("codegen.ulong_literals_are_not_supported_by_the"),
                             text.span.clone(),
                         );
                         Piece::Error
@@ -4778,7 +4842,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     _ => {
                         self.error(
                             ctx,
-                            "this integer literal does not fit in `long`",
+                            Message::key("codegen.this_integer_literal_does_not_fit_in"),
                             text.span.clone(),
                         );
                         Piece::Error
@@ -4922,7 +4986,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             other => {
                 self.error(
                     ctx,
-                    "this literal is not supported by the Udon backend yet",
+                    Message::key("codegen.this_literal_is_not_supported_by_the"),
                     other.span(),
                 );
                 Piece::Error

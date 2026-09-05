@@ -13,13 +13,18 @@
 use std::process::ExitCode;
 
 use men_sharp_compiler::{Compiler, CompilerSettings, ParsedFile, ReferenceSet, SourceCode};
+
+mod report;
+
 use men_sharp_semantics::{
-    BodyCheck, Declarations, MemberSignature, Signatures, SymbolId, SymbolKind, Type, TypeTarget,
+    Declarations, MemberSignature, Signatures, SymbolId, SymbolKind, Type, TypeTarget,
 };
+use report::{Format, Reporter};
 
 const USAGE: &str = "usage: men-sharp [--threads N] [--reference lib.dll]... \
 [--udonsharp other.cs]... [--define NAME]... [--profile-dir dir] \
-[--emit-udon Namespace.EntryClass --out name | --emit-udon-all --out-dir dir] <file.cs>...";
+[--emit-udon Namespace.EntryClass --out name | --emit-udon-all --out-dir dir] \
+[--lang auto|en|ja] [--error-format rich|short|unity] <file.cs>...";
 
 fn main() -> ExitCode {
     // `--profile-dir` is read ahead of everything so that every phase,
@@ -59,6 +64,8 @@ fn run() -> ExitCode {
     let mut udon_all = false;
     let mut out_name = "program".to_string();
     let mut out_dir = ".".to_string();
+    let mut language: Option<String> = None;
+    let mut format = Format::from_environment();
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -123,6 +130,22 @@ fn run() -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             }
+            "--lang" => {
+                let Some(code) = arguments.next() else {
+                    eprintln!("--lang needs a language code (auto, en, ja)");
+                    return ExitCode::FAILURE;
+                };
+                language = Some(code);
+            }
+            "--error-format" => match arguments.next().as_deref() {
+                Some("rich") => format = Format::Rich,
+                Some("short") => format = Format::Short,
+                Some("unity") => format = Format::Unity,
+                _ => {
+                    eprintln!("--error-format needs `rich`, `short` or `unity`");
+                    return ExitCode::FAILURE;
+                }
+            },
             "--help" | "-h" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -203,15 +226,24 @@ fn run() -> ExitCode {
     let signatures = compiler.resolve_signatures(&declarations, &references);
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
 
-    let error_count = {
+    let language = report::language_from_environment(language.as_deref());
+    let reporter = Reporter::new(&files, &language, format, report::color_from_environment());
+    let mut diagnostics = {
         timescope::scope!("report");
-        report(&files, &declarations, &signatures, &bodies)
+        report::collect(&files, &declarations, &signatures, &bodies)
     };
+    let error_count = diagnostics.len();
+    if error_count > 0 {
+        eprint!("{}", reporter.render(&mut diagnostics));
+    }
     println!("checked {} expressions", bodies.expression_types.len());
 
     if udon_all {
         if error_count > 0 {
-            eprintln!("{error_count} error(s); not emitting Udon assembly");
+            eprintln!(
+                "{}",
+                reporter.count_line("ui.errors_not_emitting", error_count)
+            );
             return ExitCode::FAILURE;
         }
         let programs = compiler.generate_udon_behaviours(
@@ -230,12 +262,16 @@ fn run() -> ExitCode {
         }
         let mut failed = 0usize;
         timescope::scope!("emit programs");
+        // every program's diagnostics are gathered before any is printed:
+        // one sorted list, whatever order the programs were generated in
+        let mut codegen_diagnostics = Vec::new();
         for program in &programs {
-            for error in &program.output.errors {
-                let file = &files[error.file.0 as usize];
-                let (line, column) = line_column(file.ast.source(), error.span.start);
-                eprintln!("{}:{line}:{column}: error: {}", file.name, error.message);
-            }
+            codegen_diagnostics.extend(report::collect_codegen(&files, &program.output.errors));
+        }
+        if !codegen_diagnostics.is_empty() {
+            eprint!("{}", reporter.render(&mut codegen_diagnostics));
+        }
+        for program in &programs {
             if !program.output.errors.is_empty() {
                 failed += 1;
                 continue;
@@ -269,7 +305,7 @@ fn run() -> ExitCode {
             println!("wrote {}", uasm_path.display());
         }
         if failed > 0 {
-            eprintln!("{failed} program(s) failed");
+            eprintln!("{}", reporter.count_line("ui.programs_failed", failed));
             return ExitCode::FAILURE;
         }
         return ExitCode::SUCCESS;
@@ -277,7 +313,10 @@ fn run() -> ExitCode {
 
     if let Some(entry) = &udon_entry {
         if error_count > 0 {
-            eprintln!("{error_count} error(s); not emitting Udon assembly");
+            eprintln!(
+                "{}",
+                reporter.count_line("ui.errors_not_emitting", error_count)
+            );
             return ExitCode::FAILURE;
         }
         let entry_path: Vec<&str> = entry.split('.').collect();
@@ -288,13 +327,11 @@ fn run() -> ExitCode {
             &references,
             &entry_path,
         );
-        for error in &output.errors {
-            let file = &files[error.file.0 as usize];
-            let (line, column) = line_column(file.ast.source(), error.span.start);
-            eprintln!("{}:{line}:{column}: error: {}", file.name, error.message);
-        }
-        if !output.errors.is_empty() {
-            eprintln!("{} error(s)", output.errors.len());
+        let mut codegen_diagnostics = report::collect_codegen(&files, &output.errors);
+        if !codegen_diagnostics.is_empty() {
+            let count = codegen_diagnostics.len();
+            eprint!("{}", reporter.render(&mut codegen_diagnostics));
+            eprintln!("{}", reporter.count_line("ui.error_count", count));
             return ExitCode::FAILURE;
         }
         let uasm = match output.program.to_uasm() {
@@ -329,58 +366,10 @@ fn run() -> ExitCode {
     printer.print(declarations.table.root(), 0);
 
     if error_count > 0 {
-        eprintln!("{error_count} error(s)");
+        eprintln!("{}", reporter.count_line("ui.error_count", error_count));
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS
-}
-
-/// Prints every parse and semantic error as `file:line:column: message`.
-fn report(
-    files: &[ParsedFile],
-    declarations: &Declarations,
-    signatures: &Signatures,
-    bodies: &BodyCheck,
-) -> usize {
-    let mut count = 0;
-
-    // a foreign file's errors are UdonSharp's to report, not ours: what M#
-    // code uses of it is checked at the use site
-    for file in files.iter().filter(|file| !file.foreign) {
-        for error in file.ast.errors() {
-            let (line, column) = line_column(file.ast.source(), error.span.start);
-            eprintln!(
-                "{}:{line}:{column}: syntax error: {:?}",
-                file.name, error.kind
-            );
-            count += 1;
-        }
-    }
-
-    for error in declarations
-        .errors
-        .iter()
-        .chain(&signatures.errors)
-        .chain(&bodies.errors)
-    {
-        let file = &files[error.file.0 as usize];
-        if file.foreign {
-            continue;
-        }
-        let (line, column) = line_column(file.ast.source(), error.span.start);
-        eprintln!("{}:{line}:{column}: error: {:?}", file.name, error.kind);
-        count += 1;
-    }
-
-    count
-}
-
-fn line_column(source: &str, byte: usize) -> (usize, usize) {
-    let byte = byte.min(source.len());
-    let before = &source[..byte];
-    let line = before.matches('\n').count() + 1;
-    let column = before.chars().rev().take_while(|c| *c != '\n').count() + 1;
-    (line, column)
 }
 
 struct Printer<'a> {

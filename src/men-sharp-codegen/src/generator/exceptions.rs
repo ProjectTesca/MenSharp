@@ -492,7 +492,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 Some(exception) => self.emit_throw(ctx, exception, statement.span.clone(), false),
                 None => self.error(
                     ctx,
-                    "`throw;` outside a `catch` block",
+                    Message::key("codegen.throw_outside_a_catch_block"),
                     statement.span.clone(),
                 ),
             },

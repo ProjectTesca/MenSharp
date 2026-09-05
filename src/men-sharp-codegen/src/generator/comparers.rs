@@ -137,16 +137,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return;
         }
 
-        let display = self.display_type(element);
+        let display = self.describe_type(element);
         let function = self.functions[&ctx.key].name.clone();
         self.error(
             ctx,
-            format!(
-                "`{display}` has no ordering: it is not a number, string, char or enum, and \
-                 does not implement `IComparable<{display}>` — so `{function}` cannot order \
-                 it. Implement `IComparable<{display}>` on the type, or order by a key \
-                 (`OrderBy(x => x.Name)`, `Max(x => x.Score)`)"
-            ),
+            Message::key("codegen.display_has_no_ordering_it_is_not")
+                .arg("display", display)
+                .arg("function", function),
             span,
         );
     }

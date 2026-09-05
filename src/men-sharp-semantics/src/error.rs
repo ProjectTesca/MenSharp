@@ -7,6 +7,8 @@
 
 use std::ops::Range;
 
+use men_sharp_diagnostics::{Hint, Label, Message};
+
 use crate::symbol::FileId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -14,6 +16,9 @@ pub struct SemanticError {
     pub kind: SemanticErrorKind,
     pub file: FileId,
     pub span: Range<usize>,
+    /// Suggestions the phase that found the error could make; see the
+    /// `men-sharp-diagnostics` crate.
+    pub hints: Vec<Hint>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,4 +212,256 @@ pub enum SemanticErrorKind {
     /// diagnostic as the checker grows.
     UnsupportedExpression,
     UnsupportedStatement,
+}
+
+impl SemanticErrorKind {
+    /// The message, as a catalog key with its arguments.
+    pub fn message(&self) -> Message {
+        match self {
+            SemanticErrorKind::DuplicateTypeDefinition { .. } => {
+                Message::key("semantics.duplicate_type_definition")
+            }
+            SemanticErrorKind::PartialKindMismatch { .. } => {
+                Message::key("semantics.partial_kind_mismatch")
+            }
+            SemanticErrorKind::TypeNamespaceConflict { .. } => {
+                Message::key("semantics.type_namespace_conflict")
+            }
+            SemanticErrorKind::DuplicateMemberName { .. } => {
+                Message::key("semantics.duplicate_member_name")
+            }
+            SemanticErrorKind::DuplicateTypeParameter { .. } => {
+                Message::key("semantics.duplicate_type_parameter")
+            }
+            SemanticErrorKind::UnresolvedTypeName => Message::key("semantics.unresolved_type_name"),
+            SemanticErrorKind::AmbiguousTypeName => Message::key("semantics.ambiguous_type_name"),
+            SemanticErrorKind::NamespaceUsedAsType => {
+                Message::key("semantics.namespace_used_as_type")
+            }
+            SemanticErrorKind::UnresolvedUsingTarget => {
+                Message::key("semantics.unresolved_using_target")
+            }
+            SemanticErrorKind::UnknownIdentifier => Message::key("semantics.unknown_identifier"),
+            SemanticErrorKind::UnknownMember { type_name } => {
+                Message::key("semantics.unknown_member").arg("type_name", type_name)
+            }
+            SemanticErrorKind::NotCallable { type_name } => {
+                Message::key("semantics.not_callable").arg("type_name", type_name)
+            }
+            SemanticErrorKind::NoMatchingOverload => Message::key("semantics.no_matching_overload"),
+            SemanticErrorKind::CannotInstantiateAbstractType { type_name } => {
+                Message::key("semantics.cannot_instantiate_abstract_type")
+                    .arg("type_name", type_name)
+            }
+            SemanticErrorKind::MissingImplementation { type_name, member } => {
+                Message::key("semantics.missing_implementation")
+                    .arg("type_name", type_name)
+                    .arg("member", member)
+            }
+            SemanticErrorKind::ThrowNeedsException { type_name } => {
+                Message::key("semantics.throw_needs_exception").arg("type_name", type_name)
+            }
+            SemanticErrorKind::RethrowOutsideCatch => {
+                Message::key("semantics.rethrow_outside_catch")
+            }
+            SemanticErrorKind::DiscardIsNotAPattern => {
+                Message::key("semantics.discard_is_not_a_pattern")
+            }
+            SemanticErrorKind::OperatorRequiresPair { operator, missing } => {
+                Message::key("semantics.operator_requires_pair")
+                    .arg("operator", operator)
+                    .arg("missing", missing)
+            }
+            SemanticErrorKind::NoMatchingBaseConstructor { type_name } => {
+                Message::key("semantics.no_matching_base_constructor").arg("type_name", type_name)
+            }
+            SemanticErrorKind::AmbiguousOverload => Message::key("semantics.ambiguous_overload"),
+            SemanticErrorKind::CannotInferTypeArguments => {
+                Message::key("semantics.cannot_infer_type_arguments")
+            }
+            SemanticErrorKind::TypeAnnotationNeeded => {
+                Message::key("semantics.type_annotation_needed")
+            }
+            SemanticErrorKind::TypeMismatch { expected, found } => {
+                Message::key("semantics.type_mismatch")
+                    .arg("expected", expected)
+                    .arg("found", found)
+            }
+            SemanticErrorKind::ConditionNotBoolean { found } => {
+                Message::key("semantics.condition_not_boolean").arg("found", found)
+            }
+            SemanticErrorKind::InvalidOperator {
+                left,
+                right: Some(right),
+            } => Message::key("semantics.invalid_operator_binary")
+                .arg("left", left)
+                .arg("right", right),
+            SemanticErrorKind::InvalidOperator { left, right: None } => {
+                Message::key("semantics.invalid_operator").arg("left", left)
+            }
+            SemanticErrorKind::InstanceMemberInStaticContext => {
+                Message::key("semantics.instance_member_in_static_context")
+            }
+            SemanticErrorKind::StaticMemberViaInstance => {
+                Message::key("semantics.static_member_via_instance")
+            }
+            SemanticErrorKind::TypeUsedAsValue => Message::key("semantics.type_used_as_value"),
+            SemanticErrorKind::NamespaceUsedAsValue => {
+                Message::key("semantics.namespace_used_as_value")
+            }
+            SemanticErrorKind::NotIndexable { type_name } => {
+                Message::key("semantics.not_indexable").arg("type_name", type_name)
+            }
+            SemanticErrorKind::WrongNumberOfIndices { expected } => {
+                Message::key("semantics.wrong_number_of_indices").arg("expected", expected)
+            }
+            SemanticErrorKind::RaggedArrayInitializer => {
+                Message::key("semantics.ragged_array_initializer")
+            }
+            SemanticErrorKind::NotEnumerable { type_name } => {
+                Message::key("semantics.not_enumerable").arg("type_name", type_name)
+            }
+            SemanticErrorKind::NonExhaustiveSwitch { subject, missing } => {
+                Message::key("semantics.non_exhaustive_switch")
+                    .arg("subject", subject)
+                    .list("missing", missing)
+            }
+            SemanticErrorKind::UnionNotAbstract => Message::key("semantics.union_not_abstract"),
+            SemanticErrorKind::WithNeedsRecord { type_name } => {
+                Message::key("semantics.with_needs_record").arg("type_name", type_name)
+            }
+            SemanticErrorKind::UnionCaseUndetermined { case } => {
+                Message::key("semantics.union_case_undetermined").arg("case", case)
+            }
+            SemanticErrorKind::ReturnValueMismatch => {
+                Message::key("semantics.return_value_mismatch")
+            }
+            SemanticErrorKind::LambdaParameterMismatch => {
+                Message::key("semantics.lambda_parameter_mismatch")
+            }
+            SemanticErrorKind::GenericLocalFunction => {
+                Message::key("semantics.generic_local_function")
+            }
+            SemanticErrorKind::StaticLocalFunctionCapture { name } => {
+                Message::key("semantics.static_local_function_capture").arg("name", name)
+            }
+            SemanticErrorKind::LocalUsedBeforeDeclaration { name } => {
+                Message::key("semantics.local_used_before_declaration").arg("name", name)
+            }
+            SemanticErrorKind::AwaitOutsideAsync => Message::key("semantics.await_outside_async"),
+            SemanticErrorKind::NotAwaitable { type_name } => {
+                Message::key("semantics.not_awaitable").arg("type_name", type_name)
+            }
+            SemanticErrorKind::AsyncReturnType { type_name } => {
+                Message::key("semantics.async_return_type").arg("type_name", type_name)
+            }
+            SemanticErrorKind::AsyncByRefParameter => {
+                Message::key("semantics.async_by_ref_parameter")
+            }
+            SemanticErrorKind::YieldOutsideIterator => {
+                Message::key("semantics.yield_outside_iterator")
+            }
+            SemanticErrorKind::YieldInsideTry { region } => {
+                Message::key("semantics.yield_inside_try").arg("region", region)
+            }
+            SemanticErrorKind::ReturnInIterator => Message::key("semantics.return_in_iterator"),
+            SemanticErrorKind::UnsupportedExpression => {
+                Message::key("semantics.unsupported_expression")
+            }
+            SemanticErrorKind::UnsupportedStatement => {
+                Message::key("semantics.unsupported_statement")
+            }
+        }
+    }
+
+    /// The heading the error is reported under: what kind of problem it
+    /// is, in a word.
+    pub fn heading(&self) -> &'static str {
+        use SemanticErrorKind::*;
+        match self {
+            TypeMismatch { .. }
+            | ConditionNotBoolean { .. }
+            | InvalidOperator { .. }
+            | ReturnValueMismatch
+            | NotIndexable { .. }
+            | WrongNumberOfIndices { .. }
+            | RaggedArrayInitializer
+            | NotEnumerable { .. }
+            | ThrowNeedsException { .. }
+            | NotAwaitable { .. }
+            | AsyncReturnType { .. }
+            | WithNeedsRecord { .. }
+            | LambdaParameterMismatch
+            | CannotInferTypeArguments
+            | TypeAnnotationNeeded
+            | TypeUsedAsValue
+            | NamespaceUsedAsValue
+            | NamespaceUsedAsType
+            | CannotInstantiateAbstractType { .. }
+            | NotCallable { .. }
+            | NoMatchingOverload
+            | AmbiguousOverload
+            | NoMatchingBaseConstructor { .. } => "TypeError",
+            UnknownIdentifier
+            | UnknownMember { .. }
+            | UnresolvedTypeName
+            | AmbiguousTypeName
+            | UnresolvedUsingTarget
+            | LocalUsedBeforeDeclaration { .. } => "NameError",
+            DuplicateTypeDefinition { .. }
+            | PartialKindMismatch { .. }
+            | TypeNamespaceConflict { .. }
+            | DuplicateMemberName { .. }
+            | DuplicateTypeParameter { .. }
+            | MissingImplementation { .. }
+            | OperatorRequiresPair { .. }
+            | UnionNotAbstract
+            | UnionCaseUndetermined { .. }
+            | GenericLocalFunction => "DeclarationError",
+            UnsupportedExpression | UnsupportedStatement => "UnsupportedError",
+            RethrowOutsideCatch
+            | DiscardIsNotAPattern
+            | InstanceMemberInStaticContext
+            | StaticMemberViaInstance
+            | NonExhaustiveSwitch { .. }
+            | StaticLocalFunctionCapture { .. }
+            | AwaitOutsideAsync
+            | AsyncByRefParameter
+            | YieldOutsideIterator
+            | YieldInsideTry { .. }
+            | ReturnInIterator => "SemanticsError",
+        }
+    }
+
+    /// A second place the error points at: the earlier declaration a
+    /// duplicate collides with.
+    pub fn labels(&self) -> Vec<Label> {
+        match self {
+            SemanticErrorKind::DuplicateTypeDefinition {
+                first_file,
+                first_span,
+            }
+            | SemanticErrorKind::PartialKindMismatch {
+                first_file,
+                first_span,
+            }
+            | SemanticErrorKind::TypeNamespaceConflict {
+                first_file,
+                first_span,
+            }
+            | SemanticErrorKind::DuplicateMemberName {
+                first_file,
+                first_span,
+            }
+            | SemanticErrorKind::DuplicateTypeParameter {
+                first_file,
+                first_span,
+            } => vec![Label {
+                file: first_file.0,
+                span: first_span.clone(),
+                message: Message::key("label.first_declared_here"),
+            }],
+            _ => Vec::new(),
+        }
+    }
 }

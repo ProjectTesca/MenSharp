@@ -331,10 +331,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ) {
             self.error(
                 ctx,
-                format!(
-                    "`is`/`as` with `{}` is not supported by the Udon backend yet",
-                    self.display_type(ty)
-                ),
+                Message::key("codegen.is_as_with_a0_is_not_supported")
+                    .arg("a0", self.describe_type(ty)),
                 span.clone(),
             );
             return None;
@@ -343,7 +341,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if constant.is_none() {
             self.error(
                 ctx,
-                "this type has no `System.Type` Udon can name",
+                Message::key("codegen.this_type_has_no_system_type_udon"),
                 span.clone(),
             );
         }
@@ -594,7 +592,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if self.emitted_dispatchers.contains(key) {
                 let message = format!(
                     "internal: `{}` was instantiated after the `object.{name}` dispatch was emitted",
-                    self.display_type(&ty)
+                    self.describe_type(&ty)
                 );
                 let ctx = self.dispatcher_ctx(key);
                 self.error(&ctx, message, 0..0);

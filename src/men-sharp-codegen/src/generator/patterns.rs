@@ -50,7 +50,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         .cloned()
                 {
                     let Some((constant, constant_type)) = self.member_constant(&member) else {
-                        self.error(ctx, "this pattern is not a constant", span);
+                        self.error(
+                            ctx,
+                            Message::key("codegen.this_pattern_is_not_a_constant"),
+                            span,
+                        );
                         return None;
                     };
                     return self.pattern_equality(
@@ -193,10 +197,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     else {
                         self.error(
                             ctx,
-                            format!(
-                                "`{}` is not a field or property here",
-                                subpattern.name.value
-                            ),
+                            Message::key("codegen.a0_is_not_a_field_or_property")
+                                .arg("a0", subpattern.name.value),
                             subpattern.span.clone(),
                         );
                         return None;
@@ -305,7 +307,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ..
             } => {
                 let Type::Array { element, rank: 1 } = &value_type else {
-                    self.error(ctx, "a list pattern matches an array", span);
+                    self.error(
+                        ctx,
+                        Message::key("codegen.a_list_pattern_matches_an_array"),
+                        span,
+                    );
                     return None;
                 };
                 let element_type = self.substitute(element, &ctx.key.bindings);
@@ -415,7 +421,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Pattern::Positional { .. } | Pattern::Slice { .. } => {
                 self.error(
                     ctx,
-                    "a positional pattern works on a tuple; on a type of your own it would need                      a `Deconstruct` method, which the Udon backend does not call yet. List and                      slice patterns are not supported either",
+                    Message::key("codegen.a_positional_pattern_works_on_a_tuple"),
                     span,
                 );
                 None
@@ -536,7 +542,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
         }
         if !self.numeric_udon_type(bound_type) {
-            self.error(ctx, "a relational pattern needs a numeric constant", span);
+            self.error(
+                ctx,
+                Message::key("codegen.a_relational_pattern_needs_a_numeric_constant"),
+                span,
+            );
             return None;
         }
         let result = self.temp("SystemBoolean");

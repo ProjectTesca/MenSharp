@@ -180,7 +180,17 @@ pub(crate) struct Resolver<'a, 'ast> {
 
 impl<'ast> Resolver<'_, 'ast> {
     pub(crate) fn error(&mut self, kind: SemanticErrorKind, span: Range<usize>) {
+        self.error_with_hints(kind, span, Vec::new());
+    }
+
+    pub(crate) fn error_with_hints(
+        &mut self,
+        kind: SemanticErrorKind,
+        span: Range<usize>,
+        hints: Vec<men_sharp_diagnostics::Hint>,
+    ) {
         self.out.errors.push(SemanticError {
+            hints,
             kind,
             file: self.file,
             span,

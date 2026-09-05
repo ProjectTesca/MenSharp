@@ -191,6 +191,7 @@ impl<'ast> Merger<'ast> {
 
         if let Some(first) = type_conflict {
             self.errors.push(SemanticError {
+                hints: Vec::new(),
                 kind: SemanticErrorKind::TypeNamespaceConflict {
                     first_file: first.file,
                     first_span: first.span(),
@@ -238,6 +239,7 @@ impl<'ast> Merger<'ast> {
                 }
                 if !(symbol.is_partial && node.is_partial) {
                     self.errors.push(SemanticError {
+                        hints: Vec::new(),
                         kind: SemanticErrorKind::DuplicateTypeDefinition {
                             first_file: first.file,
                             first_span: first.span(),
@@ -247,6 +249,7 @@ impl<'ast> Merger<'ast> {
                     });
                 } else if symbol.kind != node.kind {
                     self.errors.push(SemanticError {
+                        hints: Vec::new(),
                         kind: SemanticErrorKind::PartialKindMismatch {
                             first_file: first.file,
                             first_span: first.span(),
@@ -264,6 +267,7 @@ impl<'ast> Merger<'ast> {
             None => {
                 if let Some(first) = namespace_conflict {
                     self.errors.push(SemanticError {
+                        hints: Vec::new(),
                         kind: SemanticErrorKind::TypeNamespaceConflict {
                             first_file: first.file,
                             first_span: first.span(),
@@ -349,6 +353,7 @@ impl<'ast> Merger<'ast> {
 
             if let Some(first) = seen.get(parameter.name.value) {
                 self.errors.push(SemanticError {
+                    hints: Vec::new(),
                     kind: SemanticErrorKind::DuplicateTypeParameter {
                         first_file: first.file,
                         first_span: first.span(),
@@ -415,6 +420,7 @@ impl<'ast> Merger<'ast> {
                         let first_site = leader.declarations[0];
                         let site = member.declarations[0];
                         errors.push(SemanticError {
+                            hints: Vec::new(),
                             kind: SemanticErrorKind::DuplicateMemberName {
                                 first_file: first_site.file,
                                 first_span: first_site.span(),

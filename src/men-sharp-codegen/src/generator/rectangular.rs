@@ -247,7 +247,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if arguments.len() != rank as usize {
             self.error(
                 ctx,
-                format!("a {rank}-dimensional array takes {rank} indices"),
+                Message::key("codegen.a_rank_dimensional_array_takes_rank_indices")
+                    .arg("rank", rank),
                 span,
             );
             return Place::Error;
@@ -317,11 +318,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             _ => {
                 self.error(
                     ctx,
-                    format!(
-                        "`{name}` is not available on a rectangular array here: Udon has no such \
-                         array, so only `Length`, `Rank`, `GetLength`, `GetUpperBound`, \
-                         `GetLowerBound` and `Clone` are provided"
-                    ),
+                    Message::key("codegen.name_is_not_available_on_a_rectangular")
+                        .arg("name", name),
                     span,
                 );
                 Piece::Error
@@ -401,11 +399,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             _ => {
                 self.error(
                     ctx,
-                    format!(
-                        "`{name}` is not available on a rectangular array here: Udon has no such \
-                         array, so only `Length`, `Rank`, `GetLength`, `GetUpperBound`, \
-                         `GetLowerBound` and `Clone` are provided"
-                    ),
+                    Message::key("codegen.name_is_not_available_on_a_rectangular")
+                        .arg("name", name),
                     span,
                 );
                 Piece::Error

@@ -159,7 +159,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ) else {
             self.error(
                 ctx,
-                "a tuple can only be compared with a tuple of the same shape",
+                Message::key("codegen.a_tuple_can_only_be_compared_with"),
                 span,
             );
             return None;
@@ -167,7 +167,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if left_elements.len() != right_elements.len() {
             self.error(
                 ctx,
-                "a tuple can only be compared with a tuple of the same shape",
+                Message::key("codegen.a_tuple_can_only_be_compared_with"),
                 span,
             );
             return None;
@@ -707,7 +707,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let MemberOrigin::Source(symbol) = call.origin else {
             self.error(
                 ctx,
-                "a `Deconstruct` from the engine cannot be called on Udon yet: write the                  elements out by hand",
+                Message::key("codegen.a_deconstruct_from_the_engine_cannot_be"),
                 span,
             );
             return None;

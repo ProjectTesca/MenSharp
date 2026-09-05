@@ -1032,8 +1032,8 @@ mod tests {
         assert_eq!(
             check.errors[0].kind,
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Int32".to_string(),
+                expected: "string".to_string(),
+                found: "int".to_string(),
             }
         );
     }
@@ -1105,8 +1105,8 @@ mod tests {
         assert_eq!(
             *kinds[1],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Int32".to_string(),
+                expected: "string".to_string(),
+                found: "int".to_string(),
             }
         );
     }
@@ -1137,8 +1137,8 @@ mod tests {
         assert_eq!(
             *kinds[0],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Int32".to_string(),
+                expected: "string".to_string(),
+                found: "int".to_string(),
             }
         );
         // Make() has nothing to infer T from: the annotate-it error
@@ -1180,7 +1180,7 @@ mod tests {
         assert_eq!(
             *kinds[1],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
+                expected: "string".to_string(),
                 found: "Color".to_string(),
             }
         );
@@ -1270,8 +1270,8 @@ mod tests {
         assert_eq!(
             *kinds[0],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Int32".to_string(),
+                expected: "string".to_string(),
+                found: "int".to_string(),
             }
         );
     }
@@ -1351,8 +1351,8 @@ mod tests {
         assert_eq!(
             *kinds[0],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.Int32".to_string(),
-                found: "System.String".to_string(),
+                expected: "int".to_string(),
+                found: "string".to_string(),
             }
         );
     }
@@ -1390,8 +1390,8 @@ mod tests {
         assert_eq!(
             *kinds[2],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Int32".to_string(),
+                expected: "string".to_string(),
+                found: "int".to_string(),
             }
         );
     }
@@ -1421,8 +1421,8 @@ mod tests {
         assert_eq!(
             *kinds[0],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Boolean".to_string(),
+                expected: "string".to_string(),
+                found: "bool".to_string(),
             }
         );
     }
@@ -1455,19 +1455,11 @@ mod tests {
 
         let kinds = error_kinds(&check);
         assert_eq!(kinds.len(), 3, "{kinds:?}");
-        for (kind, found) in kinds
-            .iter()
-            .zip(["System.String", "System.Int32", "System.Double"])
-        {
+        for (kind, found) in kinds.iter().zip(["string", "int", "double"]) {
             assert_eq!(
                 **kind,
                 SemanticErrorKind::TypeMismatch {
-                    expected: if found == "System.String" {
-                        "System.Int32"
-                    } else {
-                        "System.String"
-                    }
-                    .to_string(),
+                    expected: if found == "string" { "int" } else { "string" }.to_string(),
                     found: found.to_string(),
                 }
             );
@@ -1506,29 +1498,29 @@ mod tests {
         assert_eq!(
             *kinds[0],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Func<System.Int32, System.Int32>".to_string(),
+                expected: "string".to_string(),
+                found: "System.Func<int, int>".to_string(),
             }
         );
         assert_eq!(
             *kinds[1],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
+                expected: "string".to_string(),
                 found: "Animal".to_string(),
             }
         );
         assert_eq!(
             *kinds[2],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Double".to_string(),
+                expected: "string".to_string(),
+                found: "double".to_string(),
             }
         );
         assert_eq!(
             *kinds[3],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Int64[]".to_string(),
+                expected: "string".to_string(),
+                found: "long[]".to_string(),
             }
         );
     }
@@ -1567,8 +1559,8 @@ mod tests {
         assert_eq!(
             *kinds[0],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Int32".to_string(),
+                expected: "string".to_string(),
+                found: "int".to_string(),
             }
         );
         assert!(matches!(kinds[1], SemanticErrorKind::UnknownMember { .. }));
@@ -1619,8 +1611,8 @@ mod tests {
         assert_eq!(
             *kinds[0],
             SemanticErrorKind::TypeMismatch {
-                expected: "System.String".to_string(),
-                found: "System.Int32".to_string(),
+                expected: "string".to_string(),
+                found: "int".to_string(),
             }
         );
     }
@@ -1817,7 +1809,7 @@ mod tests {
         assert_eq!(missing(kinds[3]), vec!["false".to_string()]);
         assert_eq!(missing(kinds[4]), vec!["Triangle".to_string()]);
         assert_eq!(missing(kinds[5]), vec!["Circle".to_string()]);
-        assert_eq!(missing(kinds[6]), vec!["None`1<System.Int32>".to_string()]);
+        assert_eq!(missing(kinds[6]), vec!["None<int>".to_string()]);
     }
 
     #[test]
@@ -1853,7 +1845,7 @@ mod tests {
         assert_eq!(
             *kinds[1],
             SemanticErrorKind::WithNeedsRecord {
-                type_name: "System.String".to_string()
+                type_name: "string".to_string()
             }
         );
     }

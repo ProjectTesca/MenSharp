@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+men-sharp-diagnostics = { workspace = true }
 regex = { workspace = true }
 bumpalo = { workspace = true }
 allocator-api2 = { workspace = true }

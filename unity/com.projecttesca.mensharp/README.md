@@ -49,6 +49,41 @@ runs twice. Its inspector shows which program is actually wired up, and the
 UdonBehaviours on a GameObject are kept in sync with the components on it —
 swap or delete a behaviour and the program that went with it goes too.
 
+## Diagnostics
+
+Errors are reported once, at the end, in a fixed order (by file, then
+position). Every error shows the source lines it touches with the offending
+part marked inside the line, and a hint, when there is one, shows the line
+as it would read after the suggested change:
+
+```text
+[TypeError] expected `int`, found `double`
+  --> Assets/MenSharp/Door.cs:16:25
+  16 │             int total = 1.5 * 2;          ← "1.5 * 2" in red
+[Hint] convert explicitly with a cast
+  16 │             int total = (int)(1.5 * 2);   ← the cast in blue
+```
+
+The heading names the kind of problem: `SyntaxError`, `TypeError`,
+`NameError`, `DeclarationError`, `UnsupportedError`, `SemanticsError` or
+`CodegenError`. Nothing is drawn under the source, so the layout does not
+depend on a monospaced font. The Unity console shows the same thing: each
+error is one entry whose first two lines — the message and the source line
+— appear in the list, with the full text (location, hints) below them in
+its details; double-clicking the entry opens the file.
+
+Messages come in English and Japanese: the editor picks its own language,
+and the command line follows `--lang en|ja`, `MENSHARP_LANG`, or — by
+default, and with `--lang auto` — the system's language (the POSIX locale
+variables, then the Windows or macOS user setting). Adding a language is a
+copy of `messages/en.toml` in the repository, translated; a key a language
+lacks falls back to English.
+
+On the command line, `--error-format rich|short|unity` picks the markup
+(ANSI colour on a terminal by default, plain text when the output is
+captured, Unity's rich text tags for its console) and `NO_COLOR` turns
+colour off.
+
 ## Events
 
 Method names Udon knows (`Start`, `Update`, `Interact`, `OnPlayerJoined`,

@@ -247,8 +247,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if copied {
             self.error(
                 ctx,
-                "cannot modify a member of this struct value: it is a copy returned by a \
-                 property, indexer or method, not a variable (CS1612)",
+                Message::key("codegen.cannot_modify_a_member_of_this_struct"),
                 step.span(),
             );
         }

@@ -24,6 +24,8 @@ use men_sharp_parser::ast::{
     PrimaryLeft, SwitchExpressionArm, SwitchLabel, SwitchSection, TypeRef, TypeRefBase,
 };
 
+use men_sharp_diagnostics::{Edit, Hint, Message};
+
 use super::{Checker, ResolvedTarget};
 use crate::error::SemanticErrorKind;
 use crate::lookup::MemberOrigin;
@@ -190,7 +192,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     /// is an instance of, so that its cases are exactly the types below it.
     pub(super) fn check_union_attribute(&mut self, symbol: SymbolId) {
         let entry = self.resolver.declarations.table.symbol(symbol);
-        let mut misplaced: Vec<Range<usize>> = Vec::new();
+        let mut misplaced: Vec<(Range<usize>, Option<usize>)> = Vec::new();
         for site in &entry.declarations {
             let SyntaxRef::Class(declaration) = &site.syntax else {
                 continue;
@@ -202,11 +204,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 || (matches!(entry.kind, SymbolKind::Class | SymbolKind::Record)
                     && self.is_abstract_type(symbol));
             if !allowed {
-                misplaced.push(attribute.span.clone());
+                // a class can be made abstract; a struct cannot
+                let fixable = matches!(entry.kind, SymbolKind::Class | SymbolKind::Record);
+                let keyword = fixable.then_some(declaration.kind.span.start);
+                misplaced.push((attribute.span.clone(), keyword));
             }
         }
-        for span in misplaced {
-            self.error(SemanticErrorKind::UnionNotAbstract, span);
+        let file = self.resolver.file.0;
+        for (span, keyword) in misplaced {
+            let hint = keyword.map(|at| {
+                Hint::edit(
+                    Message::key("hint.add_abstract"),
+                    Edit::insert(file, at, "abstract "),
+                )
+            });
+            self.error_with_hint(SemanticErrorKind::UnionNotAbstract, span, hint);
         }
     }
 
@@ -376,7 +388,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let cases = types
                     .into_iter()
                     .map(|ty| Case {
-                        name: self.display(&ty),
+                        name: self.describe(&ty),
                         shape: CaseShape::Type(ty),
                     })
                     .collect();
@@ -393,7 +405,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     /// value are one case, named after the first of them.
     fn enum_cases(&self, symbol: SymbolId, enum_type: &Type) -> Vec<Case> {
         let table = &self.resolver.declarations.table;
-        let type_name = self.display(enum_type);
+        let type_name = self.describe(enum_type);
         let mut cases: Vec<(Option<i64>, Case)> = Vec::new();
         let mut next: i64 = 0;
         for &member in &table.symbol(symbol).members {
@@ -646,7 +658,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
-    fn report_missing(&mut self, domain: &Domain, covered: &[bool], span: Range<usize>) {
+    fn report_missing(
+        &mut self,
+        domain: &Domain,
+        covered: &[bool],
+        span: Range<usize>,
+        statement: bool,
+    ) {
         let missing: Vec<String> = domain
             .cases
             .iter()
@@ -658,10 +676,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             return;
         }
         let kind = SemanticErrorKind::NonExhaustiveSwitch {
-            subject: self.display(&domain.subject),
+            subject: self.describe(&domain.subject),
             missing,
         };
-        self.error(kind, span);
+        let hint = Hint::text(Message::key(if statement {
+            "hint.non_exhaustive_switch_statement"
+        } else {
+            "hint.non_exhaustive_switch"
+        }));
+        self.error_with_hint(kind, span, Some(hint));
     }
 
     // ----------------------------------------------------------- entry points
@@ -684,7 +707,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             self.cover(&arm.pattern, &domain, &mut covered);
         }
-        self.report_missing(&domain, &covered, span);
+        self.report_missing(&domain, &covered, span, false);
     }
 
     /// A switch statement over a `[Union]`: every case, or `default`.
@@ -713,6 +736,6 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
             }
         }
-        self.report_missing(&domain, &covered, span);
+        self.report_missing(&domain, &covered, span, true);
     }
 }

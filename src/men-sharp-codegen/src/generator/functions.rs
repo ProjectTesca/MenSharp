@@ -278,10 +278,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .map(|site| site.span_start..site.span_end)
                 .unwrap_or(0..0);
             self.errors.push(CodegenError {
-                message: format!(
-                    "`{name}` is used from MenSharp code, but MenSharp cannot compile it: \
-                     {reason}"
-                ),
+                message: Message::key("codegen.name_is_used_from_mensharp_code_but")
+                    .arg("name", name)
+                    .arg("reason", reason),
                 file,
                 span,
             });
@@ -559,7 +558,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             FunctionBody::None { semicolon } => {
                 self.error(
                     ctx,
-                    "a bodiless (abstract/extern) member cannot be called directly on Udon",
+                    Message::key("codegen.a_bodiless_abstract_extern_member_cannot_be"),
                     semicolon.clone(),
                 );
             }
@@ -584,7 +583,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         }
                     }
                 } else {
-                    self.error(ctx, "this property has no setter", 0..0);
+                    self.error(
+                        ctx,
+                        Message::key("codegen.this_property_has_no_setter"),
+                        0..0,
+                    );
                 }
             }
             FunctionBody::Accessors(list) => {
@@ -608,10 +611,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         self.emit_auto_accessor(ctx, role, list.span.clone());
                     }
                     Some(accessor) => self.emit_function_body(ctx, &accessor.body),
-                    None => self.error(ctx, "missing accessor", list.span.clone()),
+                    None => self.error(
+                        ctx,
+                        Message::key("codegen.missing_accessor"),
+                        list.span.clone(),
+                    ),
                 }
             }
-            _ => self.error(ctx, "unsupported accessor shape", 0..0),
+            _ => self.error(
+                ctx,
+                Message::key("codegen.unsupported_accessor_shape"),
+                0..0,
+            ),
         }
     }
 
@@ -624,7 +635,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let (Some(index), Some(this)) = (slot, ctx.this_slot) else {
             self.error(
                 ctx,
-                "a bodiless (abstract/extern) member cannot be called directly on Udon",
+                Message::key("codegen.a_bodiless_abstract_extern_member_cannot_be"),
                 span,
             );
             return;
@@ -1172,9 +1183,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     let message = format!(
                         "internal: `{}` was instantiated after the dispatch of `{}` on `{}` \
                          was emitted",
-                        self.display_type(&ty),
+                        self.describe_type(&ty),
                         name,
-                        self.display_type(&receiver)
+                        self.describe_type(&receiver)
                     );
                     let ctx = self.dispatcher_ctx(&key);
                     self.error(&ctx, message, 0..0);
@@ -1187,8 +1198,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         "`{}` cannot be reached through `{}`: a behaviour is another Udon \
                          program, which has no virtual dispatch — call it through a variable \
                          of its own type",
-                        self.display_type(&ty),
-                        self.display_type(&receiver)
+                        self.describe_type(&ty),
+                        self.describe_type(&receiver)
                     );
                     let ctx = self.dispatcher_ctx(&key);
                     self.error(&ctx, message, 0..0);
@@ -1457,17 +1468,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let (file, span) = self.declaration_site(member);
                 let interfaces: Vec<String> = found
                     .iter()
-                    .map(|(interface, _)| self.display_type(interface))
+                    .map(|(interface, _)| self.describe_type(interface))
                     .collect();
                 self.errors.push(CodegenError {
-                    message: format!(
-                        "`{}` inherits conflicting default implementations of `{}.{}` from {} \
-                         — implement it on the type (CS8705)",
-                        self.display_type(ty),
-                        self.display_type(contract),
-                        name,
-                        interfaces.join(" and ")
-                    ),
+                    message: Message::key(
+                        "codegen.a0_inherits_conflicting_default_implementations_of_a1",
+                    )
+                    .arg("a0", self.describe_type(ty))
+                    .arg("a1", self.describe_type(contract))
+                    .arg("a2", name)
+                    .arg("a3", interfaces.join(" and ")),
                     file,
                     span,
                 });
@@ -1881,7 +1891,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(owner) = self.extern_type_name(&declaring) else {
             self.error(
                 ctx,
-                "this call's declaring type cannot be represented on Udon",
+                Message::key("codegen.this_call_s_declaring_type_cannot_be"),
                 span.clone(),
             );
             return None;
@@ -1905,7 +1915,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 None => {
                     self.error(
                         ctx,
-                        "a parameter type of this call cannot be represented on Udon",
+                        Message::key("codegen.a_parameter_type_of_this_call_cannot"),
                         span.clone(),
                     );
                     return None;
@@ -1917,7 +1927,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             None => {
                 self.error(
                     ctx,
-                    "the return type of this call cannot be represented on Udon",
+                    Message::key("codegen.the_return_type_of_this_call_cannot"),
                     span.clone(),
                 );
                 return None;

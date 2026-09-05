@@ -72,6 +72,24 @@ impl NumericKind {
             .unwrap()
     }
 
+    /// The C# keyword: `int` for `Int32`.
+    pub fn keyword(&self) -> &'static str {
+        match self {
+            NumericKind::SByte => "sbyte",
+            NumericKind::Byte => "byte",
+            NumericKind::Int16 => "short",
+            NumericKind::UInt16 => "ushort",
+            NumericKind::Int32 => "int",
+            NumericKind::UInt32 => "uint",
+            NumericKind::Int64 => "long",
+            NumericKind::UInt64 => "ulong",
+            NumericKind::Char => "char",
+            NumericKind::Single => "float",
+            NumericKind::Double => "double",
+            NumericKind::Decimal => "decimal",
+        }
+    }
+
     pub fn is_integral(&self) -> bool {
         !matches!(
             self,
@@ -459,6 +477,78 @@ impl TypeSystem<'_, '_> {
     }
 
     /// A human-readable rendering for diagnostics.
+    /// The type the way a C# programmer writes it, for diagnostics: `int`
+    /// rather than `System.Int32`, `List<int>`, `float[,]`, `int?`,
+    /// `(int, string)`. User types keep their namespace, since two of one
+    /// name would otherwise read alike. [`Self::display`] is the .NET
+    /// spelling, which what the compiled program prints at run time must
+    /// match; this one is only ever read by a person.
+    pub fn describe(&self, ty: &Type) -> String {
+        match ty {
+            Type::Named { target, arguments } => {
+                let name = match target {
+                    TypeTarget::Source(symbol) => {
+                        self.declarations.table.fully_qualified_name(*symbol)
+                    }
+                    TypeTarget::External(id) => self.external.display_name(*id),
+                };
+                if let Some(keyword) = keyword_for(&name) {
+                    return keyword.to_string();
+                }
+                // `Nullable<int>` is `int?`
+                if arguments.len() == 1 && name == "System.Nullable" {
+                    return format!("{}?", self.describe(&arguments[0]));
+                }
+                // the metadata arity mark (`List`1`) says nothing a reader
+                // needs once the arguments are written out
+                let name = match name.rfind('`') {
+                    Some(at) if name[at + 1..].chars().all(|c| c.is_ascii_digit()) => {
+                        name[..at].to_string()
+                    }
+                    _ => name,
+                };
+                if arguments.is_empty() {
+                    name
+                } else {
+                    format!(
+                        "{name}<{}>",
+                        arguments
+                            .iter()
+                            .map(|argument| self.describe(argument))
+                            .collect::<Vec<_>>()
+                            .join(", ")
+                    )
+                }
+            }
+            Type::Array { element, rank } => {
+                format!(
+                    "{}[{}]",
+                    self.describe(element),
+                    ",".repeat(*rank as usize - 1)
+                )
+            }
+            Type::Pointer(element) => format!("{}*", self.describe(element)),
+            Type::Nullable(element) => format!("{}?", self.describe(element)),
+            Type::ByRef { element, .. } => format!("ref {}", self.describe(element)),
+            Type::Tuple(elements) => format!(
+                "({})",
+                elements
+                    .iter()
+                    .map(|element| match &element.name {
+                        Some(name) => format!("{} {name}", self.describe(&element.element)),
+                        None => self.describe(&element.element),
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+            other => self.display(other),
+        }
+    }
+
+    /// The .NET spelling of a type (`System.Int32`), which is what the
+    /// compiled program's own strings — `ToString()` of an array, an
+    /// exception's type name — have to say. For text a person reads, see
+    /// [`Self::describe`].
     pub fn display(&self, ty: &Type) -> String {
         match ty {
             Type::Named { target, arguments } => {
@@ -509,4 +599,27 @@ impl TypeSystem<'_, '_> {
             Type::Error => "?".to_string(),
         }
     }
+}
+
+/// The C# keyword for a .NET type name, when it has one.
+fn keyword_for(name: &str) -> Option<&'static str> {
+    Some(match name {
+        "System.Int32" => "int",
+        "System.UInt32" => "uint",
+        "System.Int64" => "long",
+        "System.UInt64" => "ulong",
+        "System.Int16" => "short",
+        "System.UInt16" => "ushort",
+        "System.Byte" => "byte",
+        "System.SByte" => "sbyte",
+        "System.Single" => "float",
+        "System.Double" => "double",
+        "System.Decimal" => "decimal",
+        "System.Boolean" => "bool",
+        "System.Char" => "char",
+        "System.String" => "string",
+        "System.Object" => "object",
+        "System.Void" => "void",
+        _ => return None,
+    })
 }

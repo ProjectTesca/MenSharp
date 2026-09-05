@@ -35,6 +35,7 @@ use std::ops::Range;
 use men_sharp_asm::{
     DataId, DataSymbol, EntryPoint, HALT_ADDRESS, HeapInit, LabelId, Op, Program, Target,
 };
+use men_sharp_diagnostics::Message;
 use men_sharp_parser::ast::{
     AccessorKind, Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator,
     Block, EntityID, Expression, ForInitializer, FunctionBody, InitializerValue, InterpolationPart,
@@ -53,7 +54,9 @@ use crate::externs::{UdonNodes, mangle_dotnet_name};
 
 #[derive(Debug, Clone)]
 pub struct CodegenError {
-    pub message: String,
+    /// A catalog key with arguments, or literal text for what is not worth
+    /// translating (see `men-sharp-diagnostics`).
+    pub message: Message,
     pub file: FileId,
     pub span: Range<usize>,
 }
@@ -640,7 +643,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.emit_program_identity(entry_path);
         let Some(entry) = self.find_symbol(entry_path) else {
             self.errors.push(CodegenError {
-                message: format!("entry class `{}` was not found", entry_path.join(".")),
+                message: Message::key("codegen.entry_class_a0_was_not_found")
+                    .arg("a0", entry_path.join(".")),
                 file: FileId(0),
                 span: 0..0,
             });
@@ -655,13 +659,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if self.declarations.is_foreign(file) {
                 let name = entry_path.join(".");
                 self.errors.push(CodegenError {
-                    message: format!(
-                        "`{name}` inherits MenSharpBehaviour but is outside the MenSharp \
-                         sources: not under Assets/MenSharp, and not in an assembly \
-                         definition that references ProjectTesca.MenSharp.Runtime. Move it \
-                         to Assets/MenSharp, or give its folder an assembly definition \
-                         (MenSharp > Create Package…, or MenSharp > Create Assembly Definition)"
-                    ),
+                    message: Message::key(
+                        "codegen.name_inherits_mensharpbehaviour_but_is_outside_the",
+                    )
+                    .arg("name", name),
                     file,
                     span,
                 });
@@ -762,11 +763,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                                 .join(", ");
                             let (file, span) = self.declaration_site(member);
                             self.errors.push(CodegenError {
-                                message: format!(
-                                    "`{method_name}` is the built-in event `{name}`: declare it \
-                                     with exactly ({expected}), or with no parameters to ignore \
-                                     the event's arguments"
-                                ),
+                                message: Message::key("codegen.method_name_is_the_built_in_event")
+                                    .arg("method_name", method_name)
+                                    .arg("name", name)
+                                    .arg("expected", expected),
                                 file,
                                 span,
                             });
@@ -843,10 +843,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // an explicit entry class was asked for by name, so it must have one
         if entries.is_empty() && self.entry_class.is_none() {
             self.errors.push(CodegenError {
-                message: format!(
-                    "entry class `{}` has no public methods to export as events",
-                    entry_path.join(".")
-                ),
+                message: Message::key("codegen.entry_class_a0_has_no_public_methods")
+                    .arg("a0", entry_path.join(".")),
                 file: FileId(0),
                 span: 0..0,
             });
@@ -1105,10 +1103,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     });
                 let Some(property) = property else {
                     self.errors.push(CodegenError {
-                        message: format!(
-                            "`[FieldChangeCallback]` names `{property_name}`, but this \
-                             behaviour has no property of that name"
-                        ),
+                        message: Message::key(
+                            "codegen.fieldchangecallback_names_property_name_but_this_behaviour",
+                        )
+                        .arg("property_name", property_name),
                         file,
                         span,
                     });
@@ -1116,10 +1114,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 };
                 if !self.property_has_setter(property) {
                     self.errors.push(CodegenError {
-                        message: format!(
-                            "`{property_name}` has no setter — the callback is a call to \
-                             it with the value that was written"
-                        ),
+                        message: Message::key("codegen.property_name_has_no_setter_the_callback")
+                            .arg("property_name", property_name),
                         file,
                         span,
                     });
@@ -1136,10 +1132,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 );
                 if !types_match {
                     self.errors.push(CodegenError {
-                        message: format!(
-                            "`{property_name}` must have the same type as the field: its \
-                             setter receives the value that was written"
-                        ),
+                        message: Message::key("codegen.property_name_must_have_the_same_type")
+                            .arg("property_name", property_name),
                         file,
                         span,
                     });
@@ -1147,10 +1141,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 if !claimed.insert(property) {
                     self.errors.push(CodegenError {
-                        message: format!(
-                            "two fields point their `[FieldChangeCallback]` at \
-                             `{property_name}`; a change could not say which field it was"
-                        ),
+                        message: Message::key(
+                            "codegen.two_fields_point_their_fieldchangecallback_at_property",
+                        )
+                        .arg("property_name", property_name),
                         file,
                         span,
                     });
@@ -1657,7 +1651,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     // ----------------------------------------------------------- utilities
 
-    fn error(&mut self, ctx: &Ctx, message: impl Into<String>, span: Range<usize>) {
+    fn error(&mut self, ctx: &Ctx, message: impl Into<Message>, span: Range<usize>) {
         self.errors.push(CodegenError {
             message: message.into(),
             file: ctx.file,
@@ -1704,8 +1698,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// The same path as [`Generator::symbol_path`], but spelled the way the
     /// user wrote it — for diagnostics, where a mangled name means nothing.
     /// A type as the user would write it, for diagnostics.
+    /// The .NET spelling of a type — for strings the compiled program
+    /// itself holds (`ToString()` of an array, an exception's type name),
+    /// which must match what .NET would say. Messages use `describe_type`.
     pub(super) fn display_type(&self, ty: &Type) -> String {
         self.type_system().display(ty)
+    }
+
+    /// The C# spelling of a type, for diagnostics: `int`, `List<int>`.
+    pub(super) fn describe_type(&self, ty: &Type) -> String {
+        self.type_system().describe(ty)
     }
 
     fn display_path(&self, symbol: SymbolId) -> String {
@@ -2066,7 +2068,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.emit_source_mark(ctx, &span);
         match self.nodes.extern_node(signature) {
             None => {
-                self.error(ctx, format!("`{signature}` is not exposed by Udon"), span);
+                self.error(
+                    ctx,
+                    Message::key("codegen.signature_is_not_exposed_by_udon")
+                        .arg("signature", signature),
+                    span,
+                );
             }
             Some(node) if node.parameters.len() != arguments.len() => {
                 self.error(
@@ -2302,10 +2309,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let (file, span) = self.declaration_site(symbol);
             let name = self.display_path(symbol);
             self.errors.push(CodegenError {
-                message: format!(
-                    "`{name}` is used from MenSharp code, but MenSharp cannot compile it: \
-                     {reason}"
-                ),
+                message: Message::key("codegen.name_is_used_from_mensharp_code_but")
+                    .arg("name", name)
+                    .arg("reason", reason),
                 file,
                 span,
             });
@@ -2318,11 +2324,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let (file, span) = self.declaration_site(symbol);
             let name = self.display_path(symbol);
             self.errors.push(CodegenError {
-                message: format!(
-                    "`{name}` derives from `{base}`, an engine class: Udon can neither create \
-                     nor hold such an object, so the class cannot be used from a program \
-                     (an UdonSharp behaviour can — through a reference to it)"
-                ),
+                message: Message::key("codegen.name_derives_from_base_an_engine_class")
+                    .arg("name", name)
+                    .arg("base", base),
                 file,
                 span,
             });
@@ -2546,11 +2550,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     let name = symbol.name;
                     let (file, span) = self.declaration_site(member);
                     self.errors.push(CodegenError {
-                        message: format!(
-                            "`{name}` hides the `{name}` declared in `{owner}`: a behaviour's \
-                             public variables share one namespace on Udon, so the name must \
-                             be unique across the class hierarchy"
-                        ),
+                        message: Message::key("codegen.name_hides_the_name_declared_in_owner")
+                            .arg("name", name)
+                            .arg("owner", owner),
                         file,
                         span,
                     });
@@ -2591,10 +2593,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     Some(other) => {
                         let (file, span) = self.declaration_site(member);
                         self.errors.push(CodegenError {
-                            message: format!(
-                                "`{other}` is not a sync mode; use UdonSyncMode.None, \
-                                 UdonSyncMode.Linear or UdonSyncMode.Smooth"
-                            ),
+                            message: Message::key("codegen.other_is_not_a_sync_mode_use")
+                                .arg("other", other),
                             file,
                             span,
                         });
@@ -2650,11 +2650,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     other => {
                         let (file, span) = self.declaration_site(class);
                         self.errors.push(CodegenError {
-                            message: format!(
-                                "`{}` is not a behaviour sync mode; use \
-                                 BehaviourSyncMode.Continuous, .Manual or .None",
-                                other.unwrap_or("(nothing)")
-                            ),
+                            message: Message::key("codegen.a0_is_not_a_behaviour_sync_mode")
+                                .arg("a0", other.unwrap_or("(nothing)")),
                             file,
                             span,
                         });

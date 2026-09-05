@@ -154,7 +154,7 @@ fn real_mistakes_are_caught_with_real_types() {
     assert_eq!(
         *kinds[0],
         SemanticErrorKind::TypeMismatch {
-            expected: "System.Int32".to_string(),
+            expected: "int".to_string(),
             found: "UnityEngine.Vector3".to_string(),
         }
     );
@@ -229,16 +229,16 @@ fn spec_inference_against_the_real_core_library() {
     assert_eq!(
         *kinds[0],
         SemanticErrorKind::TypeMismatch {
-            expected: "System.Int32".to_string(),
-            found: "System.String".to_string(),
+            expected: "int".to_string(),
+            found: "string".to_string(),
         }
     );
     // int broken = x; inside the ForEach lambda, where x: string
     assert_eq!(
         *kinds[1],
         SemanticErrorKind::TypeMismatch {
-            expected: "System.Int32".to_string(),
-            found: "System.String".to_string(),
+            expected: "int".to_string(),
+            found: "string".to_string(),
         }
     );
 }
@@ -299,16 +299,16 @@ fn linq_chains_flow_through_real_extension_methods() {
     assert_eq!(
         *kinds[0],
         SemanticErrorKind::TypeMismatch {
-            expected: "System.String".to_string(),
-            found: "System.Int32[]".to_string(),
+            expected: "string".to_string(),
+            found: "int[]".to_string(),
         }
     );
     // Sum() over int[] produced int
     assert_eq!(
         *kinds[1],
         SemanticErrorKind::TypeMismatch {
-            expected: "System.String".to_string(),
-            found: "System.Int32".to_string(),
+            expected: "string".to_string(),
+            found: "int".to_string(),
         }
     );
     // x.Missing inside the lambda, where x: string
@@ -370,8 +370,8 @@ fn core_library_generics_flow_through_bodies() {
     assert_eq!(
         *kinds[1],
         SemanticErrorKind::TypeMismatch {
-            expected: "System.String".to_string(),
-            found: "System.Int32".to_string(),
+            expected: "string".to_string(),
+            found: "int".to_string(),
         }
     );
 }

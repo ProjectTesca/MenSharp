@@ -56,6 +56,7 @@ use crate::{
     symbol::{Accessibility, SymbolId, SymbolKind},
     types::{FunctionSignature, MemberSignature, ParameterPassing, TupleElement, Type, TypeTarget},
 };
+use men_sharp_diagnostics::{Edit, Hint, Message};
 
 /// The output of body checking for one file (or, merged, a compilation).
 #[derive(Debug, Default)]
@@ -612,8 +613,52 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         self.resolver.error(kind, span);
     }
 
-    fn display(&self, ty: &Type) -> String {
-        self.system().display(ty)
+    fn error_with_hint(&mut self, kind: SemanticErrorKind, span: Range<usize>, hint: Option<Hint>) {
+        self.resolver
+            .error_with_hints(kind, span, hint.into_iter().collect());
+    }
+
+    /// `async` added to the member being checked, when the `await` is in
+    /// the member's own body (in a lambda, the lambda would need it).
+    fn async_hint(&self) -> Option<Hint> {
+        if !self.lambda_stack.is_empty() {
+            return None;
+        }
+        let member = self.current_member?;
+        let entry = self.resolver.declarations.table.symbol(member);
+        let return_type = entry
+            .declarations
+            .iter()
+            .find_map(|site| match &site.syntax {
+                SyntaxRef::Method(declaration) => Some(declaration.return_type.span.start),
+                _ => None,
+            })?;
+        Some(Hint::edit(
+            Message::key("hint.add_async"),
+            Edit::insert(self.resolver.file.0, return_type, "async "),
+        ))
+    }
+
+    /// `(int)` in front of a value that needs an explicit numeric conversion.
+    fn cast_hint(&self, from: &Type, to: &Type, span: &Range<usize>) -> Option<Hint> {
+        let system = self.system();
+        let keyword = system.numeric_kind(to)?.keyword();
+        system.numeric_kind(from)?;
+        // the whole expression is wrapped: `(int)(a * b)`, not `(int)a * b`
+        Some(Hint::edit(
+            Message::key("hint.explicit_cast"),
+            Edit::wrap(
+                self.resolver.file.0,
+                span.clone(),
+                format!("({keyword})("),
+                ")",
+            ),
+        ))
+    }
+
+    /// A type as a person reads it in a message (see `TypeSystem::describe`).
+    fn describe(&self, ty: &Type) -> String {
+        self.system().describe(ty)
     }
 
     fn resolve_type(&mut self, node: &men_sharp_parser::ast::TypeRef<'ast, 'ast>) -> Type {
@@ -738,7 +783,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             let kind = SemanticErrorKind::StaticLocalFunctionCapture {
                 name: name.to_string(),
             };
-            self.error(kind, span.clone());
+            let hint = Hint::text(Message::key("hint.remove_static").arg("name", name));
+            self.error_with_hint(kind, span.clone(), Some(hint));
         }
         if declared_later {
             let kind = SemanticErrorKind::LocalUsedBeforeDeclaration {
@@ -777,7 +823,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             other => {
                 let kind = SemanticErrorKind::TypeMismatch {
-                    expected: self.display(other),
+                    expected: self.describe(other),
                     found: "array initializer".to_string(),
                 };
                 self.error(kind, initializer.span());
@@ -791,7 +837,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             Initializer::Object { elements: [], .. } => &[][..],
             Initializer::Object { .. } => {
                 let kind = SemanticErrorKind::TypeMismatch {
-                    expected: self.display(declared),
+                    expected: self.describe(declared),
                     found: "object initializer".to_string(),
                 };
                 self.error(kind, initializer.span());
@@ -830,7 +876,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let kind = SemanticErrorKind::TypeMismatch {
                     expected: format!(
                         "{}[{}]",
-                        self.display(element),
+                        self.describe(element),
                         ",".repeat(rank as usize - 1)
                     ),
                     found: "object initializer".to_string(),
@@ -1043,7 +1089,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             expected: format!(
                 "a tuple of {wanted} elements, or a `Deconstruct` with {wanted} `out` parameters"
             ),
-            found: self.display(value),
+            found: self.describe(value),
         };
         self.error(kind, span.clone());
         None
@@ -1397,10 +1443,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             || (literal && self.integer_literal_fits(to));
         if !ok {
             let kind = SemanticErrorKind::TypeMismatch {
-                expected: self.display(to),
-                found: self.display(from),
+                expected: self.describe(to),
+                found: self.describe(from),
             };
-            self.error(kind, span);
+            let hint = self.cast_hint(from, to, &span);
+            self.error_with_hint(kind, span, hint);
         }
     }
 
@@ -1551,7 +1598,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         };
         if !self.system().is_implicitly_convertible(ty, &exception) {
             let kind = SemanticErrorKind::ThrowNeedsException {
-                type_name: self.display(ty),
+                type_name: self.describe(ty),
             };
             self.error(kind, span);
         }
@@ -1735,7 +1782,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         if constructors.is_empty() {
             if !arguments.is_empty() {
                 let kind = SemanticErrorKind::NoMatchingBaseConstructor {
-                    type_name: self.display(&target_type),
+                    type_name: self.describe(&target_type),
                 };
                 self.error(kind, span.clone());
                 return None;
@@ -1747,7 +1794,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             });
         }
 
-        let receiver_display = self.display(&target_type);
+        let receiver_display = self.describe(&target_type);
         let group = MethodGroup {
             candidates: constructors,
             explicit_arguments: Vec::new(),
@@ -1774,7 +1821,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             AttemptOutcome::NoMatch { .. } => {
                 let kind = SemanticErrorKind::NoMatchingBaseConstructor {
-                    type_name: self.display(&target_type),
+                    type_name: self.describe(&target_type),
                 };
                 self.error(kind, span.clone());
                 None
@@ -1906,8 +1953,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 self.implementation_of(&self_type, &contract, name, kind, wanted.as_ref());
             if !implemented {
                 let kind = SemanticErrorKind::MissingImplementation {
-                    type_name: self.display(&self_type),
-                    member: format!("{}.{}", self.display(&contract), name),
+                    type_name: self.describe(&self_type),
+                    member: format!("{}.{}", self.describe(&contract), name),
                 };
                 self.error(kind, span.clone());
             }
@@ -2758,7 +2805,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let ty = self.check_expression(condition);
         if !self.system().is_bool(&ty) {
             let kind = SemanticErrorKind::ConditionNotBoolean {
-                found: self.display(&ty),
+                found: self.describe(&ty),
             };
             self.error(kind, condition.span());
         }
@@ -2927,7 +2974,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                                     Some(index) => elements[index].element.clone(),
                                     None => {
                                         let kind = SemanticErrorKind::UnknownMember {
-                                            type_name: self.display(matched),
+                                            type_name: self.describe(matched),
                                         };
                                         self.error(kind, name.span.clone());
                                         Type::Error
@@ -2954,7 +3001,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     Type::Error => Type::Error,
                     other => {
                         let kind = SemanticErrorKind::NotIndexable {
-                            type_name: self.display(other),
+                            type_name: self.describe(other),
                         };
                         self.error(kind, pattern.span());
                         Type::Error
@@ -3040,7 +3087,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             && self.system().nullable_of(&target).is_none()
                         {
                             let kind = SemanticErrorKind::InvalidOperator {
-                                left: self.display(&target),
+                                left: self.describe(&target),
                                 right: None,
                             };
                             self.error(kind, assignment.span.clone());
@@ -3075,8 +3122,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                                     || self.system().numeric_kind(&target).is_some();
                             if !compatible {
                                 let kind = SemanticErrorKind::TypeMismatch {
-                                    expected: self.display(&target),
-                                    found: self.display(&result),
+                                    expected: self.describe(&target),
+                                    found: self.describe(&result),
                                 };
                                 self.error(kind, assignment.span.clone());
                             }
@@ -3124,8 +3171,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                     None => {
                         let kind = SemanticErrorKind::TypeMismatch {
-                            expected: self.display(&then_type),
-                            found: self.display(&else_type),
+                            expected: self.describe(&then_type),
+                            found: self.describe(&else_type),
                         };
                         self.error(kind, conditional.span.clone());
                         Type::Error
@@ -3237,8 +3284,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             .cloned()
                             .unwrap_or_else(|| first.clone());
                         let kind = SemanticErrorKind::TypeMismatch {
-                            expected: self.display(&first),
-                            found: self.display(&clash),
+                            expected: self.describe(&first),
+                            found: self.describe(&clash),
                         };
                         self.error(kind, switch.span.clone());
                         Type::Error
@@ -3288,7 +3335,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if !copyable {
                     if !matches!(ty, Type::Error) {
                         let kind = SemanticErrorKind::WithNeedsRecord {
-                            type_name: self.display(&ty),
+                            type_name: self.describe(&ty),
                         };
                         self.error(kind, with.value.span());
                     }
@@ -3756,7 +3803,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         if !methods.is_empty() {
             let receiver_display = receiver
                 .as_ref()
-                .map(|ty| self.display(ty))
+                .map(|ty| self.describe(ty))
                 .unwrap_or_default();
             return Some(Meaning::Group(MethodGroup {
                 candidates: methods,
@@ -3957,7 +4004,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         });
                     }
                     let kind = SemanticErrorKind::UnknownMember {
-                        type_name: self.display(&ty),
+                        type_name: self.describe(&ty),
                     };
                     self.error(kind, span.clone());
                     return Meaning::Error;
@@ -4006,7 +4053,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         name,
                         receiver: None,
                         allow_extensions: false,
-                        receiver_display: self.display(&receiver),
+                        receiver_display: self.describe(&receiver),
                         span: span.clone(),
                     });
                 }
@@ -4021,14 +4068,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         name,
                         receiver: Some(receiver.clone()),
                         allow_extensions: true,
-                        receiver_display: self.display(&receiver),
+                        receiver_display: self.describe(&receiver),
                         span: span.clone(),
                     };
                     if self.extension_group(&probe).is_some() {
                         return Meaning::Group(probe);
                     }
                     let kind = SemanticErrorKind::UnknownMember {
-                        type_name: self.display(&receiver),
+                        type_name: self.describe(&receiver),
                     };
                     self.error(kind, span.clone());
                     return Meaning::Error;
@@ -4109,7 +4156,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     .or_else(|| self.source_delegate_invoke(&ty));
                 match invoke {
                     Some(candidate) => {
-                        let receiver_display = self.display(&ty);
+                        let receiver_display = self.describe(&ty);
                         let group = MethodGroup {
                             candidates: vec![candidate],
                             explicit_arguments: Vec::new(),
@@ -4126,7 +4173,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     None => {
                         if !matches!(ty, Type::Error) {
                             let kind = SemanticErrorKind::NotCallable {
-                                type_name: self.display(&ty),
+                                type_name: self.describe(&ty),
                             };
                             self.error(kind, span.clone());
                         }
@@ -4136,7 +4183,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             Meaning::TypeName(ty) => {
                 let kind = SemanticErrorKind::NotCallable {
-                    type_name: self.display(&ty),
+                    type_name: self.describe(&ty),
                 };
                 self.error(kind, span.clone());
                 Meaning::Error
@@ -5129,8 +5176,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         && !matches!(resolved, Type::Error)
                     {
                         let kind = SemanticErrorKind::TypeMismatch {
-                            expected: self.display(&delegate_parameter.parameter_type),
-                            found: self.display(&resolved),
+                            expected: self.describe(&delegate_parameter.parameter_type),
+                            found: self.describe(&resolved),
                         };
                         self.error(kind, written.span.clone());
                     }
@@ -5354,7 +5401,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     ) -> Option<FunctionSignature> {
         let Some(inner) = self.async_inner(&declared.return_type) else {
             let kind = SemanticErrorKind::AsyncReturnType {
-                type_name: self.display(&declared.return_type),
+                type_name: self.describe(&declared.return_type),
             };
             self.error(kind, span);
             return None;
@@ -5381,9 +5428,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         };
         let ty = self.check_expression(value);
         if !self.in_async {
-            self.error(
+            let hint = self.async_hint();
+            self.error_with_hint(
                 SemanticErrorKind::AwaitOutsideAsync,
                 node.await_keyword.clone(),
+                hint,
             );
             return Type::Error;
         }
@@ -5398,7 +5447,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             None => {
                 let kind = SemanticErrorKind::NotAwaitable {
-                    type_name: self.display(&ty),
+                    type_name: self.describe(&ty),
                 };
                 self.error(kind, value.span());
                 Type::Error
@@ -5506,7 +5555,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             if !matches!(expected, Type::Error) {
                 let kind = SemanticErrorKind::TypeMismatch {
-                    expected: self.display(expected),
+                    expected: self.describe(expected),
                     found: "lambda".to_string(),
                 };
                 self.error(kind, lambda.span.clone());
@@ -5683,7 +5732,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             && self.is_abstract_type(*class)
         {
             let kind = SemanticErrorKind::CannotInstantiateAbstractType {
-                type_name: self.display(&ty),
+                type_name: self.describe(&ty),
             };
             self.error(kind, new_expression.span.clone());
         }
@@ -5724,7 +5773,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 );
             }
         } else {
-            let receiver_display = self.display(&ty);
+            let receiver_display = self.describe(&ty);
             let group = MethodGroup {
                 candidates: constructors,
                 explicit_arguments: Vec::new(),
@@ -5814,7 +5863,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             });
                         let Some((member_type, candidate)) = member else {
                             let kind = SemanticErrorKind::UnknownMember {
-                                type_name: self.display(ty),
+                                type_name: self.describe(ty),
                             };
                             self.error(kind, name.span.clone());
                             continue;
@@ -5921,7 +5970,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             .collect();
         if candidates.is_empty() {
             let kind = SemanticErrorKind::UnknownMember {
-                type_name: self.display(collection),
+                type_name: self.describe(collection),
             };
             self.error(kind, span);
             return;
@@ -5933,7 +5982,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             name: "Add",
             receiver: Some(collection.clone()),
             allow_extensions: false,
-            receiver_display: self.display(collection),
+            receiver_display: self.describe(collection),
             span: span.clone(),
         };
         self.resolve_call(group, arguments, &span, Some(EntityID::from(item)));
@@ -5975,7 +6024,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.check_index_from_end(unary);
                     if !self.is_indexable_from_end(&receiver) {
                         let kind = SemanticErrorKind::NotIndexable {
-                            type_name: self.display(&receiver),
+                            type_name: self.describe(&receiver),
                         };
                         self.error(kind, unary.span.clone());
                         return Meaning::Error;
@@ -6043,7 +6092,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
         if !self.is_indexable_from_end(receiver) {
             let kind = SemanticErrorKind::NotIndexable {
-                type_name: self.display(receiver),
+                type_name: self.describe(receiver),
             };
             self.error(kind, span.clone());
             return Meaning::Error;
@@ -6088,13 +6137,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
                 if indexers.is_empty() {
                     let kind = SemanticErrorKind::NotIndexable {
-                        type_name: self.display(&receiver),
+                        type_name: self.describe(&receiver),
                     };
                     self.error(kind, span.clone());
                     return Meaning::Error;
                 }
 
-                let receiver_display = self.display(&receiver);
+                let receiver_display = self.describe(&receiver);
                 let group = MethodGroup {
                     candidates: indexers,
                     explicit_arguments: Vec::new(),
@@ -6142,7 +6191,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     result
                 } else {
                     let kind = SemanticErrorKind::InvalidOperator {
-                        left: self.display(&operand),
+                        left: self.describe(&operand),
                         right: None,
                     };
                     self.error(kind, span);
@@ -6167,7 +6216,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     result
                 } else {
                     let kind = SemanticErrorKind::InvalidOperator {
-                        left: self.display(&operand),
+                        left: self.describe(&operand),
                         right: None,
                     };
                     self.error(kind, span);
@@ -6188,7 +6237,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     result
                 } else {
                     let kind = SemanticErrorKind::InvalidOperator {
-                        left: self.display(&operand),
+                        left: self.describe(&operand),
                         right: None,
                     };
                     self.error(kind, span);
@@ -6204,7 +6253,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     result
                 } else {
                     let kind = SemanticErrorKind::InvalidOperator {
-                        left: self.display(&operand),
+                        left: self.describe(&operand),
                         right: None,
                     };
                     self.error(kind, span);
@@ -6291,8 +6340,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             right
                         } else {
                             let kind = SemanticErrorKind::TypeMismatch {
-                                expected: self.display(&inner),
-                                found: self.display(&right),
+                                expected: self.describe(&inner),
+                                found: self.describe(&right),
                             };
                             self.error(kind, span);
                             Type::Error
@@ -6385,8 +6434,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         let _ = literal;
         let kind = SemanticErrorKind::InvalidOperator {
-            left: self.display(&left),
-            right: Some(self.display(&right)),
+            left: self.describe(&left),
+            right: Some(self.describe(&right)),
         };
         self.error(kind, span);
         Type::Error
@@ -6559,7 +6608,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 span: span.clone(),
             })
             .collect();
-        let receiver_display = self.display(&operands[0]);
+        let receiver_display = self.describe(&operands[0]);
         let group = MethodGroup {
             candidates,
             explicit_arguments: Vec::new(),
@@ -6647,7 +6696,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             Some(result) => result,
             None => {
                 let kind = SemanticErrorKind::InvalidOperator {
-                    left: self.display(&operand),
+                    left: self.describe(&operand),
                     right: None,
                 };
                 self.error(kind, span.clone());
@@ -6709,7 +6758,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
 
         let kind = SemanticErrorKind::NotEnumerable {
-            type_name: self.display(collection),
+            type_name: self.describe(collection),
         };
         self.error(kind, span);
         Type::Error
@@ -6783,7 +6832,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             name,
             receiver: Some(receiver.clone()),
             allow_extensions: false,
-            receiver_display: self.display(receiver),
+            receiver_display: self.describe(receiver),
             span: span.clone(),
         };
         let AttemptOutcome::Selected(selected) = self.attempt_call(&group, &[]) else {

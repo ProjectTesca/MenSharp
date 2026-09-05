@@ -77,6 +77,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "libc"
+version = "0.2.189"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
 name = "memchr"
 version = "2.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -86,9 +92,12 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 name = "men-sharp"
 version = "0.1.0"
 dependencies = [
+ "men-sharp-codegen",
  "men-sharp-compiler",
+ "men-sharp-diagnostics",
  "men-sharp-parser",
  "men-sharp-semantics",
+ "sys-locale",
  "timescope",
 ]
 
@@ -104,6 +113,7 @@ name = "men-sharp-codegen"
 version = "0.1.0"
 dependencies = [
  "men-sharp-asm",
+ "men-sharp-diagnostics",
  "men-sharp-parser",
  "men-sharp-semantics",
  "timescope",
@@ -123,6 +133,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "men-sharp-diagnostics"
+version = "0.1.0"
+
+[[package]]
 name = "men-sharp-dotnet"
 version = "0.1.0"
 
@@ -133,6 +147,7 @@ dependencies = [
  "allocator-api2",
  "bumpalo",
  "extension-fn",
+ "men-sharp-diagnostics",
  "regex",
  "typeid",
 ]
@@ -141,6 +156,7 @@ dependencies = [
 name = "men-sharp-semantics"
 version = "0.1.0"
 dependencies = [
+ "men-sharp-diagnostics",
  "men-sharp-parser",
 ]
 
@@ -226,6 +242,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "unicode-ident",
+]
+
+[[package]]
+name = "sys-locale"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8eab9a99a024a169fe8a903cf9d4a3b3601109bcc13bd9e3c6fff259138626c4"
+dependencies = [
+ "libc",
 ]
 
 [[package]]

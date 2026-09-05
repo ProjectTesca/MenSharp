@@ -315,6 +315,12 @@ public static class MenSharpCompiler
         arguments.Add("--emit-udon-all");
         arguments.Add("--out-dir");
         arguments.Add(outputDirectory);
+        // diagnostics in the editor's language, in the one-line-plus-detail
+        // format the console groups well (see LogDiagnostics)
+        arguments.Add("--lang");
+        arguments.Add(Application.systemLanguage == SystemLanguage.Japanese ? "ja" : "en");
+        arguments.Add("--error-format");
+        arguments.Add("unity");
         arguments.AddRange(sources);
 
         var info = new ProcessStartInfo
@@ -332,20 +338,63 @@ public static class MenSharpCompiler
         string stderr = process.StandardError.ReadToEnd();
         process.WaitForExit();
 
-        foreach (string line in stderr.Split('\n'))
-        {
-            string trimmed = line.TrimEnd();
-            if (trimmed.Length == 0)
-            {
-                continue;
-            }
-            Debug.LogError($"[MenSharp] {trimmed}");
-        }
+        LogDiagnostics(stderr);
         if (process.ExitCode != 0 && stderr.Trim().Length == 0)
         {
             Debug.LogError($"[MenSharp] compiler exited with {process.ExitCode}\n{stdout}");
         }
         return process.ExitCode == 0;
+    }
+
+    /// One console entry per diagnostic. The compiler's short format is a
+    /// `file(line,column): error: message` line the console can jump from,
+    /// followed by the source excerpt and hints indented — those lines
+    /// belong to the entry above them, shown when it is expanded.
+    private static void LogDiagnostics(string stderr)
+    {
+        var entry = new System.Text.StringBuilder();
+        void Flush()
+        {
+            string text = entry.ToString().TrimEnd();
+            if (text.Length > 0)
+            {
+                // a blank line at the end keeps the stack trace the console
+                // appends from running into the diagnostic
+                Debug.LogError($"[MenSharp] {text}\n");
+            }
+            entry.Clear();
+        }
+        foreach (string raw in stderr.Split('\n'))
+        {
+            string line = raw.TrimEnd();
+            if (line.Length == 0)
+            {
+                // a blank line inside an entry stays (the details are laid
+                // out with them); one between entries is trimmed at Flush
+                if (entry.Length > 0)
+                {
+                    entry.Append('\n');
+                }
+                continue;
+            }
+            bool continuation = char.IsWhiteSpace(line[0]);
+            if (!continuation)
+            {
+                Flush();
+                entry.Append(line);
+            }
+            else
+            {
+                // the compiler indents a diagnostic's detail lines by four
+                // spaces; those go. The `unity` format marks the offending
+                // part inside the source line with rich text, so nothing
+                // depends on leading spaces — which the console drops — or
+                // on a monospaced font, which it does not use
+                string detail = line.StartsWith("    ") ? line.Substring(4) : line;
+                entry.Append('\n').Append(detail);
+            }
+        }
+        Flush();
     }
 
     /// An optional assembly definition for Assets/MenSharp. Not needed:
