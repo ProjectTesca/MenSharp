@@ -1731,6 +1731,64 @@ mod tests {
     }
 
     #[test]
+    fn a_switch_must_cover_every_case_of_a_union_enum_or_bool() {
+        checked!(
+            check,
+            r#"
+            [Union] public abstract class Shape { }
+            public sealed class Circle : Shape { public int R; }
+            public sealed class Square : Shape { public int S; }
+            public abstract class Polygon : Shape { }
+            public sealed class Triangle : Polygon { }
+            public enum Color { Red, Green, Blue, Azure = 2 }
+
+            [Union] public abstract class Option<T> { }
+            public sealed class Some<T> : Option<T> { public T Value; }
+            public sealed class None<T> : Option<T> { }
+
+            [Union] public class NotAbstract { }
+
+            public class Body
+            {
+                int Run(Shape shape, Color color, bool flag, Option<int> option)
+                {
+                    int a = shape switch { Circle c => 1, Square s => 2, Triangle t => 3 };
+                    int b = shape switch { Circle c => 1, Polygon p => 2 };
+                    int c = color switch { Color.Red => 1, Color.Green => 2, Color.Blue => 3 };
+                    int d = color switch { Color.Red => 1, Color.Green => 2 };
+                    int e = flag switch { true => 1, false => 0 };
+                    int f = flag switch { true => 1 };
+                    switch (shape) { case Circle x: break; case Square y: break; }
+                    switch (shape) { case Circle x: break; default: break; }
+                    int g = shape switch { Circle { R: > 0 } => 1, Square { S: var s } => 2, Polygon => 3, _ => 4 };
+                    int h = shape switch { Circle x when x.R > 0 => 1, Square y => 2, Triangle z => 3 };
+                    int i = shape switch { not Circle => 1, Circle x => 2 };
+                    int j = shape switch { Circle { R: var r } => r, Square { S: int s } => s, Polygon p => 0 };
+                    int k = option switch { Some<int> some => some.Value, None<int> none => 0 };
+                    int l = option switch { Some<int> some => some.Value };
+                    switch (color) { case Color.Red: break; }
+                    return a + b + c + d + e + f + g + h + i + j + k + l;
+                }
+            }
+            "#,
+        );
+
+        let kinds = error_kinds(&check);
+        assert_eq!(kinds.len(), 7, "{kinds:?}");
+        let missing = |kind: &SemanticErrorKind| match kind {
+            SemanticErrorKind::NonExhaustiveSwitch { missing, .. } => missing.clone(),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(*kinds[0], SemanticErrorKind::UnionNotAbstract);
+        assert_eq!(missing(kinds[1]), vec!["Square".to_string()]);
+        assert_eq!(missing(kinds[2]), vec!["Color.Blue".to_string()]);
+        assert_eq!(missing(kinds[3]), vec!["false".to_string()]);
+        assert_eq!(missing(kinds[4]), vec!["Triangle".to_string()]);
+        assert_eq!(missing(kinds[5]), vec!["Circle".to_string()]);
+        assert_eq!(missing(kinds[6]), vec!["None`1<System.Int32>".to_string()]);
+    }
+
+    #[test]
     fn global_usings_are_visible_compilation_wide() {
         declarations!(
             declarations,

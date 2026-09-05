@@ -317,6 +317,26 @@ pub(crate) fn parse_attribute_sections<'input, 'allocator>(
     errors: &mut Errors,
     allocator: &'allocator Bump,
 ) -> &'allocator [AttributeSection<'input, 'allocator>] {
+    parse_attribute_sections_inner(lexer, errors, allocator, false)
+}
+
+/// The attribute sections at the top of a file that belong to the file
+/// itself: those with an `assembly:` or `module:` target. A section
+/// without one belongs to the first declaration, and is left for it.
+pub(crate) fn parse_global_attribute_sections<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut Errors,
+    allocator: &'allocator Bump,
+) -> &'allocator [AttributeSection<'input, 'allocator>] {
+    parse_attribute_sections_inner(lexer, errors, allocator, true)
+}
+
+fn parse_attribute_sections_inner<'input, 'allocator>(
+    lexer: &mut Lexer<'input>,
+    errors: &mut Errors,
+    allocator: &'allocator Bump,
+    global_only: bool,
+) -> &'allocator [AttributeSection<'input, 'allocator>] {
     let mut sections = Vec::new_in(allocator);
 
     while lexer.kind() == TokenKind::BracketLeft {
@@ -324,6 +344,15 @@ pub(crate) fn parse_attribute_sections<'input, 'allocator>(
         lexer.next();
 
         let target = parse_attribute_target(lexer);
+        if global_only
+            && !matches!(
+                target.as_ref().map(|target| target.value),
+                Some(AttributeTarget::Assembly | AttributeTarget::Module)
+            )
+        {
+            lexer.back_to_anchor(anchor);
+            break;
+        }
 
         let mut attributes = Vec::new_in(allocator);
         loop {

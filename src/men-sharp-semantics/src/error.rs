@@ -131,6 +131,19 @@ pub enum SemanticErrorKind {
     NotEnumerable {
         type_name: String,
     },
+    /// A switch expression over a `bool`, an enum or a `[Union]` type — or
+    /// a switch statement over a `[Union]` — with a case no arm handles.
+    NonExhaustiveSwitch {
+        subject: String,
+        missing: Vec<String>,
+    },
+    /// `[Union]` on something other than an abstract class or an interface.
+    UnionNotAbstract,
+    /// A type below a `[Union]` whose type arguments the union's do not fix
+    /// (`class Weird<U> : Option<int>`): its cases cannot be listed.
+    UnionCaseUndetermined {
+        case: String,
+    },
     /// `return` with a value in a `void` member, or without one elsewhere.
     ReturnValueMismatch,
     /// A lambda whose parameter list does not fit the target delegate.

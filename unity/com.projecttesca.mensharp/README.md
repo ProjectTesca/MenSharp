@@ -38,6 +38,11 @@ at compile time.
    entering play mode or building.
 
 Program assets keep their GUID across recompiles, so scenes never break.
+A compile only rewrites the program assets whose program actually changed
+(the Console line says how many were updated and how many left alone), so
+saving one file costs the compiler run plus one asset, not all of them.
+**MenSharp > Rebuild All Programs** rewrites every asset regardless — for
+after an SDK update, or a program asset that looks wrong.
 The component you added is a *proxy*: at play/build time its values transfer
 to the paired UdonBehaviour and the proxy itself is stripped, so code never
 runs twice. Its inspector shows which program is actually wired up, and the
@@ -404,7 +409,59 @@ string size = n switch { < 3 => "small", < 10 => "medium", _ => "large" };
 ```
 
 A switch expression no arm matches throws `SwitchExpressionException`, as in
-C#. Positional (`is (0, var y)`) and list patterns are not supported yet.
+C#. Positional patterns (`is (0, var y)`, `Point(var x, var y)` through a
+`Deconstruct`) and list patterns (`[1, .., var last]`) work too.
+
+## Unions: closed hierarchies and exhaustive switch
+
+C# has no tagged union, but an abstract class (or an interface) with a fixed
+set of subclasses is the usual stand-in. Mark it `[Union]` and MenSharp
+treats the set as closed: every `switch` over it — statement or expression —
+must handle every concrete type below it, or have a `default`/`_` arm, and a
+missing one is a compile error naming the type:
+
+```csharp
+using MenSharp;
+
+[Union] public abstract class Shape { }
+public sealed class Circle : Shape { public float R; }
+public sealed class Rect : Shape
+{
+    public float W, H;
+    public void Deconstruct(out float w, out float h) { w = W; h = H; }
+}
+
+float Area(Shape s) => s switch
+{
+    Circle c => c.R * c.R * 3.14f,
+    Rect(var w, var h) => w * h,
+};
+// add `public sealed class Triangle : Shape` and every switch over Shape
+// that does not handle it stops compiling: missing: ["Triangle"]
+```
+
+`[Union]` goes on an abstract class or an interface, generic ones included
+(`[Union] abstract class Option<T>` with `Some<T>` and `None<T>`; a switch
+over `Option<int>` has to handle `Some<int>` and `None<int>`). A concrete
+class that is not `sealed` is a case of its own and its subclasses are more
+cases — a `Foo f` arm takes them all. What counts as handling a case: a type
+pattern the case converts to (`Shape s`, `object o`), `var`, `_`, `not`/
+`and`/`or` of those, and a property or positional pattern whose parts all
+always match (`Circle { R: var r }`, `Rect(var w, var h)`). An arm with a
+`when` guard, a `Circle { R: > 0 }`, or a relational pattern does not count:
+it may not match.
+
+Switch *expressions* over an enum and over `bool` are held to the same
+standard, as the C# compiler's warning CS8509 would have it, but as an
+error: `door switch { DoorState.Open => 1, DoorState.Closed => 0 }` with a
+third member is rejected, naming it. Switch statements over an enum are not
+checked (leaving members out is normal there).
+
+One thing to know: Unity's own compiler cannot see that a `[Union]` is
+closed, so it still warns (CS8509) on a switch expression over one that has
+no `_` arm. A `_ => throw new InvalidOperationException()` arm silences it
+at the cost of MenSharp's check; a `#pragma warning disable CS8509` in that
+file keeps the check. Switch statements draw no warning either way.
 
 ## Exceptions
 
@@ -1064,8 +1121,11 @@ switch (state)
 }
 ```
 
-`switch` takes constant case labels and `default`; pattern matching (`case > 0`,
-`case string s`, `when` guards) is a compile error for now.
+`switch` takes constant case labels, `default`, and every kind of pattern
+(`case > 0`, `case string s`, `when` guards — the `is` patterns under
+*Inheritance, abstract classes and interfaces*). A
+switch *expression* over an enum must handle every named member or have a
+`_` arm; a forgotten member is a compile error (see *Unions*).
 
 An enum value prints as its name, as in C#: `"state: " + state`,
 `$"{state}"`, `state.ToString()` and a `T` that is an enum inside a generic

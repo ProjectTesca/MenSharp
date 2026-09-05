@@ -354,7 +354,7 @@ impl TypeSystem<'_, '_> {
 
     /// The generic parameters a source type binds, enclosing types' first — the
     /// same order [`Type::Named`] arguments use.
-    fn source_type_parameters(&self, symbol: SymbolId) -> Vec<SymbolId> {
+    pub(crate) fn source_type_parameters(&self, symbol: SymbolId) -> Vec<SymbolId> {
         let mut chain = Vec::new();
         let mut current = Some(symbol);
         while let Some(id) = current {

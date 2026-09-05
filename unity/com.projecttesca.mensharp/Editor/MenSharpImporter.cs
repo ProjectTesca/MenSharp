@@ -20,19 +20,45 @@ public static class MenSharpImporter
         string metaPath,
         string assetPath)
     {
+        return CreateOrUpdate(uasmPath, metaPath, assetPath, true, out _);
+    }
+
+    /// `unchanged` comes back true when the asset already holds exactly this
+    /// program and was left alone. Re-assembling and re-serializing a
+    /// program is what the compile button spends its time on, and a
+    /// behaviour whose source did not change compiles to the same text
+    /// (the compiler's output is deterministic), so only the ones that
+    /// differ are touched — unless `force` asks for all of them.
+    public static MenSharpProgramAsset CreateOrUpdate(
+        string uasmPath,
+        string metaPath,
+        string assetPath,
+        bool force,
+        out bool unchanged)
+    {
+        unchanged = false;
         string assembly = File.ReadAllText(uasmPath);
         string metaJson = File.ReadAllText(metaPath);
 
         var programAsset = AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(assetPath);
         bool created = programAsset == null;
+        var assemblyField = typeof(UdonAssemblyProgramAsset).GetField(
+            "udonAssembly", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        if (!created
+            && !force
+            && programAsset.SerializedProgramAsset != null
+            && programAsset.metaJson == metaJson
+            && (string)assemblyField.GetValue(programAsset) == assembly)
+        {
+            unchanged = true;
+            return programAsset;
+        }
         if (created)
         {
             programAsset = ScriptableObject.CreateInstance<MenSharpProgramAsset>();
         }
 
         programAsset.metaJson = metaJson;
-        var assemblyField = typeof(UdonAssemblyProgramAsset).GetField(
-            "udonAssembly", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
         assemblyField.SetValue(programAsset, assembly);
 
         if (created)

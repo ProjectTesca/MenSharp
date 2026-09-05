@@ -26,8 +26,37 @@ public static class MenSharpCompiler
     private const string ProgramsFolder = MenSharpSources.DefaultProgramsFolder;
     private const string PackageName = MenSharpSources.PackageName;
 
+    /// The signature of the sources and compiler the last successful compile
+    /// saw — in the Library folder, so it survives domain reloads and editor
+    /// restarts but never travels with the project.
+    private const string LastSignaturePath = "Library/MenSharp/last-compile.txt";
+
     [MenuItem("MenSharp/Compile All %#m")]
     public static void CompileAll()
+    {
+        Compile(false, false);
+    }
+
+    /// Compile All, but every program asset is re-assembled and rewritten,
+    /// changed or not — for after an SDK update, or a program asset that
+    /// looks wrong.
+    [MenuItem("MenSharp/Rebuild All Programs")]
+    public static void RebuildAll()
+    {
+        Compile(true, false);
+    }
+
+    /// The automatic compile (on save, on load): does nothing when neither
+    /// a source nor the compiler changed since the last successful compile.
+    /// Saving a script makes Unity import it, then reload the domain, and
+    /// report the import once more after the reload — one save, two
+    /// notifications; this is what keeps them from becoming two compiles.
+    public static void CompileIfChanged()
+    {
+        Compile(false, true);
+    }
+
+    private static void Compile(bool force, bool onlyIfChanged)
     {
         if (!Directory.Exists(SourceRoot))
         {
@@ -60,6 +89,12 @@ public static class MenSharpCompiler
             return;
         }
 
+        string signature = SourceSignature(set, binary);
+        if (onlyIfChanged && !force && signature == LastSignature())
+        {
+            return;
+        }
+
         string outputDirectory = Path.Combine("Library", "MenSharp");
         Directory.CreateDirectory(outputDirectory);
         foreach (string stale in Directory.GetFiles(outputDirectory))
@@ -68,7 +103,11 @@ public static class MenSharpCompiler
         }
 
         var stopwatch = Stopwatch.StartNew();
-        if (!RunCompiler(binary, outputDirectory, set.MenSharp.ToArray(), set.Library))
+        bool compiled = RunCompiler(binary, outputDirectory, set.MenSharp.ToArray(), set.Library);
+        // remembered whether it compiled or not: the errors were reported
+        // once, and the next edit changes the signature anyway
+        RememberSignature(signature);
+        if (!compiled)
         {
             Debug.LogError("MenSharp: compilation failed.");
             return;
@@ -80,6 +119,8 @@ public static class MenSharpCompiler
         // one program asset per produced behaviour, beside the assembly that
         // declares it: a package ships its programs with its prefabs
         var produced = Directory.GetFiles(outputDirectory, "*.uasm");
+        int updated = 0;
+        int unchanged = 0;
         var current = new Dictionary<string, HashSet<string>>();
         foreach (string folder in set.ProgramsFolders)
         {
@@ -102,7 +143,16 @@ public static class MenSharpCompiler
                 folder = ProgramsFolder;
                 EnsureAssetFolder(folder);
             }
-            MenSharpImporter.CreateOrUpdate(uasmPath, metaPath, $"{folder}/{classPath}.asset");
+            MenSharpImporter.CreateOrUpdate(
+                uasmPath, metaPath, $"{folder}/{classPath}.asset", force, out bool sameAsBefore);
+            if (sameAsBefore)
+            {
+                unchanged++;
+            }
+            else
+            {
+                updated++;
+            }
             if (!current.TryGetValue(folder, out HashSet<string> names))
             {
                 names = current[folder] = new HashSet<string>();
@@ -120,7 +170,62 @@ public static class MenSharpCompiler
         Debug.Log(
             $"MenSharp: compiled {produced.Length} behaviour(s) from {set.MenSharp.Count} "
             + $"file(s) (+{set.Library.Count} library file(s)) in {totalMilliseconds}ms "
-            + $"(compiler {compilerMilliseconds}ms, program assets {totalMilliseconds - compilerMilliseconds}ms).");
+            + $"(compiler {compilerMilliseconds}ms, program assets {totalMilliseconds - compilerMilliseconds}ms: "
+            + $"{updated} updated, {unchanged} unchanged).");
+    }
+
+    /// Every source path with its last-write time, plus the compiler's — the
+    /// inputs of a compile, hashed. Equal signatures mean the same programs.
+    private static string SourceSignature(MenSharpSources.SourceSet set, string binary)
+    {
+        var text = new StringBuilder();
+        var paths = new List<string>(set.MenSharp);
+        paths.AddRange(set.Library);
+        paths.Sort(StringComparer.Ordinal);
+        paths.Add(binary);
+        foreach (string path in paths)
+        {
+            text.Append(path).Append('\t');
+            try
+            {
+                text.Append(File.GetLastWriteTimeUtc(path).Ticks);
+            }
+            catch (Exception)
+            {
+                text.Append("missing");
+            }
+            text.Append('\n');
+        }
+        using (var sha = System.Security.Cryptography.SHA1.Create())
+        {
+            byte[] hash = sha.ComputeHash(Encoding.UTF8.GetBytes(text.ToString()));
+            return BitConverter.ToString(hash).Replace("-", "");
+        }
+    }
+
+    private static string LastSignature()
+    {
+        try
+        {
+            return File.Exists(LastSignaturePath) ? File.ReadAllText(LastSignaturePath).Trim() : null;
+        }
+        catch (Exception)
+        {
+            return null;
+        }
+    }
+
+    private static void RememberSignature(string signature)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LastSignaturePath));
+            File.WriteAllText(LastSignaturePath, signature);
+        }
+        catch (Exception)
+        {
+            // a signature that cannot be kept only costs a compile
+        }
     }
 
     /// The programs folder of the assembly the program's source belongs to,

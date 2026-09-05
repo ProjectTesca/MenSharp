@@ -56,7 +56,7 @@ pub fn parse_compilation_unit<'input, 'allocator>(
 
     let extern_aliases = declaration::parse_extern_aliases(lexer, errors, allocator);
     let usings = parse_using_directives(lexer, errors, allocator);
-    let attributes = declaration::parse_attribute_sections(lexer, errors, allocator);
+    let attributes = declaration::parse_global_attribute_sections(lexer, errors, allocator);
     let members = parse_namespace_members(lexer, errors, allocator, &[]);
 
     // `parse_namespace_members` stops at anything that cannot begin a member -- a stray

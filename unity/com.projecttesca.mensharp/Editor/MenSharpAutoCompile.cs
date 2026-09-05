@@ -7,13 +7,15 @@
 //
 // Updating the *package* has to trigger a rebuild too: the compiler lives in
 // `Compiler~/`, which Unity deliberately does not import, so replacing it
-// fires no asset event. Without the check below, a newer compiler would sit
-// there while the old programs stayed on disk — and the only symptom would be
-// features that quietly do not appear.
+// fires no asset event. The compiler's own timestamp is part of the compile
+// signature MenSharpCompiler keeps, so the check on load is the same one as
+// on save: anything different from the last successful compile — a source,
+// the compiler — compiles; nothing different, nothing runs. Without it, a
+// newer compiler would sit there while the old programs stayed on disk — and
+// the only symptom would be features that quietly do not appear.
 
 #if UNITY_EDITOR
 using System;
-using System.Collections.Generic;
 using System.IO;
 using UnityEditor;
 using UnityEngine;
@@ -23,7 +25,7 @@ public class MenSharpAutoCompile : AssetPostprocessor
     private static bool pending;
 
     [InitializeOnLoadMethod]
-    private static void RecompileWhenTheCompilerIsNewer()
+    private static void RecompileWhenSomethingChanged()
     {
         EditorApplication.delayCall += () =>
         {
@@ -32,27 +34,13 @@ public class MenSharpAutoCompile : AssetPostprocessor
             {
                 return;
             }
-            var programs = new List<string>();
-            foreach (string guid in AssetDatabase.FindAssets("t:MenSharpProgramAsset"))
-            {
-                programs.Add(AssetDatabase.GUIDToAssetPath(guid));
-            }
-            if (programs.Count == 0)
+            // a project that has never compiled has nothing to bring up to
+            // date; its first compile is the first save (or the menu)
+            if (AssetDatabase.FindAssets("t:MenSharpProgramAsset").Length == 0)
             {
                 return;
             }
-            DateTime built = File.GetLastWriteTimeUtc(compiler);
-            foreach (string program in programs)
-            {
-                if (File.Exists(program) && File.GetLastWriteTimeUtc(program) < built)
-                {
-                    Debug.Log(
-                        "MenSharp: the bundled compiler is newer than the compiled programs — "
-                        + "rebuilding them.");
-                    MenSharpCompiler.CompileAll();
-                    return;
-                }
-            }
+            MenSharpCompiler.CompileIfChanged();
         };
     }
 
@@ -105,7 +93,7 @@ public class MenSharpAutoCompile : AssetPostprocessor
         EditorApplication.delayCall += () =>
         {
             pending = false;
-            MenSharpCompiler.CompileAll();
+            MenSharpCompiler.CompileIfChanged();
         };
     }
 

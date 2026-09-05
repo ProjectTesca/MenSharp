@@ -30,6 +30,8 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::ops::Range;
 
+mod exhaustive;
+
 use crate::FileId;
 
 use men_sharp_parser::ast::{
@@ -325,6 +327,7 @@ pub fn check_file(
         local_function_order: HashMap::new(),
         expression_types: HashMap::new(),
         targets: HashMap::new(),
+        pattern_inputs: HashMap::new(),
         enumerations: HashMap::new(),
         constructor_chains: HashMap::new(),
         catch_depth: 0,
@@ -564,6 +567,9 @@ struct Checker<'a, 'ast> {
     local_function_order: HashMap<EntityID, usize>,
     expression_types: HashMap<EntityID, Type>,
     targets: HashMap<EntityID, ResolvedTarget>,
+    /// The type each pattern was matched against, for the exhaustiveness
+    /// check (see `exhaustive.rs`).
+    pattern_inputs: HashMap<EntityID, Type>,
     enumerations: HashMap<EntityID, ForeachEnumeration>,
     constructor_chains: HashMap<SymbolId, ConstructorChain>,
     /// How many `catch` blocks enclose the current position — where a bare
@@ -1426,6 +1432,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             self.check_contracts(symbol, span.clone());
             self.check_implicit_constructor(symbol, span);
             self.check_operator_pairs(symbol);
+            self.check_union_attribute(symbol);
         }
         for nested in &node.nested {
             self.check_type_declaration(nested);
@@ -2424,6 +2431,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         }
                         self.locals.pop();
                     }
+                    self.check_switch_statement_exhaustive(
+                        &value,
+                        sections,
+                        statement.switch_keyword.clone(),
+                    );
                 }
             }
             Statement::Try(statement) => {
@@ -2714,6 +2726,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     }
 
     fn check_pattern(&mut self, pattern: &'ast Pattern<'ast, 'ast>, matched: &Type) {
+        self.pattern_inputs
+            .insert(EntityID::from(pattern), matched.clone());
         match pattern {
             Pattern::Discard(_) => {}
             Pattern::Declaration {
@@ -3101,6 +3115,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         }
                         self.locals.pop();
                     }
+                    self.check_switch_expression_exhaustive(
+                        &value,
+                        arms,
+                        switch.switch_keyword.clone(),
+                    );
                 }
                 if arm_types.is_empty() {
                     return Type::Error;

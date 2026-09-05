@@ -56,6 +56,16 @@ namespace MenSharp
         public BehaviourSyncMode Mode { get; }
     }
 
+    /// Marks an abstract class or an interface as closed: the concrete
+    /// types deriving from it are all of its cases, and MenSharp requires a
+    /// `switch` over it to handle every one (or have a `default`/`_` arm).
+    /// Unity's own compiler cannot see the closed set, so it may still warn
+    /// (CS8509) on a switch expression without a discard arm.
+    [AttributeUsage(AttributeTargets.Class | AttributeTargets.Interface)]
+    public class UnionAttribute : Attribute
+    {
+    }
+
     /// Routes external writes to this field — `SetProgramVariable` from
     /// another program, or network sync — through the named property's
     /// setter instead of landing silently. Writes from your own code go to

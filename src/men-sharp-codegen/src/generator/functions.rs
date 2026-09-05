@@ -1136,7 +1136,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     pub(super) fn ensure_dispatcher_impls(&mut self) -> bool {
         timescope::scope!("ensure dispatcher impls");
         let mut changed = false;
-        let keys: Vec<FunctionKey> = self.dispatchers.keys().cloned().collect();
+        let mut keys: Vec<FunctionKey> = self.dispatchers.keys().cloned().collect();
+        // deterministic output: the implementations are queued (and so
+        // numbered) in this order, and the map's order is not stable
+        keys.sort_by_key(|key| self.functions[key].name.clone());
         for key in keys {
             let dispatcher = &self.dispatchers[&key];
             let receiver = dispatcher.receiver.clone();

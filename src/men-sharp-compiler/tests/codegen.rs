@@ -9627,6 +9627,76 @@ fn casting_a_fraction_to_an_integer_truncates_as_in_csharp() {
 }
 
 #[test]
+fn a_union_switch_dispatches_on_the_runtime_type() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            [Union] public abstract class Shape { }
+            public sealed class Circle : Shape
+            {
+                public int R;
+                public Circle(int r) { R = r; }
+            }
+            public sealed class Rect : Shape
+            {
+                public int W, H;
+                public Rect(int w, int h) { W = w; H = h; }
+                public void Deconstruct(out int w, out int h) { w = W; h = H; }
+            }
+            [Union] public abstract class Option<T> { }
+            public sealed class Some<T> : Option<T>
+            {
+                public T Value;
+                public Some(T value) { Value = value; }
+            }
+            public sealed class None<T> : Option<T> { }
+
+            public class Program
+            {
+                public static string log = "";
+
+                static int Area(Shape s) => s switch
+                {
+                    Circle c => c.R * c.R * 3,
+                    Rect(var w, var h) => w * h,
+                };
+
+                static string Show(Option<int> o) => o switch
+                {
+                    Some<int> some => "some " + some.Value,
+                    None<int> none => "none",
+                };
+
+                public static void Main()
+                {
+                    Shape[] shapes = { new Circle(2), new Rect(3, 4) };
+                    foreach (var s in shapes)
+                    {
+                        log += Area(s) + ";";
+                        switch (s)
+                        {
+                            case Circle c:
+                                log += "C";
+                                break;
+                            case Rect r:
+                                log += "R";
+                                break;
+                        }
+                    }
+                    log += Show(new Some<int>(7)) + "," + Show(new None<int>());
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "log"), "12;C12;Rsome 7,none");
+}
+
+#[test]
 fn a_source_enum_prints_its_member_name() {
     let source = r#"
         using System;
@@ -9660,4 +9730,48 @@ fn a_source_enum_prints_its_member_name() {
         string_of(&emulator, "Log"),
         "High,High,Low,Mid,9;High Mid;High;Low;3;Front, Side,None,Both,Both, Side,8,Back;6;"
     );
+}
+
+#[test]
+fn compiling_the_same_program_twice_gives_the_same_text() {
+    // Unity skips a program asset whose text did not change, so the text
+    // must not depend on hash-map order: dispatchers, re-entry guards and
+    // the rest are emitted in a sorted order
+    let source = r#"
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        using MenSharp;
+        namespace Game
+        {
+            public interface IShape { float Area(); }
+            public class Square : IShape { public float Side; public float Area() { return Side * Side; } }
+            public class Circle : IShape { public float Radius; public float Area() { return 3f * Radius * Radius; } }
+            public class Program : MenSharpBehaviour
+            {
+                public Program other;
+                public string Log = "";
+                public void Ping() { Log += "p"; }
+                public void Interact()
+                {
+                    IShape[] shapes = new IShape[] { new Square(), new Circle() };
+                    Log = shapes.Select(s => s.Area()).Sum() + "";
+                    Func<int, int> twice = x => x * 2;
+                    Log += twice(3);
+                    // a call into another program: what gets a re-entry guard
+                    other.Ping();
+                }
+            }
+        }
+    "#;
+    let texts: Vec<String> = (0..3)
+        .map(|_| {
+            let mut sources = vec![SourceCode::new("test.cs", source)];
+            sources.extend(Compiler::corlib_sources());
+            let (program, _) = build(sources).expect("a .NET SDK is installed");
+            program.to_uasm().unwrap() + &program.to_meta_json().unwrap()
+        })
+        .collect();
+    assert_eq!(texts[0], texts[1]);
+    assert_eq!(texts[1], texts[2]);
 }

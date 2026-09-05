@@ -1444,7 +1444,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .collect();
         let any_recursion = expand.iter().any(|&needed| needed);
 
-        let guarded: Vec<FunctionKey> = self
+        let mut guarded: Vec<FunctionKey> = self
             .functions
             .keys()
             .filter(|function| {
@@ -1457,6 +1457,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             })
             .cloned()
             .collect();
+        // deterministic output: the flags and messages are allocated in this
+        // order, and the map's order is not stable
+        guarded.sort_by_key(|key| self.functions[key].name.clone());
 
         if !any_recursion && guarded.is_empty() && self.async_snapshots.is_empty() {
             self.program
