@@ -22,8 +22,9 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
         with:
+          toolchain: 1.96.1
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
 
@@ -33,3 +34,64 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Tests (including Roslyn differential)
         run: cargo test --workspace
+
+  unity-integration:
+    name: Unity / VRChat SDK integration
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # GameCI needs the Unity licence secrets, which a pull request from a
+    # fork cannot see
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    env:
+      UNITY_LICENSE: ${{ secrets.UNITY_LICENSE }}
+      UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
+      UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
+        with:
+          toolchain: 1.96.1
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@v2
+
+      # the VRChat SDK packages pinned in Packages/vpm-manifest.json — never
+      # committed, resolved from VRChat's package repository every run
+      - name: Resolve pinned VPM dependencies
+        uses: anatawa12/sh-actions/resolve-vpm-packages@1d155c7a26bcd0a54ffd9cb38fd66ab0d32d23cd
+        with:
+          project-path: tests/unity-project
+
+      # the compiler is built as a static binary: it runs inside GameCI's
+      # container, whose glibc is older than the runner's
+      - name: Stage the package and release compiler
+        run: ./tools/prepare-unity-tests.sh
+        env:
+          MENSHARP_CARGO_TARGET: x86_64-unknown-linux-musl
+          MENSHARP_SKIP_VPM_RESOLVE: "1"
+
+      # importing the SDK from scratch is most of the job's time
+      - name: Cache the Unity Library folder
+        uses: actions/cache@v4
+        with:
+          path: tests/unity-project/Library
+          key: unity-library-${{ hashFiles('tests/unity-project/Packages/vpm-manifest.json', 'tests/unity-project/Packages/manifest.json', 'tests/unity-project/ProjectSettings/ProjectVersion.txt') }}
+          restore-keys: unity-library-
+
+      - name: Run SDK-backed Unity tests
+        uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9
+        with:
+          projectPath: tests/unity-project
+          testMode: editmode
+          customParameters: -assemblyNames ProjectTesca.MenSharp.IntegrationTests
+          coverageEnabled: false
+          artifactsPath: artifacts/unity-tests
+          githubToken: ${{ secrets.GITHUB_TOKEN }}
+          checkName: MenSharp Unity integration tests
+
+      - name: Upload Unity logs and NUnit results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: unity-integration-results
+          path: artifacts/unity-tests
