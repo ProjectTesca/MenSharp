@@ -249,6 +249,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     // ------------------------------------------------------------ compiling
 
     pub(super) fn compile_function(&mut self, key: &FunctionKey) {
+        timescope::scope!("compile function");
         self.current_frame = Some(key.clone());
         self.compile_function_body(key);
         self.current_frame = None;
@@ -1133,6 +1134,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// Makes sure the override of every instantiated subtype is scheduled.
     /// Returns true when this enqueued new work.
     pub(super) fn ensure_dispatcher_impls(&mut self) -> bool {
+        timescope::scope!("ensure dispatcher impls");
         let mut changed = false;
         let keys: Vec<FunctionKey> = self.dispatchers.keys().cloned().collect();
         for key in keys {
@@ -1680,6 +1682,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// against each instantiated subtype's id, tail-jump into the chosen
     /// override. Returns whether it emitted anything.
     pub(super) fn emit_dispatcher_bodies(&mut self) -> bool {
+        timescope::scope!("emit dispatcher bodies");
         let mut keys: Vec<FunctionKey> = self
             .dispatchers
             .keys()

@@ -5,6 +5,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+timescope = { workspace = true }
 men-sharp-asm = { workspace = true }
 men-sharp-parser = { workspace = true }
 men-sharp-semantics = { workspace = true }

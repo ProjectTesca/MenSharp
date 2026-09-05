@@ -73,6 +73,9 @@ public static class MenSharpCompiler
             Debug.LogError("MenSharp: compilation failed.");
             return;
         }
+        // the compiler process against the asset work that follows: the two
+        // are tuned separately, so the log tells them apart
+        long compilerMilliseconds = stopwatch.ElapsedMilliseconds;
 
         // one program asset per produced behaviour, beside the assembly that
         // declares it: a package ships its programs with its prefabs
@@ -113,9 +116,11 @@ public static class MenSharpCompiler
         AssetDatabase.SaveAssets();
         MenSharpSources.InvalidateProgramIndex();
 
+        long totalMilliseconds = stopwatch.ElapsedMilliseconds;
         Debug.Log(
             $"MenSharp: compiled {produced.Length} behaviour(s) from {set.MenSharp.Count} "
-            + $"file(s) (+{set.Library.Count} library file(s)) in {stopwatch.ElapsedMilliseconds}ms.");
+            + $"file(s) (+{set.Library.Count} library file(s)) in {totalMilliseconds}ms "
+            + $"(compiler {compilerMilliseconds}ms, program assets {totalMilliseconds - compilerMilliseconds}ms).");
     }
 
     /// The programs folder of the assembly the program's source belongs to,

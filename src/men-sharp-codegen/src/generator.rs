@@ -80,6 +80,7 @@ pub fn generate(
     nodes: &UdonNodes,
     entry_path: &[&str],
 ) -> CodegenOutput {
+    timescope::scope!("codegen");
     let mut generator = Generator {
         declarations,
         signatures,
@@ -1428,6 +1429,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// analysis of *this* program can see that cycle, so it is caught at
     /// runtime with an error instead.
     fn resolve_frame_markers(&mut self, init_label: LabelId) {
+        timescope::scope!("resolve frame markers");
         let closure = self.call_closure();
 
         let expand: Vec<bool> = self

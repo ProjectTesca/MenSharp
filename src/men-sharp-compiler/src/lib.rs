@@ -101,8 +101,10 @@ pub struct Compiler {
 
 impl Compiler {
     pub fn new(settings: CompilerSettings) -> Result<Self, rayon::ThreadPoolBuildError> {
-        let mut builder =
-            rayon::ThreadPoolBuilder::new().thread_name(|index| format!("men-sharp-{index}"));
+        let mut builder = rayon::ThreadPoolBuilder::new()
+            .thread_name(|index| format!("men-sharp-{index}"))
+            // so a profile names the worker a span ran on
+            .start_handler(|index| timescope::register_thread_name(format!("men-sharp-{index}")));
 
         if let Some(count) = settings.thread_count {
             builder = builder.num_threads(count);
@@ -126,10 +128,12 @@ impl Compiler {
     /// Parses every file in parallel. Order (and therefore each file's [`FileId`])
     /// matches the input.
     pub fn parse(&self, sources: Vec<SourceCode>) -> Vec<ParsedFile> {
+        timescope::scope!("parse");
         self.pool.install(|| {
             sources
                 .into_par_iter()
                 .map(|source| {
+                    timescope::scope!("parse file");
                     let mut defines: Vec<&str> =
                         self.settings.defines.iter().map(String::as_str).collect();
                     defines.push("COMPILER_MENSHARP");
@@ -150,11 +154,13 @@ impl Compiler {
     /// symbol table. The result borrows the parsed files, which is what ties the
     /// symbol table's lifetime to the syntax trees it points into.
     pub fn collect_declarations<'ast>(&self, files: &'ast [ParsedFile]) -> Declarations<'ast> {
+        timescope::scope!("collect declarations");
         let collected: Vec<_> = self.pool.install(|| {
             files
                 .par_iter()
                 .enumerate()
                 .map(|(index, file)| {
+                    timescope::scope!("collect file");
                     let mut declarations = collect_file(FileId(index as u32), file.ast.ast());
                     declarations.foreign = file.foreign;
                     declarations
@@ -197,11 +203,13 @@ impl Compiler {
         &self,
         references: &'data [Vec<u8>],
     ) -> Result<ReferenceSet<'data>, ReferenceError> {
+        timescope::scope!("load references");
         let assemblies: Vec<Result<DotNetAssembly, ReferenceError>> = self.pool.install(|| {
             references
                 .par_iter()
                 .enumerate()
                 .map(|(index, bytes)| {
+                    timescope::scope!("parse reference");
                     DotNetAssembly::parse(bytes).map_err(|error| ReferenceError {
                         reference: index,
                         error,
@@ -222,13 +230,18 @@ impl Compiler {
         declarations: &Declarations<'_>,
         external: &(dyn ExternalTypes + Sync),
     ) -> Signatures {
+        timescope::scope!("resolve signatures");
         let per_file: Vec<Signatures> = self.pool.install(|| {
             (0..declarations.files.len())
                 .into_par_iter()
-                .map(|index| resolve_file(declarations, external, index))
+                .map(|index| {
+                    timescope::scope!("resolve file");
+                    resolve_file(declarations, external, index)
+                })
                 .collect()
         });
 
+        timescope::scope!("merge signatures");
         let mut all = Signatures::default();
         for signatures in per_file {
             all.merge(signatures);
@@ -247,13 +260,18 @@ impl Compiler {
         signatures: &Signatures,
         external: &(dyn ExternalTypes + Sync),
     ) -> BodyCheck {
+        timescope::scope!("check bodies");
         let per_file: Vec<BodyCheck> = self.pool.install(|| {
             (0..declarations.files.len())
                 .into_par_iter()
-                .map(|index| check_file(declarations, signatures, external, index))
+                .map(|index| {
+                    timescope::scope!("check file");
+                    check_file(declarations, signatures, external, index)
+                })
                 .collect()
         });
 
+        timescope::scope!("merge bodies");
         let mut all = BodyCheck::default();
         for check in per_file {
             all.merge(check);
@@ -351,6 +369,7 @@ impl Compiler {
         external: &(dyn ExternalTypes + Sync),
         entry_path: &[&str],
     ) -> men_sharp_codegen::CodegenOutput {
+        timescope::scope!("generate program");
         let nodes = men_sharp_codegen::UdonNodes::for_unity_version(None);
         men_sharp_codegen::generate(
             declarations,
@@ -373,6 +392,7 @@ impl Compiler {
         external: &(dyn ExternalTypes + Sync),
         files: &[ParsedFile],
     ) -> Vec<UdonBehaviourProgram> {
+        timescope::scope!("generate programs");
         men_sharp_codegen::behaviour_classes(declarations, signatures)
             .into_iter()
             .map(|class_path| {

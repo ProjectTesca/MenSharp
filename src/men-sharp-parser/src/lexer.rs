@@ -644,7 +644,9 @@ impl TokenKind {
 enum Tokenizer {
     /// Matches a literal string.
     Keyword(TokenKind, &'static str),
-    /// Matches an anchored regular expression. Compiled lazily, once per [`Lexer`].
+    /// Matches an anchored regular expression. Compiled once per process
+    /// (see [`compiled_regexes`]): compiling the table again for every file
+    /// cost more than lexing the file did.
     Regex(TokenKind, &'static str),
     /// Matches with a hand written scanner. Returns the accepted byte length, or 0 to reject.
     Custom(TokenKind, fn(&str) -> usize),
@@ -653,12 +655,30 @@ enum Tokenizer {
     LineStart(TokenKind, fn(&str) -> usize),
 }
 
+/// The regular expressions of [`TOKENIZERS`], compiled once for the whole
+/// process and indexed like the table (`None` where the tokenizer is not a
+/// regex).
+fn compiled_regexes() -> &'static [Option<Regex>] {
+    static COMPILED: std::sync::OnceLock<Vec<Option<Regex>>> = std::sync::OnceLock::new();
+    COMPILED.get_or_init(|| {
+        TOKENIZERS
+            .iter()
+            .map(|tokenizer| match tokenizer {
+                Tokenizer::Regex(_, regex) => {
+                    Some(Regex::new(format!("^({regex})").as_str()).unwrap())
+                }
+                _ => None,
+            })
+            .collect()
+    })
+}
+
 impl Tokenizer {
     fn tokenize(
         &self,
         current_input: &str,
         index: usize,
-        regex_cache: &mut [Option<Regex>],
+        regexes: &[Option<Regex>],
         at_line_start: bool,
     ) -> (TokenKind, usize) {
         match self {
@@ -669,9 +689,10 @@ impl Tokenizer {
                     (*kind, 0)
                 }
             }
-            Tokenizer::Regex(kind, regex) => {
-                let regex = regex_cache[index]
-                    .get_or_insert_with(|| Regex::new(format!("^({})", regex).as_str()).unwrap());
+            Tokenizer::Regex(kind, _) => {
+                let regex = regexes[index]
+                    .as_ref()
+                    .expect("every Regex tokenizer is compiled by compiled_regexes");
 
                 let length = match regex.find(current_input) {
                     Some(matched) => matched.end(),
@@ -1027,7 +1048,6 @@ pub fn get_kind(&self) -> TokenKind {
 pub struct Lexer<'input> {
     source: &'input str,
     current_byte_position: usize,
-    regex_cache: Box<[Option<Regex>]>,
     current_token_cache: Option<Token<'input>>,
     /// Comments already recorded in [`Lexer::comments`], so that re-lexing the same
     /// region (via [`Lexer::current`] or [`Lexer::back_to_anchor`]) does not duplicate them.
@@ -1075,7 +1095,6 @@ impl<'input> Lexer<'input> {
             span_offset,
             source,
             current_byte_position: 0,
-            regex_cache: vec![None; TOKENIZERS.len()].into_boxed_slice(),
             current_token_cache: None,
             comment_scan_position: 0,
             comments: Vec::new(),
@@ -1181,7 +1200,7 @@ impl<'input> Iterator for Lexer<'input> {
 
             for (index, tokenizer) in TOKENIZERS.iter().enumerate() {
                 let (token_kind, byte_length) =
-                    tokenizer.tokenize(current_input, index, &mut self.regex_cache, at_line_start);
+                    tokenizer.tokenize(current_input, index, compiled_regexes(), at_line_start);
 
                 if byte_length > current_max_length {
                     current_max_length = byte_length;

@@ -272,6 +272,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// invoker and target to exist, which they do from registration on;
     /// it schedules nothing new itself.
     pub(super) fn emit_thunks(&mut self) {
+        timescope::scope!("emit thunks");
         while let Some(thunk) = self.thunk_queue.pop_front() {
             match thunk.kind {
                 ThunkKind::Call { payload } => self.emit_thunk(thunk, payload),

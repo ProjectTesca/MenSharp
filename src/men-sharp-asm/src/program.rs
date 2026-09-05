@@ -249,6 +249,7 @@ impl Program {
     /// Resolves labels to byte addresses. Fails on labels that were created
     /// but never placed.
     pub fn assemble(&self) -> Result<Assembled, AssembleError> {
+        timescope::scope!("assemble");
         let mut label_addresses = vec![None; self.labels.len()];
         let mut address = 0u32;
         for op in &self.code {
@@ -325,6 +326,7 @@ impl Program {
     /// labels at one address). Internal jumps don't need names anyway — they
     /// are emitted as resolved addresses.
     pub fn to_uasm(&self) -> Result<String, AssembleError> {
+        timescope::scope!("to uasm");
         let assembled = self.assemble()?;
         // label id → exported event name (the label line must match `.export`)
         let entry_labels: HashMap<usize, &str> = self
@@ -422,6 +424,7 @@ impl Program {
     /// entry points. The Unity importer applies this after assembling; the
     /// emulator applies the same values, so both worlds start identically.
     pub fn to_meta_json(&self) -> Result<String, AssembleError> {
+        timescope::scope!("to meta json");
         let assembled = self.assemble()?;
         let mut out = String::from("{\n  \"heap\": [\n");
         let mut first = true;

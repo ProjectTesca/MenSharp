@@ -18,10 +18,38 @@ use men_sharp_semantics::{
 };
 
 const USAGE: &str = "usage: men-sharp [--threads N] [--reference lib.dll]... \
-[--udonsharp other.cs]... [--define NAME]... \
+[--udonsharp other.cs]... [--define NAME]... [--profile-dir dir] \
 [--emit-udon Namespace.EntryClass --out name | --emit-udon-all --out-dir dir] <file.cs>...";
 
 fn main() -> ExitCode {
+    // `--profile-dir` is read ahead of everything so that every phase,
+    // including reading the inputs, is on the profile
+    let profile_dir = profile_dir_argument();
+    timescope::enable_profile(profile_dir.is_some());
+    timescope::register_thread_name("main");
+    let code = run();
+    if let Some(dir) = profile_dir {
+        match timescope::dump_to_dir(&dir) {
+            Ok(()) => println!("profile written to {dir}/summary.txt and report.html"),
+            Err(error) => eprintln!("{dir}: could not write the profile: {error}"),
+        }
+    }
+    code
+}
+
+/// The directory `--profile-dir` names, when it is given.
+fn profile_dir_argument() -> Option<String> {
+    let mut arguments = std::env::args().skip(1);
+    while let Some(argument) = arguments.next() {
+        if argument == "--profile-dir" {
+            return arguments.next();
+        }
+    }
+    None
+}
+
+fn run() -> ExitCode {
+    timescope::scope!("men-sharp");
     let mut thread_count = None;
     let mut paths = Vec::new();
     let mut foreign_paths = Vec::new();
@@ -88,6 +116,13 @@ fn main() -> ExitCode {
                 };
                 out_dir = dir;
             }
+            // writes timescope's summary.txt and report.html there at exit
+            "--profile-dir" => {
+                if arguments.next().is_none() {
+                    eprintln!("--profile-dir needs a directory");
+                    return ExitCode::FAILURE;
+                }
+            }
             "--help" | "-h" => {
                 println!("{USAGE}");
                 return ExitCode::SUCCESS;
@@ -102,31 +137,37 @@ fn main() -> ExitCode {
     }
 
     let mut sources = Vec::with_capacity(paths.len() + foreign_paths.len());
-    for path in &paths {
-        match std::fs::read_to_string(path) {
-            Ok(text) => sources.push(SourceCode::new(path.as_str(), text)),
-            Err(error) => {
-                eprintln!("{path}: {error}");
-                return ExitCode::FAILURE;
+    {
+        timescope::scope!("read sources");
+        for path in &paths {
+            match std::fs::read_to_string(path) {
+                Ok(text) => sources.push(SourceCode::new(path.as_str(), text)),
+                Err(error) => {
+                    eprintln!("{path}: {error}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
-    }
-    for path in &foreign_paths {
-        match std::fs::read_to_string(path) {
-            Ok(text) => sources.push(SourceCode::foreign(path.as_str(), text)),
-            Err(error) => {
-                eprintln!("{path}: {error}");
-                return ExitCode::FAILURE;
+        for path in &foreign_paths {
+            match std::fs::read_to_string(path) {
+                Ok(text) => sources.push(SourceCode::foreign(path.as_str(), text)),
+                Err(error) => {
+                    eprintln!("{path}: {error}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
     let mut reference_bytes = Vec::with_capacity(reference_paths.len());
-    for path in &reference_paths {
-        match std::fs::read(path) {
-            Ok(bytes) => reference_bytes.push(bytes),
-            Err(error) => {
-                eprintln!("{path}: {error}");
-                return ExitCode::FAILURE;
+    {
+        timescope::scope!("read references");
+        for path in &reference_paths {
+            match std::fs::read(path) {
+                Ok(bytes) => reference_bytes.push(bytes),
+                Err(error) => {
+                    eprintln!("{path}: {error}");
+                    return ExitCode::FAILURE;
+                }
             }
         }
     }
@@ -153,6 +194,7 @@ fn main() -> ExitCode {
     if udon_entry.is_some() || udon_all {
         // the Udon target compiles the mini-corlib along with user code; which
         // flavour depends on the references, so this waits for them
+        timescope::scope!("corlib sources");
         sources.extend(Compiler::corlib_sources_for(&references));
     }
 
@@ -161,7 +203,10 @@ fn main() -> ExitCode {
     let signatures = compiler.resolve_signatures(&declarations, &references);
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
 
-    let error_count = report(&files, &declarations, &signatures, &bodies);
+    let error_count = {
+        timescope::scope!("report");
+        report(&files, &declarations, &signatures, &bodies)
+    };
     println!("checked {} expressions", bodies.expression_types.len());
 
     if udon_all {
@@ -184,6 +229,7 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         let mut failed = 0usize;
+        timescope::scope!("emit programs");
         for program in &programs {
             for error in &program.output.errors {
                 let file = &files[error.file.0 as usize];
@@ -212,6 +258,7 @@ fn main() -> ExitCode {
             let directory = std::path::Path::new(&out_dir);
             let uasm_path = directory.join(format!("{}.uasm", program.class_path));
             let meta_path = directory.join(format!("{}.meta.json", program.class_path));
+            timescope::scope!("write program files");
             if let Err(error) =
                 std::fs::write(&uasm_path, uasm).and_then(|()| std::fs::write(&meta_path, meta))
             {

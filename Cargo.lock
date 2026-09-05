@@ -89,11 +89,15 @@ dependencies = [
  "men-sharp-compiler",
  "men-sharp-parser",
  "men-sharp-semantics",
+ "timescope",
 ]
 
 [[package]]
 name = "men-sharp-asm"
 version = "0.1.0"
+dependencies = [
+ "timescope",
+]
 
 [[package]]
 name = "men-sharp-codegen"
@@ -102,6 +106,7 @@ dependencies = [
  "men-sharp-asm",
  "men-sharp-parser",
  "men-sharp-semantics",
+ "timescope",
 ]
 
 [[package]]
@@ -114,6 +119,7 @@ dependencies = [
  "men-sharp-parser",
  "men-sharp-semantics",
  "rayon",
+ "timescope",
 ]
 
 [[package]]
@@ -221,6 +227,38 @@ dependencies = [
  "quote",
  "unicode-ident",
 ]
+
+[[package]]
+name = "timescope"
+version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6826f92bc90b090918a3cceaf3bfbf12e4091e1102d0e8cba184d12343d1f1ca"
+dependencies = [
+ "timescope-dumper",
+ "timescope-macro",
+ "timescope-runtime",
+]
+
+[[package]]
+name = "timescope-dumper"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9cdefc96be4b0bd6ec0828e8fcbef5725bd8e66ebbdff58f0bc38add7ccecc14"
+dependencies = [
+ "timescope-runtime",
+]
+
+[[package]]
+name = "timescope-macro"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "43ad641296c1d536b2411676ceb4223a4f7ef7b15e2b35d81a3e1c76d910c70b"
+
+[[package]]
+name = "timescope-runtime"
+version = "0.1.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f03cc98bed68baea28264b0719b23f2e3a0b915fc87a61d1b276c4227e3fb6ef"
 
 [[package]]
 name = "typeid"
