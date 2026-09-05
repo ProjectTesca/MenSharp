@@ -442,8 +442,40 @@ mod tests {
         }
 
         fn type_info(&self, id: crate::types::ExternalTypeId) -> crate::ExternalTypeInfo {
+            // the primitives are structs, as in the real corlib — `int?`
+            // must stay `Nullable<int>` while `string?` is `string`
+            let is_value = self
+                .types
+                .get(id.type_index as usize)
+                .is_some_and(|&(ns, name, _)| {
+                    ns == "System"
+                        && matches!(
+                            name,
+                            "Int32"
+                                | "Boolean"
+                                | "SByte"
+                                | "Byte"
+                                | "Int16"
+                                | "UInt16"
+                                | "UInt32"
+                                | "Int64"
+                                | "UInt64"
+                                | "Char"
+                                | "Single"
+                                | "Double"
+                                | "Decimal"
+                                | "IntPtr"
+                                | "UIntPtr"
+                                | "Nullable"
+                                | "ValueType"
+                        )
+                });
             crate::ExternalTypeInfo {
-                kind: crate::ExternalTypeKind::Class,
+                kind: if is_value {
+                    crate::ExternalTypeKind::Struct
+                } else {
+                    crate::ExternalTypeKind::Class
+                },
                 arity: self
                     .types
                     .get(id.type_index as usize)

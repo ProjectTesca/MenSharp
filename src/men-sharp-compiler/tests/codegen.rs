@@ -9627,6 +9627,45 @@ fn casting_a_fraction_to_an_integer_truncates_as_in_csharp() {
 }
 
 #[test]
+fn a_nullable_annotation_on_an_unconstrained_type_parameter_is_the_parameter_itself() {
+    let Some(emulator) = run(
+        r#"
+        #nullable enable
+        namespace Game
+        {
+            public class Program
+            {
+                public static string log = "";
+                // C# 9: `T?` here is `T` — `int` when T is int, not `int?`
+                static T? FirstOrDefault<T>(T[] xs) => xs.Length > 0 ? xs[0] : default;
+                // ... and only `where T : struct` makes it Nullable<T>
+                static T? FirstOrNull<T>(T[] xs) where T : struct
+                    => xs.Length > 0 ? xs[0] : null;
+                static string? Maybe(bool b) => b ? "x" : null;
+
+                public static void Main()
+                {
+                    int v = FirstOrDefault(new[] { 3 });
+                    int none = FirstOrDefault(new int[0]);
+                    string? s = FirstOrDefault(new[] { "a" });
+                    string? missing = FirstOrDefault(new string[0]);
+                    int? n = FirstOrNull(new int[0]);
+                    int? some = FirstOrNull(new[] { 7 });
+                    string t = Maybe(true)!;
+                    log = v + "," + none + "," + s + "," + (missing == null) + "," + n.HasValue
+                        + "," + some + "," + t.Length;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "log"), "3,0,a,True,False,7,1");
+}
+
+#[test]
 fn records_have_value_equality_to_string_with_and_deconstruct() {
     let Some(emulator) = run(
         r#"

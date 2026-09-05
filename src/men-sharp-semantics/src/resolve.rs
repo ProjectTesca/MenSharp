@@ -34,7 +34,7 @@ use men_sharp_parser::ast::{
 use crate::{
     collect::{DeclarationNode, MemberNode, NamespaceNode, TypeNode},
     error::{SemanticError, SemanticErrorKind},
-    external::ExternalTypes,
+    external::{ExternalTypeKind, ExternalTypes},
     merge::Declarations,
     symbol::{FileId, SymbolId, SymbolKind, SyntaxRef},
     types::{
@@ -524,11 +524,126 @@ impl<'ast> Resolver<'_, 'ast> {
             TypeRefBase::Name(name) => self.resolve_name_type(name, scopes, type_stack),
         };
 
-        let resolved = apply_suffixes(base, node.suffixes);
+        // `T?` on a type parameter without a `struct` constraint is `T` with
+        // a nullable annotation (C# 9, §8.?): `default` may come back, but
+        // there is no `Nullable<T>` — `int` when `T` is `int`, not `int?`.
+        // Only `where T : struct` makes it `Nullable<T>`.
+        let mut suffixes = node.suffixes;
+        if let Type::TypeParameter(parameter) = &base
+            && let Some(TypeSuffix::Nullable { .. }) = suffixes.first()
+            && !self.has_struct_constraint(*parameter)
+        {
+            suffixes = &suffixes[1..];
+        }
+
+        let resolved = self.without_reference_annotations(apply_suffixes(base, suffixes));
         self.out
             .type_of
             .insert(EntityID::from(node), resolved.clone());
         resolved
+    }
+
+    /// `string?`, `Foo?`, `int[]?`: a nullable annotation on a reference
+    /// type names the same type — it exists for the C# compiler's flow
+    /// analysis, which is not this compiler's job (Unity and the IDE report
+    /// those warnings). Dropped here so that every later phase sees the
+    /// plain type; a `?` on a value type stays and means `Nullable<T>`.
+    fn without_reference_annotations(&self, ty: Type) -> Type {
+        match ty {
+            Type::Nullable(inner) => {
+                let inner = self.without_reference_annotations(*inner);
+                if self.is_reference_type(&inner) {
+                    inner
+                } else {
+                    Type::Nullable(Box::new(inner))
+                }
+            }
+            Type::Array { element, rank } => Type::Array {
+                element: Box::new(self.without_reference_annotations(*element)),
+                rank,
+            },
+            Type::Pointer(inner) => {
+                Type::Pointer(Box::new(self.without_reference_annotations(*inner)))
+            }
+            Type::ByRef { readonly, element } => Type::ByRef {
+                readonly,
+                element: Box::new(self.without_reference_annotations(*element)),
+            },
+            Type::Named { target, arguments } => Type::Named {
+                target,
+                arguments: arguments
+                    .into_iter()
+                    .map(|argument| self.without_reference_annotations(argument))
+                    .collect(),
+            },
+            Type::Tuple(elements) => Type::Tuple(
+                elements
+                    .into_iter()
+                    .map(|element| TupleElement {
+                        name: element.name,
+                        element: self.without_reference_annotations(element.element),
+                    })
+                    .collect(),
+            ),
+            other => other,
+        }
+    }
+
+    fn is_reference_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Array { .. } | Type::Dynamic | Type::Null => true,
+            Type::Named {
+                target: TypeTarget::Source(symbol),
+                ..
+            } => matches!(
+                self.declarations.table.symbol(*symbol).kind,
+                SymbolKind::Class
+                    | SymbolKind::Interface
+                    | SymbolKind::Record
+                    | SymbolKind::Delegate
+            ),
+            Type::Named {
+                target: TypeTarget::External(id),
+                ..
+            } => matches!(
+                self.external.type_info(*id).kind,
+                ExternalTypeKind::Class | ExternalTypeKind::Interface | ExternalTypeKind::Delegate
+            ),
+            _ => false,
+        }
+    }
+
+    /// Is this type parameter declared `where T : struct`? Read off the
+    /// syntax, since constraints are resolved after the signatures that
+    /// mention the parameter.
+    fn has_struct_constraint(&self, parameter: SymbolId) -> bool {
+        let entry = self.declarations.table.symbol(parameter);
+        let Some(owner) = entry.parent else {
+            return false;
+        };
+        self.declarations
+            .table
+            .symbol(owner)
+            .declarations
+            .iter()
+            .flat_map(|site| match &site.syntax {
+                SyntaxRef::Class(declaration) => declaration.constraints,
+                SyntaxRef::Method(declaration) => declaration.constraints,
+                SyntaxRef::Delegate(declaration) => declaration.constraints,
+                _ => &[],
+            })
+            .filter(|constraint| {
+                constraint
+                    .target
+                    .as_ref()
+                    .is_ok_and(|target| target.value == entry.name)
+            })
+            .any(|constraint| {
+                constraint
+                    .bounds
+                    .iter()
+                    .any(|bound| matches!(bound, ConstraintBound::Struct { .. }))
+            })
     }
 
     pub(crate) fn resolve_predefined(&mut self, predefined: &Spanned<PredefinedType>) -> Type {
