@@ -68,6 +68,12 @@ pub struct BodyCheck {
     /// What each name/call/member node *bound to* — the code generator's map
     /// from syntax to program elements.
     pub targets: HashMap<EntityID, ResolvedTarget>,
+    /// The attributes on fields and properties that name a class of the
+    /// compilation's own, keyed by the attribute node: the class, with the
+    /// construction it stands for recorded in `targets` under the same key
+    /// (when the class declares constructors). What `Reflect.VisitFields`
+    /// builds a `FieldInfo`'s attributes from.
+    pub attribute_types: HashMap<EntityID, Type>,
     /// For every `foreach` that walks a collection by the enumerator pattern
     /// (anything but an array or a string), the three members it bound to.
     /// Keyed by the statement node.
@@ -121,6 +127,7 @@ impl BodyCheck {
         self.expression_types.extend(other.expression_types);
         self.resolved_types.extend(other.resolved_types);
         self.targets.extend(other.targets);
+        self.attribute_types.extend(other.attribute_types);
         self.enumerations.extend(other.enumerations);
         self.constructor_chains.extend(other.constructor_chains);
         self.errors.extend(other.errors);
@@ -327,6 +334,7 @@ pub fn check_file(
         local_order: 0,
         local_function_order: HashMap::new(),
         expression_types: HashMap::new(),
+        attribute_types: HashMap::new(),
         targets: HashMap::new(),
         pattern_inputs: HashMap::new(),
         enumerations: HashMap::new(),
@@ -374,6 +382,7 @@ pub fn check_file(
         expression_types: checker.expression_types,
         resolved_types: checker.resolver.out.type_of,
         targets: checker.targets,
+        attribute_types: checker.attribute_types,
         enumerations: checker.enumerations,
         constructor_chains: checker.constructor_chains,
         errors: checker.resolver.out.errors,
@@ -568,6 +577,8 @@ struct Checker<'a, 'ast> {
     local_function_order: HashMap<EntityID, usize>,
     expression_types: HashMap<EntityID, Type>,
     targets: HashMap<EntityID, ResolvedTarget>,
+    /// See [`BodyCheck::attribute_types`].
+    attribute_types: HashMap<EntityID, Type>,
     /// The type each pattern was matched against, for the exhaustiveness
     /// check (see `exhaustive.rs`).
     pattern_inputs: HashMap<EntityID, Type>,
@@ -1950,7 +1961,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 .find(|candidate| matches!(candidate.origin, MemberOrigin::Source(id) if id == member))
                 .and_then(|candidate| candidate.signature);
             let implemented =
-                self.implementation_of(&self_type, &contract, name, kind, wanted.as_ref());
+                self.implementation_of(&self_type, &contract, member, name, kind, wanted.as_ref());
             if !implemented {
                 let kind = SemanticErrorKind::MissingImplementation {
                     type_name: self.describe(&self_type),
@@ -1967,11 +1978,22 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         &self,
         ty: &Type,
         contract: &Type,
+        contract_member: SymbolId,
         name: &str,
         kind: SymbolKind,
         wanted: Option<&MemberSignature>,
     ) -> bool {
         let system = self.system();
+        // a generic method's type parameters are symbols of its own: the
+        // contract's `Visit<TField>(ref TField)` and an implementation's
+        // `Visit<F>(ref F)` compare equal once `F` is read as `TField`
+        let contract_parameters = self
+            .resolver
+            .declarations
+            .table
+            .symbol(contract_member)
+            .type_parameters
+            .clone();
         let mut candidates = system.members_named(ty, name);
         // explicit implementations are hidden from ordinary lookup — and
         // implement exactly the interface they name, no other contract
@@ -2047,7 +2069,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 return false;
             }
             let fits = match (wanted, &candidate.signature) {
-                (Some(wanted), Some(found)) => wanted == found,
+                (Some(wanted), Some(found)) => {
+                    wanted == found
+                        || (candidate.arity as usize == contract_parameters.len()
+                            && candidate.arity > 0
+                            && matches!(candidate.origin, MemberOrigin::Source(id)
+                                if self.renamed_type_parameters(found, id, &contract_parameters)
+                                    == *wanted))
+                }
                 (None, _) => true,
                 _ => false,
             };
@@ -2058,6 +2087,31 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 MemberOrigin::Source(id) => !self.is_bodiless_member(id),
                 MemberOrigin::External { .. } | MemberOrigin::LocalFunction(_) => true,
             }
+        })
+    }
+
+    /// `signature` with the method's own type parameters read as
+    /// `parameters`, position by position.
+    fn renamed_type_parameters(
+        &self,
+        signature: &MemberSignature,
+        method: SymbolId,
+        parameters: &[SymbolId],
+    ) -> MemberSignature {
+        let own = &self
+            .resolver
+            .declarations
+            .table
+            .symbol(method)
+            .type_parameters;
+        signature.map(&|ty| match ty {
+            Type::TypeParameter(parameter) => own
+                .iter()
+                .position(|candidate| *candidate == parameter)
+                .and_then(|position| parameters.get(position))
+                .map(|renamed| Type::TypeParameter(*renamed))
+                .unwrap_or(Type::TypeParameter(parameter)),
+            other => other,
         })
     }
 
@@ -2232,6 +2286,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let Some(MemberSignature::Property(property_type)) = member_signature else {
                     return;
                 };
+                self.check_member_attributes(property.attributes, node.is_static);
                 self.check_accessors(&property.body, &property_type, &[], node.is_static);
                 if let Some(InitializerValue::Expression(initializer)) = &property.initializer {
                     let function = crate::types::FunctionSignature {
@@ -2270,6 +2325,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 let Some(MemberSignature::Field(field_type)) = member_signature else {
                     return;
                 };
+                // the attributes are the declaration's: checked once, with
+                // the first declarator, when `int a, b;` shares them
+                if std::ptr::eq(&field.declarators[0], declarator) {
+                    self.check_member_attributes(field.attributes, node.is_static);
+                }
                 match &declarator.initializer {
                     Some(InitializerValue::Expression(initializer)) => {
                         let function = crate::types::FunctionSignature {
@@ -2867,6 +2927,116 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             self.targets.remove(&node);
         }
         bound
+    }
+
+    /// The attributes written on a field or property, bound where they can
+    /// be: one whose name resolves to a class of the compilation's own is
+    /// checked as the construction `new A(args)` it stands for, and the
+    /// code generator builds that object for `Reflect.VisitFields`. Every
+    /// other spelling — the engine's, the SDK's, the ones only the Unity
+    /// side declares — is left alone, quietly: those are read by spelling
+    /// where they matter, and are not this phase's business.
+    fn check_member_attributes(
+        &mut self,
+        sections: &'ast [men_sharp_parser::ast::AttributeSection<'ast, 'ast>],
+        is_static: bool,
+    ) {
+        for section in sections {
+            for attribute in section.attributes {
+                let Some(ty) = self.attribute_class(&attribute.name) else {
+                    continue;
+                };
+                let node = EntityID::from(attribute);
+                let function = crate::types::FunctionSignature {
+                    return_type: Type::Void,
+                    parameters: Vec::new(),
+                };
+                let class = ty.clone();
+                self.enter_body(&function, &[], is_static, |checker| {
+                    let constructors: Vec<MemberCandidate> = checker
+                        .system()
+                        .members_named(&class, ".ctor")
+                        .into_iter()
+                        .filter(|candidate| {
+                            candidate.kind == SymbolKind::Constructor
+                                && !candidate.is_static
+                                && candidate.declaring_type == class
+                        })
+                        .collect();
+                    let arguments = attribute
+                        .arguments
+                        .as_ref()
+                        .map(|list| checker.check_arguments(list.arguments))
+                        .unwrap_or_default();
+                    if constructors.is_empty() {
+                        // the implicit parameterless constructor
+                        if !arguments.is_empty() {
+                            checker.error(
+                                SemanticErrorKind::NoMatchingOverload,
+                                attribute.span.clone(),
+                            );
+                        }
+                        return;
+                    }
+                    let receiver_display = checker.describe(&class);
+                    let group = MethodGroup {
+                        candidates: constructors,
+                        explicit_arguments: Vec::new(),
+                        via_type: false,
+                        name: ".ctor",
+                        receiver: None,
+                        allow_extensions: false,
+                        receiver_display,
+                        span: attribute.span.clone(),
+                    };
+                    checker.resolve_call(group, arguments, &attribute.span, Some(node));
+                });
+                self.attribute_types.insert(node, ty);
+            }
+        }
+    }
+
+    /// The class an attribute's name denotes, when it is one of the
+    /// compilation's own: `[JsonName]` finds `JsonName` or, as C# does,
+    /// `JsonNameAttribute`. Anything else is `None`, and leaves no error
+    /// behind — an unknown spelling is not a mistake here.
+    fn attribute_class(
+        &mut self,
+        name: &'ast men_sharp_parser::ast::TypeRef<'ast, 'ast>,
+    ) -> Option<Type> {
+        let before = self.resolver.out.errors.len();
+        let resolved = self.resolve_type(name);
+        let is_source_class = |ty: &Type| {
+            matches!(ty, Type::Named { target: TypeTarget::Source(symbol), .. }
+                if self.resolver.declarations.table.symbol(*symbol).kind == SymbolKind::Class)
+        };
+        if is_source_class(&resolved) {
+            return Some(resolved);
+        }
+        self.resolver.out.errors.truncate(before);
+        // `[JsonName]` for `class JsonNameAttribute`: a simple name with the
+        // conventional suffix. The spelling has to live as long as the
+        // syntax it stands in for; a handful of bytes per attribute, kept.
+        let men_sharp_parser::ast::TypeRefBase::Name(written) = &name.base else {
+            return None;
+        };
+        let [segment] = written.segments else {
+            return None;
+        };
+        if segment.generics.is_some() || !name.suffixes.is_empty() {
+            return None;
+        }
+        let suffixed: &'ast str =
+            Box::leak(format!("{}Attribute", segment.name.value).into_boxed_str());
+        let resolution = self.lookup_name(suffixed, 0, &segment.span);
+        self.resolver.out.errors.truncate(before);
+        match resolution {
+            Some(Resolution::Type { target, arguments }) => {
+                let ty = Type::Named { target, arguments };
+                is_source_class(&ty).then_some(ty)
+            }
+            _ => None,
+        }
     }
 
     fn check_pattern(&mut self, pattern: &'ast Pattern<'ast, 'ast>, matched: &Type) {

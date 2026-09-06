@@ -355,6 +355,10 @@ impl Compiler {
                 include_str!("../../../corlib/Comparers.cs"),
             ),
             SourceCode::new("corlib/Linq.cs", include_str!("../../../corlib/Linq.cs")),
+            SourceCode::new(
+                "corlib/Reflection.cs",
+                include_str!("../../../corlib/Reflection.cs"),
+            ),
             behaviour,
         ]
     }

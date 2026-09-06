@@ -18,6 +18,7 @@ public class MenSharpIntegrationTests
     private static readonly string[] ExpectedPrograms =
     {
         "Door",
+        "JsonVerify.VerifyJson",
         "MenSharpRuntimeCaller",
         "MenSharpRuntimeSmoke",
         "MenSharpRuntimeTarget",
@@ -49,6 +50,7 @@ public class MenSharpIntegrationTests
         "VerifyRemoteDoor",
         "VerifySequences",
         "VerifyString",
+        "VerifyStringLoad",
         "VerifyTarget",
         "VerifyTuple",
         "VerifyUdonSharp",

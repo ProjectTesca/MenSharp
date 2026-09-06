@@ -334,8 +334,14 @@ public static class MenSharpCompiler
         };
 
         using var process = Process.Start(info);
+        // both pipes drained at once: reading stdout to its end while stderr
+        // sits unread deadlocks as soon as the diagnostics outgrow the pipe
+        // buffer — the compiler blocks writing, this side blocks waiting for
+        // an EOF that never comes, and the editor hangs on a compile with
+        // many errors
+        System.Threading.Tasks.Task<string> stderrTask = process.StandardError.ReadToEndAsync();
         string stdout = process.StandardOutput.ReadToEnd();
-        string stderr = process.StandardError.ReadToEnd();
+        string stderr = stderrTask.Result;
         process.WaitForExit();
 
         LogDiagnostics(stderr);
@@ -469,6 +475,39 @@ public static class MenSharpCompiler
         yield return typeof(UdonSharp.UdonSharpBehaviour).Assembly.Location;
         // [NetworkCallable], NetworkEventTarget's users, VRC components
         yield return typeof(VRC.SDK3.UdonNetworkCalling.NetworkCallableAttribute).Assembly.Location;
+        // text in the world: TextMeshPro, uGUI and the engine modules behind
+        // them. Looked up by name — this assembly does not reference them,
+        // and a project without TextMeshPro simply compiles without it.
+        foreach (string name in new[]
+        {
+            "Unity.TextMeshPro",
+            "UnityEngine.UI",
+            "UnityEngine.UIModule",
+            "UnityEngine.TextRenderingModule",
+        })
+        {
+            string location = LoadedAssemblyLocation(name);
+            if (location != null)
+            {
+                yield return location;
+            }
+        }
+    }
+
+    /// The file of a loaded assembly, by its simple name; null when none is
+    /// loaded (or it lives in memory only).
+    private static string LoadedAssemblyLocation(string name)
+    {
+        foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            if (assembly.GetName().Name != name || assembly.IsDynamic)
+            {
+                continue;
+            }
+            string location = assembly.Location;
+            return string.IsNullOrEmpty(location) ? null : location;
+        }
+        return null;
     }
 
     /// Where the bundled compiler for this platform lives. Pure path

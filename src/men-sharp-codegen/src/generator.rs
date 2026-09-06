@@ -1659,6 +1659,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         });
     }
 
+    /// A lowering that gave up (`None`, `Piece::Error`) is only right when
+    /// an error says why — otherwise the code is silently missing from the
+    /// program, which is the one outcome this compiler must never produce.
+    /// `reported` is `self.errors.len()` from before the attempt; when
+    /// nothing was added since, this reports the gap itself.
+    fn ensure_error_reported(
+        &mut self,
+        ctx: &Ctx,
+        reported: usize,
+        span: Range<usize>,
+        what: &str,
+    ) {
+        if self.errors.len() == reported {
+            self.error(
+                ctx,
+                format!("internal: {what} could not be compiled, and no error was reported for it"),
+                span,
+            );
+        }
+    }
+
     fn find_symbol(&self, path: &[&str]) -> Option<SymbolId> {
         let mut current = self.declarations.table.root();
         for segment in path {
@@ -2015,6 +2036,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     fn int_constant(&mut self, value: i32) -> DataId {
         self.constant("SystemInt32", &value.to_string(), HeapInit::Int32(value))
+    }
+
+    /// The value of a slot that is a boolean *constant* of the pool — what
+    /// a compile-time answer (`typeof(T) == typeof(int)`, `Reflect.IsArray
+    /// <T>()`) lowers to, and what `if` settles a branch on. A temp holding
+    /// a boolean is not one, whatever it happens to be initialised with.
+    fn constant_boolean(&self, slot: DataId) -> Option<bool> {
+        let symbol = &self.program.data[slot.0];
+        match symbol.init {
+            HeapInit::Boolean(value) if symbol.name.starts_with("__const_") => Some(value),
+            _ => None,
+        }
     }
 
     fn temp(&mut self, udon_type: &str) -> DataId {
@@ -3200,6 +3233,7 @@ mod patterns;
 mod programs;
 mod records;
 mod rectangular;
+mod reflect;
 mod runtime;
 mod structs;
 mod tasks;

@@ -1,0 +1,7 @@
+[verify-json] 1 scalars: title=Night Market, version=3, ratio=0.75, open=True, kind=1, note=(null)
+[verify-json] 2 nested: owner=ann/7, tags=3 [a,b,c], scores=2 [10,20], players=2: bob/1 cy/2
+[verify-json] 3 optional: limit=(null), bonus=5, missing=default, ignored=99, secret=hidden, alias=42
+[verify-json] 4 round trip: {"title":"Night Market","version":3,"ratio":0.75,"open":true,"kind":1,"note":null,"owner":{"name":"ann","level":7},"tags":["a","b","c"],"scores":[10,20],"players":[{"name":"bob","level":1},{"name":"cy","level":2}],"limit":null,"bonus":5,"missing":0,"secret":"hidden","renamed":42,"where":{"x":1,"y":2}}
+[verify-json] 5 struct: where=(1,2) -> {"x":1,"y":2}
+[verify-json] 6 errors: $.owner.level: expected a number, found "seven" | $.players[1]: expected an object, found 5 | $: missing required key "title" | not JSON
+[verify-json] 7 exception: JsonException: $.version: expected a number, found true

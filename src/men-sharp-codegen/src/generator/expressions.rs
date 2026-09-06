@@ -246,11 +246,30 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn lower_if(&mut self, ctx: &mut Ctx<'ast>, statement: &'ast IfStatement<'ast, 'ast>) {
+        let condition = match &statement.condition {
+            Ok(condition) => self.lower_expression(ctx, condition),
+            Err(()) => None,
+        };
+        // a constant condition — `typeof(T) == typeof(int)`, `Reflect
+        // .IsArray<T>()` — settles the branch here, and the other branch is
+        // not lowered at all: generic code gets to name, in each arm, what
+        // exists only for some `T`, and only the arm for this `T` has to
+        // compile
+        if let Some(value) = condition
+            && let Some(taken) = self.constant_boolean(value)
+        {
+            if taken {
+                if let Ok(then_branch) = &statement.then_branch {
+                    self.lower_statement(ctx, then_branch);
+                }
+            } else if let Some(else_branch) = &statement.else_branch {
+                self.lower_statement(ctx, else_branch);
+            }
+            return;
+        }
         let else_label = self.fresh_label("if_else");
         let end_label = self.fresh_label("if_end");
-        if let Ok(condition) = &statement.condition
-            && let Some(value) = self.lower_expression(ctx, condition)
-        {
+        if let Some(value) = condition {
             self.program.code.push(Op::Push(value));
             self.program
                 .code
@@ -734,6 +753,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // a method group where a value is wanted: the checker
                 // recorded the method it converts to — a delegate to it
                 piece @ (Piece::Pending { .. } | Piece::Base { .. }) => {
+                    // `this` as a value inside a behaviour: the program has
+                    // no object of its own, but it does have an identity —
+                    // its UdonBehaviour, which is what a program reference
+                    // is at run time. `(IUdonEventReceiver)this`, `door =
+                    // this`, `list.Add(this)` all want that
+                    if primary.chain.is_empty()
+                        && matches!(primary.left, PrimaryLeft::This(_))
+                        && self.is_entry_member(ctx.key.symbol)
+                    {
+                        let ty = self.type_of(ctx, expression);
+                        let slot = self.self_behaviour_slot();
+                        let out = self.temp_for(&ty);
+                        self.copy(slot, out);
+                        return Some(out);
+                    }
                     let conversion = self.bodies.targets.get(&EntityID::from(*primary)).cloned();
                     match conversion {
                         Some(ResolvedTarget::Call(call)) => {
@@ -988,6 +1022,35 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         Some(out)
     }
 
+    /// The type a bare `typeof(X)` operand names (parentheses allowed),
+    /// as this instantiation sees it — `None` for any other expression.
+    fn typeof_operand(
+        &self,
+        ctx: &Ctx<'ast>,
+        expression: &'ast Expression<'ast, 'ast>,
+    ) -> Option<Type> {
+        let Expression::Primary(primary) = expression else {
+            return None;
+        };
+        if !primary.chain.is_empty() {
+            return None;
+        }
+        match &primary.left {
+            PrimaryLeft::Parenthesized { expression, .. } => self.typeof_operand(ctx, expression),
+            PrimaryLeft::Typeof {
+                target_type: Ok(target_type),
+                ..
+            } => {
+                let ty = self
+                    .bodies
+                    .resolved_types
+                    .get(&EntityID::from(target_type))?;
+                Some(self.substitute(ty, &ctx.key.bindings))
+            }
+            _ => None,
+        }
+    }
+
     fn lower_binary(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -997,10 +1060,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         use BinaryOperator::*;
 
         if matches!(binary.operator.value, LogicalAnd | LogicalOr) {
+            let left = self.lower_expression(ctx, &binary.left)?;
+            // a constant left side decides: `Reflect.IsArray<T>() && ...`
+            // is the right side or nothing, so what the right side names
+            // only has to exist for the `T` that gets there
+            if let Some(known) = self.constant_boolean(left) {
+                let decided = match binary.operator.value {
+                    LogicalAnd => !known,
+                    _ => known,
+                };
+                if decided {
+                    return Some(left);
+                }
+                return self.lower_expression(ctx, binary.right.as_ref().ok()?);
+            }
             let result = self.temp("SystemBoolean");
             let short_label = self.fresh_label("logic_short");
             let end_label = self.fresh_label("logic_end");
-            let left = self.lower_expression(ctx, &binary.left)?;
             self.copy(left, result);
             self.program.code.push(Op::Push(left));
             match binary.operator.value {
@@ -1039,6 +1115,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         if binary.operator.value == Coalesce {
             return self.lower_coalesce(ctx, binary, whole);
+        }
+
+        // `typeof(T) == typeof(int)`: both sides are types the compiler
+        // holds, so the comparison is a constant — and one that needs no
+        // `System.Type` on the VM, which a type of the compilation's own has
+        // none of
+        if matches!(binary.operator.value, Equal | NotEqual)
+            && let Some(left_type) = self.typeof_operand(ctx, &binary.left)
+            && let Ok(right_expression) = &binary.right
+            && let Some(right_type) = self.typeof_operand(ctx, right_expression)
+        {
+            let same = left_type == right_type;
+            let answer = if binary.operator.value == Equal {
+                same
+            } else {
+                !same
+            };
+            return Some(self.bool_constant(answer));
         }
 
         let left_type = self.type_of(ctx, &binary.left);
@@ -3416,13 +3510,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                                 }
                             },
                         );
+                        let reported = self.errors.len();
                         let lowered = match target {
                             Some(target) => self.owned_value_as(ctx, expression, &target),
                             None => self.owned_value(ctx, expression),
                         };
                         match lowered {
                             Some(value) => ordered[slot] = Some(value),
-                            None => return Piece::Error,
+                            None => {
+                                self.ensure_error_reported(
+                                    ctx,
+                                    reported,
+                                    expression.span(),
+                                    "this argument",
+                                );
+                                return Piece::Error;
+                            }
                         }
                     }
                     _ => {
@@ -3708,6 +3811,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if let Some(piece) =
                     self.try_comparers_intrinsic(ctx, call, symbol, &values, span.clone())
                 {
+                    return piece;
+                }
+                // ... and static reflection, answered for the type at hand
+                if let Some(piece) = self.try_reflect_intrinsic(
+                    ctx,
+                    call,
+                    symbol,
+                    &values,
+                    &source_by_ref,
+                    span.clone(),
+                ) {
                     return piece;
                 }
                 // calling into *another* behaviour: Udon has no cross-program

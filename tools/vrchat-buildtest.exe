@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+# VRChat SDK "Build & Test" on Linux.
+#
+# The SDK's Build & Test starts the VRChat client itself: on Windows it runs
+# VRChat.exe with `--url=create?...&url=file:///<the built world>`, and on
+# Linux it has nothing to run, so the build succeeds and the launch throws
+# "Cannot find the specified file". The SDK does let you point it at any
+# client executable (VRChat SDK > Settings > Installed Client Path), and this
+# script is one: it forwards the SDK's arguments to the Steam/Proton install
+# of VRChat, with the world's path spelled the way the Proton prefix sees the
+# Linux filesystem (`Z:` is `/`).
+#
+# Setup, once:
+#   1. chmod +x tools/vrchat-buildtest.exe
+#   2. Unity: VRChat SDK > Show Control Panel > Settings > Installed Client
+#      Path > Edit, pick this file (it is named .exe so the picker lists it).
+#   3. Tick "Force Non-VR" there unless you build for a headset.
+# Then Build & Test launches VRChat through Steam. Steam must be installed;
+# VRChat (app 438100) must have been run under Proton at least once.
+#
+# VRCHAT_BUILDTEST_DRY_RUN=1 prints the Steam command instead of running it.
+set -euo pipefail
+
+app_id="${VRCHAT_APP_ID:-438100}"
+prefix="${VRCHAT_PROTON_PREFIX:-$HOME/.local/share/Steam/steamapps/compatdata/$app_id/pfx}"
+# where the client keeps local test worlds on Windows
+# (%LocalAppData%Low\VRChat\VRChat\Worlds) — the SDK builds straight into it
+# there, and the client loads a `file:///` world from there. Under Proton
+# that folder lives in the prefix.
+worlds_dir="$prefix/drive_c/users/steamuser/AppData/LocalLow/VRChat/VRChat/Worlds"
+worlds_url='C%3a%5cusers%5csteamuser%5cAppData%5cLocalLow%5cVRChat%5cVRChat%5cWorlds%5c'
+
+args=()
+for argument in "$@"; do
+    # the SDK hands its flags over as one space-separated string; a path
+    # never contains a space (it is URL-escaped), so split on whitespace
+    for word in $argument; do
+        # `--url=create?...&url=file:///%2fhome%2f...vrcw`: the built world,
+        # its Linux path escaped. Copy it where the client expects local
+        # worlds and spell the path the way the SDK does on Windows
+        if [[ "$word" == *"url=file:///"* ]]; then
+            head="${word%%url=file:///*}"
+            escaped="${word#*url=file:///}"
+            decoded="$(python3 -c 'import sys, urllib.parse; print(urllib.parse.unquote(sys.argv[1]))' "$escaped")"
+            if [[ -f "$decoded" ]]; then
+                mkdir -p "$worlds_dir"
+                cp -f "$decoded" "$worlds_dir/"
+                word="${head}url=file:///${worlds_url}$(basename "$decoded")"
+            else
+                echo "vrchat-buildtest: built world not found: $decoded" >&2
+            fi
+        fi
+        args+=("$word")
+    done
+done
+
+if [[ "${VRCHAT_BUILDTEST_DRY_RUN:-}" == "1" ]]; then
+    printf 'steam -applaunch %s' "$app_id"
+    printf ' %q' "${args[@]}"
+    printf '\n'
+    exit 0
+fi
+
+exec steam -applaunch "$app_id" "${args[@]}"

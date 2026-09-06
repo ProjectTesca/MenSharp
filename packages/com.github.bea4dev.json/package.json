@@ -1,0 +1,12 @@
+{
+  "name": "com.github.bea4dev.json",
+  "displayName": "JSON",
+  "version": "0.1.0",
+  "unity": "2022.3",
+  "description": "",
+  "author": { "name": "bea4dev" },
+  "vpmDependencies": {
+    "com.projecttesca.mensharp": "^0.1.0",
+    "com.vrchat.worlds": ">=3.5.0"
+  }
+}

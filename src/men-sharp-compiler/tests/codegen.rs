@@ -10014,3 +10014,328 @@ fn compiling_the_same_program_twice_gives_the_same_text() {
     assert_eq!(texts[0], texts[1]);
     assert_eq!(texts[1], texts[2]);
 }
+
+// ------------------------------------------------------------ reflection
+
+#[test]
+fn typeof_comparisons_and_reflect_queries_settle_branches_at_compile_time() {
+    let Some(emulator) = run(
+        r#"
+        using MenSharp.Reflection;
+        namespace Game
+        {
+            public class Point { public int x; }
+            public enum Colour { Red, Green }
+            public class Program
+            {
+                public static string kinds;
+                public static string logic;
+
+                static string Kind<T>()
+                {
+                    if (typeof(T) == typeof(int)) return "int";
+                    else if (typeof(T) == typeof(string)) return "string";
+                    else if (Reflect.IsArray<T>()) return "array";
+                    else if (Reflect.IsList<T>()) return "list";
+                    else if (Reflect.IsNullable<T>()) return "nullable";
+                    else if (Reflect.IsEnum<T>()) return "enum";
+                    else if (Reflect.IsObject<T>()) return "object";
+                    else return "other";
+                }
+
+                static string Same<T, U>()
+                {
+                    // the other arm names nothing this T can do: it must not be lowered
+                    if (Reflect.Is<T, U>() && typeof(T) != typeof(float)) return "same";
+                    if (typeof(T) != typeof(U) || Reflect.Is<T, U>()) return "different";
+                    return "unreachable";
+                }
+
+                public static void Main()
+                {
+                    kinds = Kind<int>() + "," + Kind<string>() + "," + Kind<int[]>() + ","
+                        + Kind<System.Collections.Generic.List<int>>() + "," + Kind<int?>() + ","
+                        + Kind<Colour>() + "," + Kind<Point>() + "," + Kind<float>();
+                    logic = Same<int, int>() + "," + Same<int, string>();
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "kinds"),
+        "int,string,array,list,nullable,enum,object,other"
+    );
+    assert_eq!(string_of(&emulator, "logic"), "same,different");
+}
+
+#[test]
+fn reflect_visit_fields_walks_every_slot_with_its_static_type() {
+    let Some(emulator) = run(
+        r#"
+        using MenSharp.Reflection;
+        namespace Game
+        {
+            public class JsonNameAttribute : System.Attribute
+            {
+                public string Name;
+                public JsonNameAttribute(string name) { Name = name; }
+            }
+            public class Tagged : System.Attribute { }
+
+            public class Being { public string name = "ann"; }
+            public class Player : Being
+            {
+                [JsonName("hp")] public int health = 3;
+                private float speed = 1.5f;
+                [Tagged] public int[] scores = new int[] { 1, 2 };
+                public int Level { get; set; } = 7;
+                public float Speed => speed;
+            }
+
+            public class Doubler : IFieldVisitor
+            {
+                public string seen = "";
+                public void Visit<F>(FieldInfo field, ref F value)
+                {
+                    seen += field.Name + (field.IsPublic ? "+" : "-");
+                    var alias = field.Attribute<JsonNameAttribute>();
+                    if (alias != null) seen += "(" + alias.Name + ")";
+                    if (field.Has<Tagged>()) seen += "*";
+                    seen += ":" + Program.Kind<F>() + ";";
+                    if (typeof(F) == typeof(int))
+                    {
+                        int doubled = (int)(object)value * 2;
+                        value = (F)(object)doubled;
+                    }
+                    else if (typeof(F) == typeof(string))
+                    {
+                        value = (F)(object)((string)(object)value + "!");
+                    }
+                }
+            }
+
+            public class Program
+            {
+                public static string seen;
+                public static string name;
+                public static int health;
+                public static int level;
+                public static int scores;
+
+                public static string Kind<T>()
+                {
+                    if (typeof(T) == typeof(int)) return "int";
+                    else if (typeof(T) == typeof(string)) return "string";
+                    else if (typeof(T) == typeof(float)) return "float";
+                    else if (Reflect.IsArray<T>()) return "array";
+                    else return "other";
+                }
+
+                public static void Main()
+                {
+                    var player = new Player();
+                    var doubler = new Doubler();
+                    Reflect.VisitFields(ref player, doubler);
+                    seen = doubler.seen;
+                    name = player.name;
+                    health = player.health;
+                    level = player.Level;
+                    scores = player.scores.Length;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "seen"),
+        "name+:string;health+(hp):int;speed-:float;scores+*:array;Level+:int;"
+    );
+    assert_eq!(string_of(&emulator, "name"), "ann!");
+    assert_eq!(int_of(&emulator, "health"), 6);
+    assert_eq!(int_of(&emulator, "level"), 14);
+    assert_eq!(int_of(&emulator, "scores"), 2);
+}
+
+#[test]
+fn reflect_new_and_element_types_and_struct_targets() {
+    let Some(emulator) = run(
+        r#"
+        using MenSharp.Reflection;
+        namespace Game
+        {
+            public struct Vec { public int x; public int y; }
+            public class Named { public string label = "n"; public Named() { label += "!"; } }
+            public record Pair(int Left, string Right);
+
+            public class Setter : IFieldVisitor
+            {
+                public void Visit<F>(FieldInfo field, ref F value)
+                {
+                    if (typeof(F) == typeof(int)) value = (F)(object)41;
+                }
+            }
+
+            public class Names : IFieldVisitor
+            {
+                public string seen = "";
+                public void Visit<F>(FieldInfo field, ref F value) { seen += field.Name + ","; }
+            }
+
+            public class ElementKind : ITypeVisitor
+            {
+                public string kind = "";
+                public void Visit<E>() { kind += Program.Kind<E>() + ","; }
+            }
+
+            public class Program
+            {
+                public static int x;
+                public static int y;
+                public static string label;
+                public static string elements;
+                public static string pair;
+
+                public static string Kind<T>()
+                {
+                    if (typeof(T) == typeof(int)) return "int";
+                    else if (typeof(T) == typeof(string)) return "string";
+                    else if (Reflect.IsObject<T>()) return "object";
+                    else return "other";
+                }
+
+                public static void Main()
+                {
+                    var vec = Reflect.New<Vec>();
+                    vec.y = 1;
+                    Reflect.VisitFields(ref vec, new Setter());
+                    x = vec.x;
+                    y = vec.y;
+                    label = Reflect.New<Named>().label;
+
+                    var kinds = new ElementKind();
+                    Reflect.VisitElementType<int[], ElementKind>(kinds);
+                    Reflect.VisitElementType<System.Collections.Generic.List<string>, ElementKind>(kinds);
+                    Reflect.VisitElementType<int?, ElementKind>(kinds);
+                    Reflect.VisitElementType<Named[], ElementKind>(kinds);
+                    elements = kinds.kind;
+
+                    var names = new Names();
+                    var record = new Pair(1, "r");
+                    Reflect.VisitFields(ref record, names);
+                    pair = names.seen;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "x"), 41);
+    assert_eq!(int_of(&emulator, "y"), 41);
+    assert_eq!(string_of(&emulator, "label"), "n!");
+    assert_eq!(string_of(&emulator, "elements"), "int,string,int,object,");
+    assert_eq!(string_of(&emulator, "pair"), "Left,Right,");
+}
+
+#[test]
+fn reflect_reports_what_it_cannot_answer_at_compile_time() {
+    let Some((_, messages)) = codegen_errors(
+        r#"
+        using MenSharp.Reflection;
+        namespace Game
+        {
+            public class Named { public Named(string name) { } }
+            public class Nothing : IFieldVisitor
+            {
+                public void Visit<F>(FieldInfo field, ref F value) { }
+            }
+            public class Program
+            {
+                static void Describe<T>()
+                {
+                    if (typeof(T) == typeof(int)) { }
+                    else { Reflect.Unsupported<T>("Describe"); }
+                }
+                public static void Main()
+                {
+                    Describe<int>();
+                    Describe<string>();
+                    string text = "x";
+                    Reflect.VisitFields(ref text, new Nothing());
+                    Reflect.New<Named>();
+                    Reflect.New<int>();
+                }
+            }
+        }
+        "#,
+    ) else {
+        return;
+    };
+    let joined = messages.join("\n");
+    assert!(
+        joined.contains("`Describe` does not support `string`"),
+        "{joined}"
+    );
+    assert!(!joined.contains("does not support `int`"), "{joined}");
+    assert!(
+        joined.contains(
+            "`Reflect.VisitFields` walks the fields of a class, struct or record written in M#; `string` is not one"
+        ),
+        "{joined}"
+    );
+    assert!(
+        joined.contains("`Reflect.New<Game.Named>` needs a parameterless constructor"),
+        "{joined}"
+    );
+    assert!(
+        joined.contains(
+            "`Reflect.New` creates a class, struct or record written in M#; `int` is not one"
+        ),
+        "{joined}"
+    );
+}
+
+#[test]
+fn this_inside_a_behaviour_is_its_own_udon_behaviour() {
+    // a behaviour has no object of its own, but `this` as a value is the
+    // program's UdonBehaviour — what `(IUdonEventReceiver)this` hands the SDK.
+    // A call with such an argument used to be dropped without a word.
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour
+            {
+                public object self;
+                public object taken;
+                public void Interact()
+                {
+                    self = this;
+                    Take((object)this);
+                }
+                private void Take(object door) { taken = door; }
+            }
+        }
+        "#,
+        "Game.Door",
+        "_interact",
+    ) else {
+        return;
+    };
+    for name in ["self", "taken"] {
+        assert!(
+            matches!(emulator.value_of(name), Some(Value::SelfComponent(_))),
+            "{name} = {:?}",
+            emulator.value_of(name)
+        );
+    }
+}

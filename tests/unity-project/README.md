@@ -55,7 +55,8 @@ the test's own callback does not see. Both remain manual.
 ```
 
 The script builds the compiler, stages the package into `Packages/`, links
-the SDK in, and runs Unity headless. It uses `UNITY_EDITOR` and
+in every package under the repository's `packages/` (the JSON package the
+`VerifyJson` fixture exercises) and the SDK, and runs Unity headless. It uses `UNITY_EDITOR` and
 `MENSHARP_VRC_PROJECT` when set; otherwise it looks for Unity 2022.3.22f1
 under Unity Hub's default location and borrows the SDK packages from
 `~/ALCOM/Projects/MenSharpTest` by symlink. With `vrc-get` installed the

@@ -146,6 +146,13 @@ public class MenSharpVerifyFixtureTests
         },
         new Fixture { Type = "UnionVerify.VerifyUnion" },
         new Fixture { Type = "VerifyWake", Timeout = 3f },
+        new Fixture { Type = "JsonVerify.VerifyJson" },
+        new Fixture
+        {
+            Type = "VerifyStringLoad",
+            Setup = self => MenSharpTestScene.Assign(
+                MenSharpTestScene.Proxy(self, "VerifyStringLoad"), "url", new VRC.SDKBase.VRCUrl("not a url")),
+        },
     };
 
     /// Objects the fixtures refer to that are not fixtures themselves.
