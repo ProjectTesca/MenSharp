@@ -416,15 +416,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             // a user-declared operator is a static method with a symbol for a name
             (Role::Method, Some(SyntaxRef::Operator(declaration))) => {
-                if declaration.conversion.is_some() {
-                    self.error(
-                        &ctx,
-                        "conversion operators (`implicit operator` / `explicit operator`) are \
-                         not supported by the Udon backend yet",
-                        declaration.span.clone(),
-                    );
-                    return;
-                }
                 self.bind_parameters(
                     &mut ctx,
                     declaration
@@ -496,10 +487,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
         }
         let arguments = self
-            .declarations
-            .table
-            .symbol(class)
-            .type_parameters
+            .type_parameter_chain(class)
             .iter()
             .map(|parameter| self.substitute(&Type::TypeParameter(*parameter), &key.bindings))
             .collect();
@@ -778,7 +766,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 else {
                     return;
                 };
-                let parameters = &self.declarations.table.symbol(*class).type_parameters;
+                let parameters = self.type_parameter_chain(*class);
                 let bindings = parameters
                     .iter()
                     .copied()
@@ -939,7 +927,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             arguments,
         } = declaring_type
         {
-            let parameters = &self.declarations.table.symbol(*class).type_parameters;
+            let parameters = self.type_parameter_chain(*class);
             for (parameter, argument) in parameters.iter().zip(arguments) {
                 bindings.push((*parameter, self.substitute(argument, &ctx.key.bindings)));
             }
@@ -1039,10 +1027,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
         }
         let arguments = self
-            .declarations
-            .table
-            .symbol(owner)
-            .type_parameters
+            .type_parameter_chain(owner)
             .iter()
             .map(|parameter| self.substitute(&Type::TypeParameter(*parameter), bindings))
             .collect();
@@ -1296,7 +1281,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     target: TypeTarget::Source(class),
                     arguments,
                 } => {
-                    let parameters = &self.declarations.table.symbol(*class).type_parameters;
+                    let parameters = self.type_parameter_chain(*class);
                     parameters
                         .iter()
                         .copied()
@@ -1393,12 +1378,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     target: TypeTarget::Source(symbol),
                     arguments,
                 } => generator
-                    .declarations
-                    .table
-                    .symbol(*symbol)
-                    .type_parameters
-                    .iter()
-                    .copied()
+                    .type_parameter_chain(*symbol)
+                    .into_iter()
                     .zip(arguments.iter().cloned())
                     .collect(),
                 _ => Vec::new(),
@@ -1549,10 +1530,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 break;
             };
             let entry = self.declarations.table.symbol(*class);
-            let bindings: Vec<(SymbolId, Type)> = entry
-                .type_parameters
-                .iter()
-                .copied()
+            let bindings: Vec<(SymbolId, Type)> = self
+                .type_parameter_chain(*class)
+                .into_iter()
                 .zip(arguments.iter().cloned())
                 .collect();
             for &member in &entry.members {
@@ -1626,11 +1606,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         else {
             return false;
         };
-        let entry = self.declarations.table.symbol(*symbol);
-        let bindings: Vec<(SymbolId, Type)> = entry
-            .type_parameters
-            .iter()
-            .copied()
+        let bindings: Vec<(SymbolId, Type)> = self
+            .type_parameter_chain(*symbol)
+            .into_iter()
             .zip(arguments.iter().cloned())
             .collect();
         let base = self

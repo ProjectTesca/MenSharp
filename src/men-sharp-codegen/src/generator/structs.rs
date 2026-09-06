@@ -40,12 +40,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         else {
             return Vec::new();
         };
-        self.declarations
-            .table
-            .symbol(*symbol)
-            .type_parameters
-            .iter()
-            .copied()
+        self.type_parameter_chain(*symbol)
+            .into_iter()
             .zip(arguments.iter().cloned())
             .collect()
     }

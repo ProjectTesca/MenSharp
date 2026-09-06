@@ -413,8 +413,10 @@ Operators you declare (`public static V operator +(V a, V b)`, unary `-` and
 used by the plain operator syntax, by compound assignment (`v += w`) and by
 `x++`. `==` on a class with its own operator calls that operator, `null`
 included, as C# does; a comparison operator without its partner is the C#
-error (CS0216). Conversion operators (`implicit operator`) are not supported
-yet.
+error (CS0216). An `implicit operator` you declare applies wherever C# would
+apply it — assignment, `return`, an argument — including on a generic class
+(`Result<T, E>` converts from `OkValue<T>` this way); `explicit operator` is
+not supported yet.
 
 Casts, `is` and `as` test the runtime type, and `is` takes the C# patterns:
 
@@ -1325,8 +1327,107 @@ float y = v[1];                    // engine structs index too
 v[1] = 9f;
 ```
 
-A conversion operator *written in your own code* (`implicit operator`) is
-still an error; these are the ones the engine and SDK already ship.
+Conversion operators written in your own code work the same way (see
+*Operators*); these are the ones the engine and SDK already ship.
+
+## The std: Result, Option, Json, Http and Reflection
+
+Besides the C# library types it re-implements (`List<T>`, `Dictionary<K, V>`,
+LINQ, `Task`), MenSharp ships a small standard library of its own in the
+`MenSharp` namespaces. It is compiled into your program only where you use
+it, and every part of it is plain C# that Unity's compiler accepts too.
+
+### Result<T, E> and Option<T>
+
+Udon halts a behaviour for good on an unhandled exception, so the things
+that fail as a matter of course return an outcome instead of throwing.
+`Result<T, E>` is a `[Union]` of `Ok` and `Err` (`Result<int, string>.Ok`
+is a nested type of it), `Option<T>` one of `Some` and `None`:
+
+```csharp
+using MenSharp;
+using static MenSharp.Result;          // Ok(...) / Err(...) by bare name
+
+Result<int, string> Parse(string text)
+{
+    int value;
+    if (!int.TryParse(text, out value)) return Err("not a number: " + text);
+    return Ok(value);                   // the E comes from the return type
+}
+
+Result<int, string> r = Parse(input);
+r.Switch(v => Debug.Log(v), e => Debug.LogWarning(e));   // one of two actions
+int doubled = r.Match(v => v * 2, e => -1);                // one of two answers
+if (r.TryGet(out var v, out var e)) { ... }                // the out form
+r.Map(v => v + 1); r.AndThen(v => Parse(...)); r.UnwrapOr(0); r.IsOk;
+switch (r)                                                 // the exhaustive form
+{
+    case Result<int, string>.Ok(var v): ...; break;
+    case Result<int, string>.Err(var e): ...; break;
+}
+```
+
+`Ok(x)` and `Err(e)` are the static methods `Result.Ok<T>` / `Result.Err<E>`
+brought into scope by `using static`; they build an `OkValue<T>` /
+`ErrValue<E>` that the implicit conversion on `Result<T, E>` completes, so
+the type arguments never have to be written. `Option.Some(x)` / `Option.None`
+work the same way.
+
+### Json
+
+`MenSharp.Json` binds JSON text to your own classes, structs and records,
+on top of the SDK's native `VRCJson`:
+
+```csharp
+using MenSharp.Json;
+
+public class Config { public string title; public float[] color; public Player[] players; }
+
+Result<Config, JsonError> parsed = Json.Parse<Config>(text);   // Err names the path: $.players[2].level
+string text = Json.Stringify(config);                          // or Stringify(config, true) to indent
+```
+
+Public fields and auto-properties map to keys of their own name; `[JsonName("key")]`
+renames one, `[JsonIgnore]` leaves one out, `[JsonInclude]` takes a non-public
+one in, `[JsonRequired]` fails when its key is missing. Supported types:
+`bool`, `int`, `long`, `float`, `double`, `string`, enums (as numbers), `T?`
+of those, arrays, `List<T>`, and your own types with a parameterless
+constructor. Anything else in a type you parse is a compile error naming it.
+
+### Http
+
+`MenSharp.Net.Http` is the SDK's string loading as something you `await`:
+
+```csharp
+using MenSharp.Net;
+
+public VRCUrl url;                      // set in the inspector, as the SDK requires
+
+public async void Interact()
+{
+    Result<Config, HttpError> loaded = await Http.GetJson<Config>(url);
+    loaded.Switch(Apply, error => label.text = error.ToString());   // "400: Invalid URL", "404: ..."
+}
+```
+
+`Http.GetString(url)` gives the raw text. The SDK's callbacks
+(`OnStringLoadSuccess` / `OnStringLoadError`) are exported into your program
+automatically; a behaviour that declares either itself takes it over and has
+to forward the result to `Http.__OnStringLoadSuccess` / `__OnStringLoadError`.
+The SDK's rules still apply: one request per five seconds, no redirects,
+and the player's trusted-domain list.
+
+### Reflection
+
+`MenSharp.Reflection` is static reflection: questions about a type argument
+answered while the program is compiled. `Reflect.VisitFields(ref value,
+visitor)` calls the visitor's `Visit<F>(FieldInfo, ref F)` once per field of
+`T` with `F` bound to that field's type; `Reflect.IsArray<T>()`,
+`IsList<T>()`, `IsNullable<T>()`, `IsEnum<T>()`, `IsObject<T>()` and
+`typeof(T) == typeof(int)` are constants, and an `if` on one compiles only
+the branch taken — which is how `Json` is written, and how you can write
+your own serializers and inspectors. `Reflect.Unsupported<T>("what")` turns
+the last `else` of such code into a compile error naming `T`.
 
 ## Structs
 
@@ -1355,7 +1456,7 @@ points — each copy is an allocation. Structs without their own
 Each of these is a compile error rather than a program that runs and does the
 wrong thing:
 
-- conversion operators (`implicit operator` / `explicit operator`);
+- explicit conversion operators (`explicit operator`);
 - static abstract/virtual interface members (C# 11 generic math);
 - static constructors of generic classes;
 - anonymous methods (`delegate { ... }`), engine methods as delegates,

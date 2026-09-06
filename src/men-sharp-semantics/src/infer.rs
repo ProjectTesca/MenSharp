@@ -458,10 +458,7 @@ fn unique_instantiation(system: &TypeSystem, ty: &Type, wanted: &TypeTarget) -> 
 fn variances_of(system: &TypeSystem, target: &TypeTarget, count: usize) -> Vec<TypeVariance> {
     let mut variances = match target {
         TypeTarget::Source(symbol) => system
-            .declarations
-            .table
-            .symbol(*symbol)
-            .type_parameters
+            .source_type_parameters(*symbol)
             .iter()
             .map(|&parameter| system.declarations.table.symbol(parameter).variance)
             .collect(),

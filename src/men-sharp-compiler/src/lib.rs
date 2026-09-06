@@ -310,10 +310,23 @@ impl Compiler {
             && external
                 .find_type(&["UnityEngine"], "Transform", 0)
                 .is_some();
-        Self::corlib_sources_with_unity(unity)
+        // the std's JSON and Http lean on the VRChat SDK: VRCJson and the
+        // string downloader. Without the SDK among the references they are
+        // left out, and a mention of them is an ordinary unknown name
+        let sdk = external
+            .find_type(&["VRC", "SDK3", "Data"], "VRCJson", 0)
+            .is_some()
+            && external
+                .find_type(&["VRC", "SDK3", "StringLoading"], "VRCStringDownloader", 0)
+                .is_some();
+        Self::corlib_sources_with(unity, sdk)
     }
 
     fn corlib_sources_with_unity(unity: bool) -> Vec<SourceCode> {
+        Self::corlib_sources_with(unity, false)
+    }
+
+    fn corlib_sources_with(unity: bool, sdk: bool) -> Vec<SourceCode> {
         // exactly one of the two behaviour base classes: they declare the
         // same type, so compiling both would be a duplicate definition
         let behaviour = if unity {
@@ -327,7 +340,7 @@ impl Compiler {
                 include_str!("../../../corlib/MenSharpBehaviour.cs"),
             )
         };
-        vec![
+        let mut sources = vec![
             SourceCode::new(
                 "corlib/Exception.cs",
                 include_str!("../../../corlib/Exception.cs"),
@@ -359,8 +372,23 @@ impl Compiler {
                 "corlib/Reflection.cs",
                 include_str!("../../../corlib/Reflection.cs"),
             ),
+            SourceCode::new(
+                "corlib/Result.cs",
+                include_str!("../../../corlib/Result.cs"),
+            ),
             behaviour,
-        ]
+        ];
+        if sdk {
+            sources.push(SourceCode::new(
+                "corlib/Json.cs",
+                include_str!("../../../corlib/Json.cs"),
+            ));
+            sources.push(SourceCode::new(
+                "corlib/Http.cs",
+                include_str!("../../../corlib/Http.cs"),
+            ));
+        }
+        sources
     }
 
     /// Lowers a fully checked compilation to one Udon program. `entry_path`

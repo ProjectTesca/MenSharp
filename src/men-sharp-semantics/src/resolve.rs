@@ -146,7 +146,8 @@ pub(crate) struct NamespaceScope<'ast> {
 pub(crate) enum ResolvedUsing<'ast> {
     /// `using A.B;`
     Namespace(Vec<&'ast str>),
-    /// `using static T;` — brings T's nested types (and later, members) into scope.
+    /// `using static T;` — brings T's nested types into scope here, and its
+    /// static members into the checker's bare-name lookup.
     Static(Resolution<'ast>),
     /// `using X = ...;`
     Alias {
@@ -179,6 +180,28 @@ pub(crate) struct Resolver<'a, 'ast> {
 }
 
 impl<'ast> Resolver<'_, 'ast> {
+    /// The type parameters of every type enclosing `nested`, outermost
+    /// first, each as itself — what a nested type's arguments start with
+    /// when it is named from inside its outer type.
+    pub(crate) fn enclosing_type_arguments(&self, nested: SymbolId) -> Vec<Type> {
+        let mut chain = Vec::new();
+        let mut current = self.declarations.table.symbol(nested).parent;
+        while let Some(id) = current {
+            let entry = self.declarations.table.symbol(id);
+            if entry.kind.is_type() {
+                chain.push(id);
+            }
+            current = entry.parent;
+        }
+        let mut arguments = Vec::new();
+        for &id in chain.iter().rev() {
+            for &parameter in &self.declarations.table.symbol(id).type_parameters {
+                arguments.push(Type::TypeParameter(parameter));
+            }
+        }
+        arguments
+    }
+
     pub(crate) fn error(&mut self, kind: SemanticErrorKind, span: Range<usize>) {
         self.error_with_hints(kind, span, Vec::new());
     }
@@ -809,12 +832,15 @@ impl<'ast> Resolver<'_, 'ast> {
             }
         }
 
-        // 2. nested types of the enclosing types, innermost first
+        // 2. nested types of the enclosing types, innermost first. A bare
+        // `Ok` inside `Result<T, E>` is `Result<T, E>.Ok`: the enclosing
+        // types' parameters travel with it, as the arguments of a nested
+        // type always lead with the outer's
         for &owner in type_stack.iter().rev() {
             if let Some(id) = self.source_type_in(owner, name, arity) {
                 return Some(Resolution::Type {
                     target: TypeTarget::Source(id),
-                    arguments: Vec::new(),
+                    arguments: self.enclosing_type_arguments(id),
                 });
             }
         }

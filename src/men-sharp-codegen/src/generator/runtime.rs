@@ -102,10 +102,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         else {
             return None;
         };
-        let parameters = &self.declarations.table.symbol(*symbol).type_parameters;
-        let bindings: Vec<(SymbolId, Type)> = parameters
-            .iter()
-            .copied()
+        let bindings: Vec<(SymbolId, Type)> = self
+            .type_parameter_chain(*symbol)
+            .into_iter()
             .zip(arguments.iter().cloned())
             .collect();
         let key = FunctionKey {
@@ -539,7 +538,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     target: TypeTarget::Source(class),
                     arguments,
                 } => {
-                    let parameters = &self.declarations.table.symbol(*class).type_parameters;
+                    let parameters = self.type_parameter_chain(*class);
                     parameters
                         .iter()
                         .copied()

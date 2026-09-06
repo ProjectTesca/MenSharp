@@ -1,0 +1,6 @@
+[verify-result] 1 switch: ok 42 / err nan x
+[verify-result] 2 match: 84 / -1
+[verify-result] 3 tryget: got 42 / failed nan x
+[verify-result] 4 combinators: Ok(43) / Err(5) / 7 / 9
+[verify-result] 5 patterns: case ok 42 / case err nan x / True True
+[verify-result] 6 option: Some(3) / None / 5 / Err(neg) / Some(20)

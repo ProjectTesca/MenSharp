@@ -881,6 +881,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     break;
                 }
             }
+            // the std's `Http` needs the SDK's string-loading events: added
+            // once a program compiles anything of it, then compiled like
+            // any other entry
+            if self.add_std_event_handlers(&mut entries, &mut claimed) {
+                continue;
+            }
             if !self.emit_dispatcher_bodies() && self.queue.is_empty() {
                 break;
             }
@@ -1680,6 +1686,84 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// The generic parameters a source type binds, enclosing types' first —
+    /// the order a `Type::Named`'s arguments come in, and so what a binding
+    /// list zips those arguments against. A type nested in a generic type
+    /// has the outer's parameters before its own.
+    pub(super) fn type_parameter_chain(&self, symbol: SymbolId) -> Vec<SymbolId> {
+        self.type_system().source_type_parameters(symbol)
+    }
+
+    /// The SDK callbacks the std's `MenSharp.Net.Http` lives on:
+    /// `_onStringLoadSuccess` / `_onStringLoadError`, raised by the string
+    /// downloader on the behaviour that asked. Exported into any program
+    /// that compiled a member of `Http`, bound to its handlers — unless the
+    /// behaviour declares the event itself, which then owns it (and must
+    /// forward, as `Http` documents). Whether anything was added.
+    fn add_std_event_handlers(
+        &mut self,
+        entries: &mut Vec<EventEntry>,
+        claimed: &mut HashSet<String>,
+    ) -> bool {
+        let Some(http) = self.find_symbol(&["MenSharp", "Net", "Http"]) else {
+            return false;
+        };
+        let uses_http = self
+            .functions
+            .keys()
+            .any(|key| self.declarations.table.symbol(key.symbol).parent == Some(http));
+        if !uses_http {
+            return false;
+        }
+        let mut added = false;
+        for (event, handler) in [
+            ("OnStringLoadSuccess", "__OnStringLoadSuccess"),
+            ("OnStringLoadError", "__OnStringLoadError"),
+        ] {
+            let name = udon_event_name(event);
+            if claimed.contains(&name) {
+                continue;
+            }
+            let Some(&method) = self
+                .declarations
+                .table
+                .symbol(http)
+                .members_named(handler)
+                .first()
+            else {
+                continue;
+            };
+            let Some(definition) = self.nodes.event(event).cloned() else {
+                continue;
+            };
+            let arguments = definition
+                .parameters
+                .iter()
+                .map(|parameter| EventArgument {
+                    slot: event_argument_slot(event, &parameter.name),
+                    udon_type: event_slot_type(&parameter.dotnet_type),
+                    write_back: false,
+                })
+                .collect();
+            let key = FunctionKey {
+                symbol: method,
+                role: Role::Method,
+                bindings: Vec::new(),
+            };
+            self.ensure_function(&key);
+            claimed.insert(name.clone());
+            entries.push(EventEntry {
+                name,
+                key,
+                arguments,
+                returns_value: false,
+                result_slot: None,
+            });
+            added = true;
+        }
+        added
+    }
+
     fn find_symbol(&self, path: &[&str]) -> Option<SymbolId> {
         let mut current = self.declarations.table.root();
         for segment in path {
@@ -2366,7 +2450,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         }
         let entry = self.declarations.table.symbol(symbol);
-        let type_parameters: Vec<SymbolId> = entry.type_parameters.to_vec();
+        let type_parameters: Vec<SymbolId> = self.type_parameter_chain(symbol);
         let members: Vec<SymbolId> = entry.members.to_vec();
 
         // base first, so inherited field indices stay valid in subclasses

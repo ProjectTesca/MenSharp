@@ -1,0 +1,3 @@
+[verify-http] 1 requesting
+[verify-http] 2 text: error 400: Invalid URL
+[verify-http] 3 json: Err(400: Invalid URL)

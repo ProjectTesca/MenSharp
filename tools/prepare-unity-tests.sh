@@ -37,12 +37,6 @@ mkdir -p "$mensharp/Compiler~"
 cp "$binary" "$mensharp/Compiler~/men-sharp-linux-x64"
 chmod +x "$mensharp/Compiler~/men-sharp-linux-x64"
 
-# the packages built on MenSharp that the fixtures exercise (VerifyJson):
-# linked, not copied, so an edit is picked up on the next run
-for extra in "$repo"/packages/*/; do
-    extra="${extra%/}"
-    ln -sfn "$extra" "$project/Packages/$(basename "$extra")"
-done
 
 if [[ "${MENSHARP_SKIP_VPM_RESOLVE:-}" == "1" ]]; then
     :

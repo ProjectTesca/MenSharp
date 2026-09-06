@@ -10339,3 +10339,262 @@ fn this_inside_a_behaviour_is_its_own_udon_behaviour() {
         );
     }
 }
+
+#[test]
+fn a_type_nested_in_a_generic_type_sees_the_outer_parameters() {
+    let Some(emulator) = run(
+        r#"
+        using MenSharp;
+        namespace Game
+        {
+            [Union] public abstract class Result<T, E>
+            {
+                public sealed class Ok : Result<T, E>
+                {
+                    public readonly T Value;
+                    public Ok(T value) { Value = value; }
+                }
+                public sealed class Err : Result<T, E>
+                {
+                    public readonly E Error;
+                    public Err(E error) { Error = error; }
+                }
+
+                // bare `Ok` here is `Result<T, E>.Ok`
+                public static Result<T, E> Success(T value) { return new Ok(value); }
+                public static Result<T, E> Failure(E error) { return new Err(error); }
+
+                public bool IsOk { get { return this is Ok; } }
+
+                public R Match<R>(System.Func<T, R> ok, System.Func<E, R> err)
+                {
+                    switch (this)
+                    {
+                        case Ok o: return ok(o.Value);
+                        case Err e: return err(e.Error);
+                    }
+                }
+            }
+
+            public class Program
+            {
+                public static string log = "";
+                static Result<int, string> Parse(string text)
+                {
+                    int value;
+                    if (int.TryParse(text, out value)) return Result<int, string>.Success(value);
+                    return new Result<int, string>.Err("not a number: " + text);
+                }
+                public static void Main()
+                {
+                    foreach (string text in new[] { "42", "x" })
+                    {
+                        Result<int, string> r = Parse(text);
+                        switch (r)
+                        {
+                            case Result<int, string>.Ok ok: log += "ok " + ok.Value + ";"; break;
+                            case Result<int, string>.Err err: log += "err " + err.Error + ";"; break;
+                        }
+                        log += r.IsOk + ";" + r.Match(v => v * 2, e => -1) + ";";
+                    }
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "log"),
+        "ok 42;True;84;err not a number: x;False;-1;"
+    );
+}
+
+#[test]
+fn implicit_conversion_operators_written_in_source_apply_at_conversion_sites() {
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public struct Meters
+            {
+                public int Value;
+                public Meters(int value) { Value = value; }
+                public static implicit operator Meters(int value) { return new Meters(value); }
+            }
+
+            public sealed class OkValue<T> { public readonly T Value; public OkValue(T value) { Value = value; } }
+            public sealed class ErrValue<E> { public readonly E Error; public ErrValue(E error) { Error = error; } }
+
+            public abstract class Result<T, E>
+            {
+                public sealed class Ok : Result<T, E> { public readonly T Value; public Ok(T value) { Value = value; } }
+                public sealed class Err : Result<T, E> { public readonly E Error; public Err(E error) { Error = error; } }
+                public static implicit operator Result<T, E>(OkValue<T> ok) { return new Ok(ok.Value); }
+                public static implicit operator Result<T, E>(ErrValue<E> err) { return new Err(err.Error); }
+                public string Show()
+                {
+                    switch (this)
+                    {
+                        case Ok ok: return "ok " + ok.Value;
+                        case Err err: return "err " + err.Error;
+                        default: return "?";
+                    }
+                }
+            }
+
+            public static class Result
+            {
+                public static OkValue<T> Ok<T>(T value) { return new OkValue<T>(value); }
+                public static ErrValue<E> Err<E>(E error) { return new ErrValue<E>(error); }
+            }
+
+            public class Program
+            {
+                public static string log = "";
+                static Result<int, string> Parse(string text)
+                {
+                    int value;
+                    if (int.TryParse(text, out value)) return Result.Ok(value);   // return site
+                    return Result.Err("nan " + text);
+                }
+                static string Describe(Result<int, string> r) { return r.Show(); }
+                static int Double(Meters m) { return m.Value * 2; }
+                public static void Main()
+                {
+                    Meters m = 21;                                         // assignment site
+                    Result<int, string> viaLocal = Result.Ok(7);
+                    log = Parse("42").Show() + ";" + Parse("x").Show() + ";" + viaLocal.Show() + ";"
+                        + Describe(Result.Err("arg")) + ";" + Double(5) + ";" + m.Value;   // argument site
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "log"),
+        "ok 42;err nan x;ok 7;err arg;10;21"
+    );
+}
+
+#[test]
+fn using_static_brings_a_types_static_members_into_scope() {
+    let Some(emulator) = run(
+        r#"
+        using static Game.Result;
+        using static Game.Numbers;
+        namespace Game
+        {
+            public sealed class OkValue<T> { public readonly T Value; public OkValue(T value) { Value = value; } }
+            public sealed class ErrValue<E> { public readonly E Error; public ErrValue(E error) { Error = error; } }
+            public abstract class Result<T, E>
+            {
+                public sealed class Ok : Result<T, E> { public readonly T Value; public Ok(T value) { Value = value; } }
+                public sealed class Err : Result<T, E> { public readonly E Error; public Err(E error) { Error = error; } }
+                public static implicit operator Result<T, E>(OkValue<T> ok) { return new Ok(ok.Value); }
+                public static implicit operator Result<T, E>(ErrValue<E> err) { return new Err(err.Error); }
+                public string Show()
+                {
+                    switch (this)
+                    {
+                        case Ok ok: return "ok " + ok.Value;
+                        case Err err: return "err " + err.Error;
+                        default: return "?";
+                    }
+                }
+            }
+            public static class Result
+            {
+                public static OkValue<T> Ok<T>(T value) { return new OkValue<T>(value); }
+                public static ErrValue<E> Err<E>(E error) { return new ErrValue<E>(error); }
+            }
+            public static class Numbers
+            {
+                public const int Limit = 100;
+                public static int Twice(int x) { return x * 2; }
+                public static int Twice(string x) { return x.Length * 2; }
+            }
+            public class Program
+            {
+                public static string log = "";
+                static Result<int, string> Parse(string text)
+                {
+                    int value;
+                    if (!int.TryParse(text, out value)) return Err("nan " + text);
+                    if (value > Limit) return Err("too big");
+                    return Ok(Twice(value));
+                }
+                public static void Main()
+                {
+                    log = Parse("21").Show() + ";" + Parse("x").Show() + ";" + Parse("500").Show() + ";" + Twice("abc");
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "log"), "ok 42;err nan x;err too big;6");
+}
+
+#[test]
+fn the_std_result_and_option_types_work_end_to_end() {
+    let Some(emulator) = run(
+        r#"
+        using MenSharp;
+        using static MenSharp.Result;
+        using static MenSharp.Option;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string log = "";
+                static Result<int, string> Parse(string text)
+                {
+                    int value;
+                    if (!int.TryParse(text, out value)) return Err("nan " + text);
+                    return Ok(value);
+                }
+                static Option<int> Positive(int value)
+                {
+                    if (value > 0) return Some(value);
+                    return None;
+                }
+                public static void Main()
+                {
+                    Result<int, string> good = Parse("42");
+                    Result<int, string> bad = Parse("x");
+                    good.Switch(v => log += "ok " + v + ";", e => log += "err " + e + ";");
+                    bad.Switch(v => log += "ok " + v + ";", e => log += "err " + e + ";");
+                    log += good.Match(v => v * 2, e => -1) + ";" + bad.Match(v => v * 2, e => -1) + ";";
+                    int value; string error;
+                    if (good.TryGet(out value, out error)) log += "got " + value + ";";
+                    if (!bad.TryGet(out value, out error)) log += "failed " + error + ";";
+                    log += good.Map(v => v + 1) + ";" + bad.MapError(e => e.Length) + ";";
+                    log += good.AndThen(v => Parse("7")).UnwrapOr(0) + ";" + bad.UnwrapOr(9) + ";";
+                    log += good.IsOk + "," + bad.IsErr + ";";
+                    switch (good)
+                    {
+                        case Result<int, string>.Ok(var v): log += "case ok " + v + ";"; break;
+                        case Result<int, string>.Err(var e): log += "case err " + e + ";"; break;
+                    }
+                    log += Positive(3) + ";" + Positive(-3) + ";" + Positive(5).UnwrapOr(0) + ";"
+                        + Positive(-1).OkOr("neg") + ";" + Positive(2).Map(v => v * 10);
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "log"),
+        "ok 42;err nan x;84;-1;got 42;failed nan x;Ok(43);Err(5);7;9;True,True;case ok 42;Some(3);None;5;Err(neg);Some(20)"
+    );
+}

@@ -140,12 +140,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 };
                 // the delegate's own type parameters bound to its arguments
                 let own: Vec<(SymbolId, Type)> = self
-                    .declarations
-                    .table
-                    .symbol(*symbol)
-                    .type_parameters
-                    .iter()
-                    .copied()
+                    .type_parameter_chain(*symbol)
+                    .into_iter()
                     .zip(arguments.iter().cloned())
                     .collect();
                 self.substitute_signature(signature, &own)

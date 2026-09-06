@@ -46,6 +46,7 @@ for assembly in \
     "$scripts/UdonSharp.Runtime.dll" \
     "$scripts/UdonSharp.Editor.dll" \
     "$worlds/Runtime/Udon/External/VRC.Udon.Common.dll" \
+    "$worlds/Runtime/Udon/External/VRC.Udon.ClientBindings.dll" \
     "$worlds/Editor/Udon/External/VRC.Udon.EditorBindings.dll" \
     "$worlds/Editor/Udon/External/VRC.Udon.UAssembly.dll" \
     "$worlds/Runtime/VRCSDK/Plugins/VRCSDK3.dll" \

@@ -991,8 +991,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    /// The `op_Implicit` extern that turns `from` into `to`, applied — with
+    /// The `op_Implicit` that turns `from` into `to`, applied — with
     /// whatever standard conversion the operator's parameter needs first.
+    /// An extern for an operator from metadata; a call for one written in
+    /// source (`implicit operator Result<T, E>(OkValue<T> ok)`), compiled
+    /// for the declaring type at hand like any other static method.
     fn convert_by_operator(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -1005,6 +1008,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         }
         let operator = self.type_system().implicit_conversion_operator(from, to)?;
+        if let Some(symbol) = operator.source {
+            let key = FunctionKey {
+                symbol,
+                role: Role::Method,
+                bindings: self.bindings_for(ctx, symbol, &operator.declaring_type, &[]),
+            };
+            let value = if operator.parameter_type == *from {
+                source
+            } else {
+                self.convert(ctx, source, from, &operator.parameter_type, span.clone())
+            };
+            // by value, as any struct argument
+            let value = if self.is_source_struct(&operator.parameter_type) {
+                self.clone_struct(ctx, value, &operator.parameter_type, span.clone())
+            } else {
+                value
+            };
+            return self.call_function(ctx, &key, None, &[value], &[], span.clone());
+        }
         let owner = self.extern_type_name(&operator.declaring_type)?;
         let parameter = self.extern_type_name(&operator.parameter_type)?;
         let result = self.extern_type_name(&operator.return_type)?;
@@ -4427,7 +4449,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         arguments: class_arguments,
                     } = &created
                     {
-                        let parameters = &self.declarations.table.symbol(*class).type_parameters;
+                        let parameters = self.type_parameter_chain(*class);
                         let bindings = parameters
                             .iter()
                             .copied()

@@ -1,5 +1,5 @@
-// MenSharp verification: the JSON package (com.github.bea4dev.json) —
-// Json.Parse<T> / Json.Stringify<T> over static reflection.
+// MenSharp verification: the std's MenSharp.Json — Json.Parse<T> (a Result)
+// and Json.Stringify<T> over static reflection.
 //
 // Setup: a Cube "VerifyJson" with this component. Play, click.
 //
@@ -10,11 +10,11 @@
 //   [verify-json] 4 round trip: {"title":"Night Market","version":3,"ratio":0.75,"open":true,"kind":1,"note":null,"owner":{"name":"ann","level":7},"tags":["a","b","c"],"scores":[10,20],"players":[{"name":"bob","level":1},{"name":"cy","level":2}],"limit":null,"bonus":5,"missing":0,"secret":"hidden","renamed":42,"where":{"x":1,"y":2}}
 //   [verify-json] 5 struct: where=(1,2) -> {"x":1,"y":2}
 //   [verify-json] 6 errors: $.owner.level: expected a number, found "seven" | $.players[1]: expected an object, found 5 | $: missing required key "title" | not JSON
-//   [verify-json] 7 exception: JsonException: $.version: expected a number, found true
+//   [verify-json] 7 result: Err($.version: expected a number, found true)
 
 using System.Collections.Generic;
-using Bea4dev.Json;
 using MenSharp;
+using MenSharp.Json;
 using UnityEngine;
 
 namespace JsonVerify
@@ -66,7 +66,7 @@ namespace JsonVerify
 
         public void Interact()
         {
-            Config config = Json.Parse<Config>(Text);
+            Config config = Json.Parse<Config>(Text).Unwrap();
             Debug.Log($"[verify-json] 1 scalars: title={config.title}, version={config.version}, ratio={config.ratio}, open={config.open}, kind={(int)config.kind}, note={(config.note == null ? "(null)" : config.note)}");
             Debug.Log($"[verify-json] 2 nested: owner={config.owner.name}/{config.owner.level}, tags={config.tags.Length} [{string.Join(",", config.tags)}], scores={config.scores.Count} [{config.scores[0]},{config.scores[1]}], players={config.players.Length}: {config.players[0].name}/{config.players[0].level} {config.players[1].name}/{config.players[1].level}");
             Debug.Log($"[verify-json] 3 optional: limit={(config.limit == null ? "(null)" : config.limit.ToString())}, bonus={config.bonus}, missing={(config.missing == 0 ? "default" : "set")}, ignored={config.ignored}, secret={config.Secret}, alias={config.alias}");
@@ -79,27 +79,17 @@ namespace JsonVerify
             string e4 = ErrorOf("{not json");
             Debug.Log($"[verify-json] 6 errors: {e1} | {e2} | {e3} | {e4}");
 
-            string thrown = "none";
-            try
-            {
-                Json.Parse<Config>("{\"title\":\"t\",\"version\":true}");
-            }
-            catch (JsonException exception)
-            {
-                thrown = "JsonException: " + exception.Message;
-            }
-            Debug.Log($"[verify-json] 7 exception: {thrown}");
+            Debug.Log("[verify-json] 7 result: " + Json.Parse<Config>("{\"title\":\"t\",\"version\":true}"));
         }
 
         private static string ErrorOf(string text)
         {
-            Config ignored;
-            string error;
-            if (Json.TryParse(text, out ignored, out error))
+            Result<Config, JsonError> parsed = Json.Parse<Config>(text);
+            if (parsed.IsOk)
             {
                 return "no error";
             }
-            return error.StartsWith("not JSON") ? "not JSON" : error;
+            return parsed.Error.Message.StartsWith("not JSON") ? "not JSON" : parsed.Error.ToString();
         }
     }
 }

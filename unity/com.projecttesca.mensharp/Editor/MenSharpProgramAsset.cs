@@ -148,17 +148,55 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         {
             return assembler;
         }
-        var editorInterface = new UdonEditorInterface();
+        UdonEditorInterface editorInterface = SharedEditorInterface();
+        if (editorInterface == null)
+        {
+            return null;
+        }
         FieldInfo group = typeof(UdonEditorInterface).GetField(
             "_typeResolverGroup",
             BindingFlags.NonPublic | BindingFlags.Instance);
         if (!(group?.GetValue(editorInterface) is IUAssemblyTypeResolver resolver))
         {
+            Debug.LogWarning(
+                "MenSharp: cannot size the Udon heap on this SDK (UdonEditorInterface has no "
+                + "_typeResolverGroup); programs over 512 heap slots will fail to assemble");
             return null;
         }
         heapFactory = new SizedHeapFactory();
         assembler = new UAssemblyAssembler(heapFactory, resolver);
         return assembler;
+    }
+
+    /// The SDK's own `UdonEditorInterface` — the one `UdonEditorManager`
+    /// assembles with — rather than a second one of our own. Its constructor
+    /// registers every node-registry type it can find, and in the window
+    /// right after a script reload that enumeration can meet a type twice
+    /// and throw ("An item with the same key has already been added");
+    /// the SDK built its copy when that was safe, so it is the one to use.
+    /// Null when even that is not available yet: the caller assembles
+    /// with the SDK's shared assembler for this round.
+    private static UdonEditorInterface SharedEditorInterface()
+    {
+        try
+        {
+            FieldInfo field = typeof(UdonEditorManager).GetField(
+                "_udonEditorInterface",
+                BindingFlags.NonPublic | BindingFlags.Instance);
+            if (field?.GetValue(UdonEditorManager.Instance) is Lazy<UdonEditorInterface> shared)
+            {
+                return shared.Value;
+            }
+            return new UdonEditorInterface();
+        }
+        catch (ArgumentException e)
+        {
+            Debug.LogWarning(
+                "MenSharp: the Udon editor interface is not ready yet (" + e.Message
+                + "); this program assembles with the SDK's shared assembler for now and is "
+                + "sized properly on the next compile");
+            return null;
+        }
     }
 
     private void AssembleWithSizedHeap()
@@ -168,12 +206,9 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             UAssemblyAssembler sized = SizedAssembler();
             if (sized == null)
             {
-                // the SDK moved its resolver group: fall back to the shared
-                // assembler, which works up to 512 slots, and say so
-                Debug.LogWarning(
-                    "MenSharp: cannot size the Udon heap on this SDK (UdonEditorInterface has no "
-                    + "_typeResolverGroup); programs over 512 heap slots will fail to assemble",
-                    this);
+                // no sized assembler this round (the SDK moved its resolver
+                // group, or its editor interface is not ready yet): the
+                // shared assembler works up to 512 slots
                 program = UdonEditorManager.Instance.Assemble(udonAssembly);
             }
             else

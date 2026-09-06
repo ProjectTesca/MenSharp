@@ -1417,6 +1417,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
+    /// A source type applied to its own generic parameters — the enclosing
+    /// types' first, as a nested type's arguments always are.
+    fn open_type(&self, symbol: SymbolId) -> Type {
+        let arguments = self
+            .system()
+            .source_type_parameters(symbol)
+            .into_iter()
+            .map(Type::TypeParameter)
+            .collect();
+        Type::Named {
+            target: TypeTarget::Source(symbol),
+            arguments,
+        }
+    }
+
     /// `this` inside the innermost enclosing type: its own generic parameters
     /// applied to itself.
     fn self_type(&self) -> Option<Type> {
@@ -1750,14 +1765,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         if !matches!(entry.kind, SymbolKind::Class | SymbolKind::Record) {
             return None;
         }
-        let self_type = Type::Named {
-            target: TypeTarget::Source(class),
-            arguments: entry
-                .type_parameters
-                .iter()
-                .map(|parameter| Type::TypeParameter(*parameter))
-                .collect(),
-        };
+        let self_type = self.open_type(class);
         let target_type = match kind {
             ConstructorChainKind::This => self_type,
             ConstructorChainKind::Base => {
@@ -1896,14 +1904,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         {
             return;
         }
-        let self_type = Type::Named {
-            target: TypeTarget::Source(symbol),
-            arguments: entry
-                .type_parameters
-                .iter()
-                .map(|parameter| Type::TypeParameter(*parameter))
-                .collect(),
-        };
+        let self_type = self.open_type(symbol);
 
         // (contract type, member) pairs to satisfy
         let mut required: Vec<(Type, SymbolId)> = Vec::new();
@@ -3756,6 +3757,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                     Some(Resolution::Error) => Meaning::Error,
                     None => {
+                        // `using static T;`: T's static members by bare name
+                        if let Some(meaning) = self.static_using_meaning(
+                            name.value,
+                            explicit_arguments,
+                            span,
+                            Some(EntityID::from(left)),
+                        ) {
+                            return meaning;
+                        }
                         self.error(SemanticErrorKind::UnknownIdentifier, span.clone());
                         Meaning::Error
                     }
@@ -3990,11 +4000,17 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         // nearest non-method candidate decides
         let first = candidates.first()?;
         if first.kind.is_type() {
-            // a nested type name
+            // a nested type name: `Outer<int>.Inner<string>` carries the
+            // outer's arguments before its own
             if let MemberOrigin::Source(symbol) = first.origin {
+                let mut arguments = match &first.declaring_type {
+                    Type::Named { arguments, .. } => arguments.clone(),
+                    _ => Vec::new(),
+                };
+                arguments.extend(explicit_arguments);
                 return Some(Meaning::TypeName(Type::Named {
                     target: TypeTarget::Source(symbol),
-                    arguments: explicit_arguments,
+                    arguments,
                 }));
             }
             return None;
@@ -4168,9 +4184,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     if let Some(nested) =
                         self.nested_type_of(&ty, name, explicit_arguments.len() as u32)
                     {
+                        // the outer's arguments lead the nested type's
+                        let mut arguments = match &ty {
+                            Type::Named { arguments, .. } => arguments.clone(),
+                            _ => Vec::new(),
+                        };
+                        arguments.extend(explicit_arguments);
                         return Meaning::TypeName(Type::Named {
                             target: nested,
-                            arguments: explicit_arguments,
+                            arguments,
                         });
                     }
                     let kind = SemanticErrorKind::UnknownMember {
@@ -5025,6 +5047,63 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
     /// The extension methods named like this group's member, gathered from every
     /// namespace scope and `using` import, nearest scope first.
+    /// A static member of a type brought in by `using static T;`, named
+    /// bare: `Ok(value)` for `using static MenSharp.Result;`. Every such
+    /// type in scope contributes its members named `name`; the group then
+    /// resolves as a call through the type, so an instance member never
+    /// applies and two types offering the same name are an ambiguity, as
+    /// in C#.
+    fn static_using_meaning(
+        &mut self,
+        name: &'ast str,
+        explicit_arguments: Vec<Type>,
+        span: &Range<usize>,
+        node: Option<EntityID>,
+    ) -> Option<Meaning<'ast>> {
+        let mut imported: Vec<Type> = Vec::new();
+        for scope in self.scopes.iter().rev() {
+            for using in &scope.usings {
+                if let crate::resolve::ResolvedUsing::Static(Resolution::Type {
+                    target,
+                    arguments,
+                }) = using
+                {
+                    imported.push(Type::Named {
+                        target: *target,
+                        arguments: arguments.clone(),
+                    });
+                }
+            }
+        }
+        let mut candidates: Vec<MemberCandidate> = Vec::new();
+        let mut owner: Option<Type> = None;
+        for ty in imported {
+            let found: Vec<MemberCandidate> = self
+                .system()
+                .members_named(&ty, name)
+                .into_iter()
+                .filter(|candidate| candidate.is_static && !candidate.kind.is_type())
+                .collect();
+            if !found.is_empty() {
+                owner.get_or_insert(ty);
+                candidates.extend(found);
+            }
+        }
+        let owner = owner?;
+        self.member_meaning(
+            candidates,
+            AccessContext {
+                receiver: Some(owner),
+                via_type: true,
+                implicit_this: false,
+            },
+            explicit_arguments,
+            name,
+            span,
+            node,
+        )
+    }
+
     fn extension_group(&self, group: &MethodGroup<'ast>) -> Option<MethodGroup<'ast>> {
         let name = group.name;
 

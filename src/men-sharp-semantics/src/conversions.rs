@@ -18,17 +18,22 @@
 use crate::{
     external::ExternalTypeKind,
     lookup::{MemberOrigin, TypeSystem},
+    symbol::SymbolId,
     symbol::SymbolKind,
     types::{MemberSignature, Type, TypeTarget},
 };
 
-/// A conversion operator from metadata: which type declares it, and the
-/// exact types the extern is named after.
+/// A conversion operator: which type declares it, and the exact types it
+/// takes and gives — the extern's name for one from metadata, the
+/// instantiation to compile for one written in source.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConversionOperator {
     pub declaring_type: Type,
     pub parameter_type: Type,
     pub return_type: Type,
+    /// The operator's symbol when it is written in source; `None` for
+    /// one from metadata, reached as an extern.
+    pub source: Option<SymbolId>,
 }
 
 /// The C# numeric types, for the promotion and conversion tables.
@@ -235,9 +240,9 @@ impl TypeSystem<'_, '_> {
             || self.implicit_conversion_operator(from, to).is_some()
     }
 
-    /// The `op_Implicit` that turns `from` into `to`, when one does. Only
-    /// operators from metadata: a conversion operator written in source is
-    /// not compiled at all (and says so).
+    /// The `op_Implicit` that turns `from` into `to`, when one does — from
+    /// metadata (an extern) or written in source (compiled like any static
+    /// method, instantiated for the declaring type at hand).
     pub fn implicit_conversion_operator(
         &self,
         from: &Type,
@@ -250,9 +255,6 @@ impl TypeSystem<'_, '_> {
                 continue;
             }
             for candidate in self.members_named(owner, "op_Implicit") {
-                if !matches!(candidate.origin, MemberOrigin::External { .. }) {
-                    continue;
-                }
                 let Some(MemberSignature::Function(signature)) = &candidate.signature else {
                     continue;
                 };
@@ -269,6 +271,10 @@ impl TypeSystem<'_, '_> {
                     declaring_type: candidate.declaring_type.clone(),
                     parameter_type: signature.parameters[0].parameter_type.clone(),
                     return_type: signature.return_type.clone(),
+                    source: match candidate.origin {
+                        MemberOrigin::Source(symbol) => Some(symbol),
+                        _ => None,
+                    },
                 };
                 if !candidates.iter().any(|seen| {
                     seen.parameter_type == operator.parameter_type
@@ -501,12 +507,7 @@ impl TypeSystem<'_, '_> {
                 }
                 // the metadata arity mark (`List`1`) says nothing a reader
                 // needs once the arguments are written out
-                let name = match name.rfind('`') {
-                    Some(at) if name[at + 1..].chars().all(|c| c.is_ascii_digit()) => {
-                        name[..at].to_string()
-                    }
-                    _ => name,
-                };
+                let name = strip_arity_marks(&name);
                 if arguments.is_empty() {
                     name
                 } else {
@@ -622,4 +623,16 @@ fn keyword_for(name: &str) -> Option<&'static str> {
         "System.Void" => "void",
         _ => return None,
     })
+}
+
+/// `Result`2.Ok` → `Result.Ok`: the metadata arity mark of every segment
+/// dropped (a nested type's outer segments carry their own).
+fn strip_arity_marks(name: &str) -> String {
+    name.split('.')
+        .map(|segment| match segment.find('`') {
+            Some(at) if segment[at + 1..].chars().all(|c| c.is_ascii_digit()) => &segment[..at],
+            _ => segment,
+        })
+        .collect::<Vec<_>>()
+        .join(".")
 }

@@ -172,10 +172,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 break;
             };
             let entry = self.declarations.table.symbol(*class);
-            let bindings: Vec<(SymbolId, Type)> = entry
-                .type_parameters
-                .iter()
-                .copied()
+            let bindings: Vec<(SymbolId, Type)> = self
+                .type_parameter_chain(*class)
+                .into_iter()
                 .zip(arguments.iter().cloned())
                 .collect();
             for &member in &entry.members {
@@ -231,12 +230,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     target: TypeTarget::Source(class),
                     arguments,
                 } => self
-                    .declarations
-                    .table
-                    .symbol(*class)
-                    .type_parameters
-                    .iter()
-                    .copied()
+                    .type_parameter_chain(*class)
+                    .into_iter()
                     .zip(arguments.iter().cloned())
                     .collect(),
                 _ => Vec::new(),
@@ -418,12 +413,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         let class = *class;
         let bindings: Vec<(SymbolId, Type)> = self
-            .declarations
-            .table
-            .symbol(class)
-            .type_parameters
-            .iter()
-            .copied()
+            .type_parameter_chain(class)
+            .into_iter()
             .zip(arguments.iter().cloned())
             .collect();
         // the declared constructors: the parameterless one, or none at all

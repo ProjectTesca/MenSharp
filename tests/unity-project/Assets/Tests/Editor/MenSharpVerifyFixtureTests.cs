@@ -147,6 +147,13 @@ public class MenSharpVerifyFixtureTests
         new Fixture { Type = "UnionVerify.VerifyUnion" },
         new Fixture { Type = "VerifyWake", Timeout = 3f },
         new Fixture { Type = "JsonVerify.VerifyJson" },
+        new Fixture { Type = "VerifyResult" },
+        new Fixture
+        {
+            Type = "VerifyHttp",
+            Setup = self => MenSharpTestScene.Assign(
+                MenSharpTestScene.Proxy(self, "VerifyHttp"), "url", new VRC.SDKBase.VRCUrl("not a url")),
+        },
         new Fixture
         {
             Type = "VerifyStringLoad",
