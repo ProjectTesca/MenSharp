@@ -1,0 +1,7 @@
+[verify-collections] 1 list: 5,10,11,12,20,30,40 range 11,12,20 removed 5,10,12,20,30,40 True False
+[verify-collections] 2 list: reversed 40,12,20,30,10,5 last 5 all 40,20 index 2 -1 0 sorted 5,10,12,20,30,40 search 3 -5 copy 0,5,10,12,20,30,40,0
+[verify-collections] 3 set: 3,5,2,4 count 4 add True False contains True False
+[verify-collections] 4 set: union 1,2,3,4,5 intersect 2,3,4,5 except 2,4,5 symmetric 2,7,5 subset True proper False equals True overlaps True
+[verify-collections] 5 set: names a,null count 2 null True removed 1 tohashset 2 distinct 1,2,3
+[verify-collections] 6 queue: first 1 order 2,3,4 peek 2 count 3 ring 3100 4350 25 empty Queue empty.
+[verify-collections] 7 stack: top 3 order 4,2,1 array 4,2,1 pop 4 peek 2 count 2 empty Stack empty.

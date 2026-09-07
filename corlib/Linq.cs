@@ -232,7 +232,7 @@ namespace System.Linq
 
         public static IEnumerable<TSource> Distinct<TSource>(this IEnumerable<TSource> source)
         {
-            ElementSet<TSource> seen = new ElementSet<TSource>();
+            HashSet<TSource> seen = new HashSet<TSource>();
             foreach (TSource item in source)
             {
                 if (seen.Add(item)) { yield return item; }
@@ -241,7 +241,7 @@ namespace System.Linq
 
         public static IEnumerable<TSource> Union<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second)
         {
-            ElementSet<TSource> seen = new ElementSet<TSource>();
+            HashSet<TSource> seen = new HashSet<TSource>();
             foreach (TSource item in first)
             {
                 if (seen.Add(item)) { yield return item; }
@@ -254,7 +254,7 @@ namespace System.Linq
 
         public static IEnumerable<TSource> Intersect<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second)
         {
-            ElementSet<TSource> candidates = new ElementSet<TSource>();
+            HashSet<TSource> candidates = new HashSet<TSource>();
             foreach (TSource item in second) { candidates.Add(item); }
             foreach (TSource item in first)
             {
@@ -264,7 +264,7 @@ namespace System.Linq
 
         public static IEnumerable<TSource> Except<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second)
         {
-            ElementSet<TSource> excluded = new ElementSet<TSource>();
+            HashSet<TSource> excluded = new HashSet<TSource>();
             foreach (TSource item in second) { excluded.Add(item); }
             foreach (TSource item in first)
             {
@@ -1038,6 +1038,11 @@ namespace System.Linq
             return list;
         }
 
+        public static HashSet<TSource> ToHashSet<TSource>(this IEnumerable<TSource> source)
+        {
+            return new HashSet<TSource>(source);
+        }
+
         public static Dictionary<TKey, TSource> ToDictionary<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector)
         {
             Dictionary<TKey, TSource> dictionary = new Dictionary<TKey, TSource>();
@@ -1235,48 +1240,6 @@ namespace MenSharp.Internal
         public System.Collections.Generic.IEnumerator<TElement> GetEnumerator()
         {
             return elements.GetEnumerator();
-        }
-    }
-
-    /// The elements seen so far by `Distinct` and the set operators: a
-    /// hash set over the element's own equality, with room for `null`.
-    public sealed class ElementSet<T>
-    {
-        private readonly Dictionary<T, bool> seen;
-        private bool hasNull;
-
-        public ElementSet()
-        {
-            seen = new Dictionary<T, bool>();
-            hasNull = false;
-        }
-
-        /// True when `item` was not there yet.
-        public bool Add(T item)
-        {
-            object boxed = item;
-            if (boxed == null)
-            {
-                if (hasNull) { return false; }
-                hasNull = true;
-                return true;
-            }
-            if (seen.ContainsKey(item)) { return false; }
-            seen.Add(item, true);
-            return true;
-        }
-
-        /// True when `item` was there, and is no longer.
-        public bool Remove(T item)
-        {
-            object boxed = item;
-            if (boxed == null)
-            {
-                if (!hasNull) { return false; }
-                hasNull = false;
-                return true;
-            }
-            return seen.Remove(item);
         }
     }
 }

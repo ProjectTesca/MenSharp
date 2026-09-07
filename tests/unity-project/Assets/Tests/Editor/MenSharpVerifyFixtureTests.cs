@@ -88,6 +88,7 @@ public class MenSharpVerifyFixtureTests
         new Fixture { Type = "VerifyTarget", Object = "Target", Events = new[] { "_start" } },
         new Fixture { Type = "VerifyArrays" },
         new Fixture { Type = "VerifyAsync", Timeout = 6f },
+        new Fixture { Type = "VerifyCollections" },
         new Fixture { Type = "VerifyCrash" },
         new Fixture { Type = "VerifyData" },
         new Fixture { Type = "VerifyDeconstruct" },

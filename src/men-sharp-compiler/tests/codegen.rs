@@ -3784,6 +3784,326 @@ fn the_corlib_dictionary_works_end_to_end() {
 }
 
 #[test]
+fn the_corlib_list_covers_the_rest_of_the_api() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string inserted;
+                public static string ranged;
+                public static string removed;
+                public static string reversed;
+                public static string found;
+                public static string searched;
+                public static string copied;
+                public static int capacity;
+                public static string mutated;
+
+                static string Join(List<int> list)
+                {
+                    string text = "";
+                    foreach (int n in list) { text = text + n + ","; }
+                    return text;
+                }
+
+                public static void Main()
+                {
+                    var list = new List<int> { 10, 20, 30 };
+                    list.Insert(0, 5);              // 5,10,20,30
+                    list.Insert(4, 40);             // append through Insert
+                    list.InsertRange(2, new int[] { 11, 12 });   // 5,10,11,12,20,30,40
+                    list.InsertRange(7, list);      // itself: doubled
+                    inserted = Join(list) + list.Count;
+
+                    var range = list.GetRange(2, 3);    // 11,12,20
+                    ranged = Join(range) + range.Count;
+
+                    list.RemoveRange(7, 7);         // back to the first half
+                    bool gone = list.Remove(11);    // 5,10,12,20,30,40
+                    bool absent = list.Remove(99);
+                    removed = Join(list) + gone + absent;
+
+                    list.Reverse();                 // 40,30,20,12,10,5
+                    list.Reverse(1, 3);             // 40,12,20,30,10,5
+                    reversed = Join(list);
+
+                    found = list.IndexOf(20) + " " + list.IndexOf(20, 3) + " " + list.LastIndexOf(40)
+                        + " " + list.FindLast(n => n < 15) + " " + list.FindLastIndex(n => n > 25)
+                        + " " + Join(list.FindAll(n => n % 20 == 0)) + " " + list.FindIndex(2, n => n == 10);
+
+                    list.Sort();                    // 5,10,12,20,30,40
+                    searched = list.BinarySearch(20) + " " + list.BinarySearch(21) + " " + list.BinarySearch(1);
+
+                    var target = new int[8];
+                    list.CopyTo(target, 1);
+                    list.CopyTo(4, target, 7, 1);
+                    copied = "";
+                    foreach (int n in target) { copied = copied + n + ","; }
+
+                    var sized = new List<int>(3);
+                    int before = sized.Capacity;
+                    sized.EnsureCapacity(10);
+                    int ensured = sized.Capacity;
+                    sized.Add(1);
+                    sized.TrimExcess();
+                    capacity = before * 10000 + ensured * 100 + sized.Capacity;
+
+                    // clearing then refilling reuses the storage
+                    list.Clear();
+                    list.Add(7);
+                    mutated = Join(list) + list.Count;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "inserted"),
+        "5,10,11,12,20,30,40,5,10,11,12,20,30,40,14"
+    );
+    assert_eq!(string_of(&emulator, "ranged"), "11,12,20,3");
+    assert_eq!(
+        string_of(&emulator, "removed"),
+        "5,10,12,20,30,40,TrueFalse"
+    );
+    assert_eq!(string_of(&emulator, "reversed"), "40,12,20,30,10,5,");
+    // `~low` for a missing 21 (between 20 at 3 and 30 at 4) is ~4 = -5; for
+    // 1 it is ~0 = -1
+    assert_eq!(string_of(&emulator, "found"), "2 -1 0 5 3 40,20, 4");
+    assert_eq!(string_of(&emulator, "searched"), "3 -5 -1");
+    assert_eq!(string_of(&emulator, "copied"), "0,5,10,12,20,30,40,30,");
+    assert_eq!(int_of(&emulator, "capacity"), 3 * 10000 + 10 * 100 + 1);
+    assert_eq!(string_of(&emulator, "mutated"), "7,1");
+}
+
+#[test]
+fn the_corlib_hashset_works_end_to_end() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string added;
+                public static string walked;
+                public static string sets;
+                public static string queries;
+                public static string nulls;
+                public static string grown;
+                public static string linq;
+
+                static string Join(HashSet<int> set)
+                {
+                    string text = "";
+                    foreach (int n in set) { text = text + n + ","; }
+                    return text;
+                }
+
+                public static void Main()
+                {
+                    var set = new HashSet<int> { 3, 1, 2 };
+                    bool fresh = set.Add(4);
+                    bool dup = set.Add(3);
+                    bool had = set.Remove(1);
+                    bool lacked = set.Remove(9);
+                    added = set.Count + " " + fresh + dup + had + lacked + " " + set.Contains(2) + set.Contains(1);
+
+                    set.Add(5);     // takes the slot 1 freed
+                    walked = Join(set);
+
+                    var a = new HashSet<int>(new int[] { 1, 2, 3, 4 });
+                    var b = new HashSet<int>(new int[] { 3, 4, 5, 5 });
+                    a.UnionWith(b);
+                    string union = Join(a);
+                    a.IntersectWith(new int[] { 2, 3, 4, 5, 6 });
+                    string intersect = Join(a);
+                    a.ExceptWith(new int[] { 3 });
+                    string except = Join(a);
+                    a.SymmetricExceptWith(new int[] { 4, 7, 7 });
+                    string symmetric = Join(a);
+                    a.UnionWith(a);
+                    a.IntersectWith(a);
+                    string self = Join(a);
+                    a.ExceptWith(a);
+                    sets = union + " " + intersect + " " + except + " " + symmetric + " " + self + " " + a.Count;
+
+                    var small = new HashSet<int>(new int[] { 1, 2 });
+                    var big = new HashSet<int>(new int[] { 1, 2, 3 });
+                    queries = small.IsSubsetOf(big) + "" + small.IsProperSubsetOf(big) + small.IsSubsetOf(small)
+                        + small.IsProperSubsetOf(small) + " " + big.IsSupersetOf(small) + big.IsProperSupersetOf(small)
+                        + big.IsProperSupersetOf(big) + " " + small.Overlaps(new int[] { 2, 9 }) + small.Overlaps(new int[] { 9 })
+                        + " " + small.SetEquals(new int[] { 2, 1, 1 }) + small.SetEquals(big)
+                        + " " + big.RemoveWhere(n => n > 1) + Join(big);
+
+                    var words = new HashSet<string>();
+                    words.Add("a");
+                    words.Add(null);
+                    bool nullAgain = words.Add(null);
+                    string seen = "";
+                    foreach (string w in words) { seen = seen + (w == null ? "null" : w) + ","; }
+                    string actual;
+                    bool got = words.TryGetValue("a", out actual);
+                    nulls = words.Count + " " + nullAgain + " " + words.Contains(null) + " " + seen + " " + got + actual
+                        + " " + words.Remove(null) + words.Count;
+
+                    var many = new HashSet<int>();
+                    for (int i = 0; i < 200; i++) { many.Add(i * 7); }
+                    int hits = 0;
+                    for (int i = 0; i < 200; i++) { if (many.Contains(i * 7)) { hits++; } }
+                    grown = many.Count + " " + hits + " " + many.Contains(3);
+
+                    var distinct = new int[] { 5, 5, 6 }.ToHashSet();
+                    string fromLinq = "";
+                    foreach (int n in new int[] { 1, 2, 2, 3, 1 }.Distinct()) { fromLinq = fromLinq + n; }
+                    linq = distinct.Count + " " + fromLinq + " " + distinct.Sum();
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        string_of(&emulator, "added"),
+        "3 TrueFalseTrueFalse TrueFalse"
+    );
+    // insertion order, with 5 in the entry 1 vacated
+    assert_eq!(string_of(&emulator, "walked"), "3,5,2,4,");
+    // 7 takes the entry 4 vacated just before it, so it walks before 5
+    assert_eq!(
+        string_of(&emulator, "sets"),
+        "1,2,3,4,5, 2,3,4,5, 2,4,5, 2,7,5, 2,7,5, 0"
+    );
+    assert_eq!(
+        string_of(&emulator, "queries"),
+        "TrueTrueTrueFalse TrueTrueFalse TrueFalse TrueFalse 21,"
+    );
+    assert_eq!(
+        string_of(&emulator, "nulls"),
+        "2 False True a,null, Truea True1"
+    );
+    assert_eq!(string_of(&emulator, "grown"), "200 200 False");
+    assert_eq!(string_of(&emulator, "linq"), "2 123 11");
+}
+
+#[test]
+fn the_corlib_queue_and_stack_work_end_to_end() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            public class Program
+            {
+                public static string queue;
+                public static string wrapped;
+                public static string queueEmpty;
+                public static string stack;
+                public static string stackEmpty;
+                public static string cleared;
+
+                public static void Main()
+                {
+                    var q = new Queue<int>();
+                    q.Enqueue(1);
+                    q.Enqueue(2);
+                    q.Enqueue(3);
+                    int first = q.Dequeue();
+                    q.Enqueue(4);
+                    string order = "";
+                    foreach (int n in q) { order = order + n; }
+                    int peeked;
+                    bool hasPeek = q.TryPeek(out peeked);
+                    queue = first + " " + order + " " + q.Peek() + hasPeek + peeked + " " + q.Count + " " + q.Contains(3) + q.Contains(1);
+
+                    // wrap around the ring many times, growing while wrapped
+                    var ring = new Queue<int>(2);
+                    int total = 0;
+                    for (int i = 0; i < 50; i++)
+                    {
+                        ring.Enqueue(i);
+                        ring.Enqueue(i + 100);
+                        total += ring.Dequeue();
+                    }
+                    string rest = "";
+                    foreach (int n in ring.ToArray()) { rest = rest + n + ","; }
+                    ring.TrimExcess();
+                    wrapped = total + " " + ring.Count + " " + rest.Length + " " + ring.Sum() + " " + ring.Peek();
+
+                    var empty = new Queue<string>(new string[] { "x" });
+                    string taken = empty.Dequeue();
+                    string missing;
+                    bool none = empty.TryDequeue(out missing);
+                    string caught = "";
+                    try { empty.Peek(); } catch (InvalidOperationException e) { caught = e.Message; }
+                    queueEmpty = taken + " " + none + (missing == null) + " " + caught;
+
+                    var s = new Stack<int>();
+                    s.Push(1);
+                    s.Push(2);
+                    s.Push(3);
+                    int top = s.Pop();
+                    s.Push(4);
+                    string down = "";
+                    foreach (int n in s) { down = down + n; }
+                    string array = "";
+                    foreach (int n in s.ToArray()) { array = array + n; }
+                    int popped;
+                    bool hasPop = s.TryPop(out popped);
+                    int peek;
+                    bool hasTop = s.TryPeek(out peek);
+                    stack = top + " " + down + " " + array + " " + hasPop + popped + " " + hasTop + peek + " " + s.Count + " " + s.Contains(1) + s.Contains(4);
+
+                    var drained = new Stack<int>(new int[] { 1, 2 });
+                    drained.Pop();
+                    drained.Pop();
+                    int nothing;
+                    bool got = drained.TryPop(out nothing);
+                    string failed = "";
+                    try { drained.Pop(); } catch (InvalidOperationException e) { failed = e.Message; }
+                    stackEmpty = got + "" + nothing + " " + failed;
+
+                    s.Clear();
+                    q.Clear();
+                    s.Push(9);
+                    q.Enqueue(9);
+                    cleared = s.Count + "" + q.Count + s.Peek() + q.Peek();
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "queue"), "1 234 2True2 3 TrueFalse");
+    // the dequeues alternate the two streams: 0..24 and 100..124 came out
+    // (3100), 25..49 and 125..149 stayed (4350), printed in 75 + 100 chars
+    assert_eq!(string_of(&emulator, "wrapped"), "3100 50 175 4350 25");
+    assert_eq!(
+        string_of(&emulator, "queueEmpty"),
+        "x FalseTrue Queue empty."
+    );
+    assert_eq!(
+        string_of(&emulator, "stack"),
+        "3 421 421 True4 True2 2 TrueFalse"
+    );
+    assert_eq!(string_of(&emulator, "stackEmpty"), "False0 Stack empty.");
+    assert_eq!(string_of(&emulator, "cleared"), "1199");
+}
+
+#[test]
 fn index_initializers_write_through_the_indexer() {
     let Some(emulator) = run(
         r#"
