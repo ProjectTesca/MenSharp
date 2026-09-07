@@ -1280,6 +1280,11 @@ impl Emulator {
                     Value::Int64(value) => (*value as i32) ^ ((*value >> 32) as i32),
                     Value::UInt32(value) => *value as i32,
                     Value::Char(value) => *value as i32,
+                    Value::Single(value) => value.to_bits() as i32,
+                    Value::Double(value) => {
+                        let bits = value.to_bits();
+                        (bits as i32) ^ ((bits >> 32) as i32)
+                    }
                     Value::Str(text) => text.bytes().fold(17i32, |hash, byte| {
                         hash.wrapping_mul(31).wrapping_add(byte as i32)
                     }),
@@ -1304,8 +1309,15 @@ impl Emulator {
                     (Value::Null, Value::Null) => true,
                     (Value::Array(a), Value::Array(b)) => Rc::ptr_eq(a, b),
                     (Value::Int32(a), Value::Int32(b)) => a == b,
+                    (Value::Int64(a), Value::Int64(b)) => a == b,
+                    (Value::UInt32(a), Value::UInt32(b)) => a == b,
+                    // boxed `Single.Equals`/`Double.Equals`: NaN equals NaN
+                    (Value::Single(a), Value::Single(b)) => a == b || (a.is_nan() && b.is_nan()),
+                    (Value::Double(a), Value::Double(b)) => a == b || (a.is_nan() && b.is_nan()),
+                    (Value::Char(a), Value::Char(b)) => a == b,
                     (Value::Boolean(a), Value::Boolean(b)) => a == b,
                     (Value::Str(a), Value::Str(b)) => a == b,
+                    (Value::Type(a), Value::Type(b)) => a == b,
                     // two references to the same behaviour, and the `this`
                     // reference a program run on its own resolves to
                     (Value::Behaviour(a), Value::Behaviour(b)) => a == b,

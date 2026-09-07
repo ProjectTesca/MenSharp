@@ -4281,6 +4281,191 @@ fn comparers_flow_through_the_collections_and_linq() {
 }
 
 #[test]
+fn user_structs_work_as_dictionary_and_set_keys() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            public enum Kind { Wall, Floor }
+
+            public struct Cell
+            {
+                public int x;
+                public int y;
+                public Cell(int x, int y) { this.x = x; this.y = y; }
+            }
+
+            // every field kind: enum, float, string, a nested struct, a class
+            public struct Tile
+            {
+                public Kind kind;
+                public float height;
+                public string name;
+                public Cell at;
+                public Marker marker;
+            }
+
+            public class Marker { public int id; }
+
+            public struct Pair<T>
+            {
+                public T first;
+                public T second;
+            }
+
+            public record struct Point(int X, int Y);
+
+            public class Program
+            {
+                public static string basics;
+                public static string copied;
+                public static string tiles;
+                public static string generic;
+                public static string records;
+                public static string set;
+                public static string linq;
+                public static string walked;
+
+                public static void Main()
+                {
+                    var grid = new Dictionary<Cell, string>();
+                    grid[new Cell(1, 2)] = "a";
+                    grid[new Cell(1, 2)] = "b";          // same key, overwritten
+                    grid.Add(new Cell(2, 1), "c");        // x/y swapped: another key
+                    string got;
+                    bool found = grid.TryGetValue(new Cell(1, 2), out got);
+                    bool has = grid.ContainsKey(new Cell(2, 1));
+                    bool lacks = grid.ContainsKey(new Cell(3, 3));
+                    bool removed = grid.Remove(new Cell(2, 1));
+                    basics = grid.Count + " " + found + got + " " + has + lacks + " " + removed + grid.Count;
+
+                    // the stored key is a copy: mutating the variable after
+                    // the insert changes neither the entry nor its lookup
+                    Cell key = new Cell(5, 5);
+                    var byKey = new Dictionary<Cell, int>();
+                    byKey[key] = 1;
+                    key.x = 6;
+                    bool oldStillThere = byKey.ContainsKey(new Cell(5, 5));
+                    bool newAbsent = !byKey.ContainsKey(key);
+                    Cell first = new Cell(0, 0);
+                    foreach (var pair in byKey) { first = pair.Key; }
+                    first.y = 9;                          // a copy out, too
+                    copied = oldStillThere + "" + newAbsent + " " + byKey.ContainsKey(new Cell(5, 5)) + " " + first.x + first.y;
+
+                    var shared = new Marker { id = 1 };
+                    var t1 = new Tile { kind = Kind.Floor, height = 0.5f, name = "n", at = new Cell(1, 1), marker = shared };
+                    var t2 = new Tile { kind = Kind.Floor, height = 0.5f, name = "n", at = new Cell(1, 1), marker = shared };
+                    var t3 = new Tile { kind = Kind.Wall, height = 0.5f, name = "n", at = new Cell(1, 1), marker = shared };
+                    var t4 = new Tile { kind = Kind.Floor, height = 0.5f, name = "n", at = new Cell(1, 1), marker = new Marker { id = 1 } };
+                    var t5 = new Tile { kind = Kind.Floor, height = 0.5f, name = "n", at = new Cell(1, 2), marker = shared };
+                    var byTile = new Dictionary<Tile, int>();
+                    byTile[t1] = 1;
+                    byTile[t2] = 2;     // equal in every field: same entry
+                    byTile[t3] = 3;     // enum differs
+                    byTile[t4] = 4;     // class field is another reference
+                    byTile[t5] = 5;     // nested struct differs
+                    tiles = byTile.Count + " " + byTile[t1] + " " + byTile[new Tile { kind = Kind.Wall, height = 0.5f, name = "n", at = new Cell(1, 1), marker = shared }];
+
+                    var pairs = new Dictionary<Pair<string>, int>();
+                    pairs[new Pair<string> { first = "a", second = "b" }] = 1;
+                    pairs[new Pair<string> { first = "a", second = "b" }] = 2;
+                    pairs[new Pair<string> { first = "b", second = "a" }] = 3;
+                    generic = pairs.Count + " " + pairs[new Pair<string> { first = "a", second = "b" }];
+
+                    var points = new Dictionary<Point, string>();
+                    points[new Point(1, 1)] = "p";
+                    points[new Point(1, 1)] = "q";
+                    records = points.Count + " " + points[new Point(1, 1)] + " " + points.ContainsKey(new Point(1, 2));
+
+                    var cells = new HashSet<Cell>();
+                    cells.Add(new Cell(1, 1));
+                    bool dup = cells.Add(new Cell(1, 1));
+                    cells.Add(new Cell(2, 2));
+                    set = cells.Count + " " + dup + " " + cells.Contains(new Cell(2, 2)) + cells.Remove(new Cell(1, 1)) + cells.Count;
+
+                    var list = new List<Cell> { new Cell(1, 1), new Cell(2, 2), new Cell(1, 1), new Cell(3, 3) };
+                    int groups = list.GroupBy(c => c).Count();
+                    int distinct = list.Distinct().Count();
+                    bool contains = list.Contains(new Cell(2, 2));
+                    int index = list.IndexOf(new Cell(3, 3));
+                    linq = groups + " " + distinct + " " + contains + " " + index + " " + list.Where(c => c.Equals(new Cell(1, 1))).Count();
+
+                    walked = "";
+                    foreach (var (at, tag) in grid) { walked = walked + at.x + at.y + tag; }
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    // the first count is read after the removal, like the last
+    assert_eq!(string_of(&emulator, "basics"), "1 Trueb TrueFalse True1");
+    assert_eq!(string_of(&emulator, "copied"), "TrueTrue True 59");
+    assert_eq!(string_of(&emulator, "tiles"), "4 2 3");
+    assert_eq!(string_of(&emulator, "generic"), "2 2");
+    assert_eq!(string_of(&emulator, "records"), "1 q False");
+    assert_eq!(string_of(&emulator, "set"), "2 False TrueTrue1");
+    assert_eq!(string_of(&emulator, "linq"), "3 3 True 3 2");
+    assert_eq!(string_of(&emulator, "walked"), "12b");
+}
+
+#[test]
+fn an_invoked_property_rebinds_to_the_extension_method_of_that_name() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            public class Bag
+            {
+                public int Count = 7;                    // a field of the same name
+                public Func<int, int> Twice = n => n * 2; // a delegate-typed field
+            }
+
+            public static class BagExtensions
+            {
+                public static int Count(this Bag bag, int extra) { return bag.Count + extra; }
+            }
+
+            public class Program
+            {
+                public static int counted;
+                public static int all;
+                public static int field;
+                public static int delegated;
+                public static int property;
+
+                public static void Main()
+                {
+                    var list = new List<int> { 1, 2, 3 };
+                    counted = list.Count(n => n > 1);    // the extension, not the property
+                    all = list.Count();                  // the extension with no argument
+                    property = list.Count;               // still the property
+                    var bag = new Bag();
+                    field = bag.Count(10);               // the extension over a field
+                    delegated = bag.Twice(4);            // a delegate field is called itself
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "counted"), 2);
+    assert_eq!(int_of(&emulator, "all"), 3);
+    assert_eq!(int_of(&emulator, "property"), 3);
+    assert_eq!(int_of(&emulator, "field"), 17);
+    assert_eq!(int_of(&emulator, "delegated"), 8);
+}
+
+#[test]
 fn index_initializers_write_through_the_indexer() {
     let Some(emulator) = run(
         r#"

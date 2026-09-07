@@ -29,13 +29,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             Meaning::Value(ty) => {
                 // calling a value: a delegate invocation
-                let invoke = self
-                    .system()
-                    .members_named(&ty, "Invoke")
-                    .into_iter()
-                    .find(|candidate| candidate.kind == SymbolKind::Method)
-                    .or_else(|| self.source_delegate_invoke(&ty));
-                match invoke {
+                match self.delegate_invoke_of(&ty) {
                     Some(candidate) => {
                         let receiver_display = self.describe(&ty);
                         let group = MethodGroup {
@@ -233,6 +227,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         };
         let call = self.resolved_call_of(group, selected, is_extension);
         self.targets.insert(node, ResolvedTarget::Call(call));
+    }
+
+    /// What calling a value of `ty` runs: the `Invoke` of a delegate type
+    /// (external or the compilation's own). `None` for anything else.
+    pub(super) fn delegate_invoke_of(&self, ty: &Type) -> Option<MemberCandidate> {
+        self.system()
+            .members_named(ty, "Invoke")
+            .into_iter()
+            .find(|candidate| candidate.kind == SymbolKind::Method)
+            .or_else(|| self.source_delegate_invoke(ty))
     }
 
     pub(super) fn resolved_call_of(

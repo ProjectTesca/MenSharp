@@ -1,0 +1,5 @@
+[verify-structkeys] 1 cells: count 2 found True b has True False removed True 1 walked 12b
+[verify-structkeys] 2 copies: stored True True still True out 59
+[verify-structkeys] 3 fields: count 4 t1 2 fresh 3 enum True float True string True null True nested True class True
+[verify-structkeys] 4 generic: count 2 value 2 point 1 q False
+[verify-structkeys] 5 set: count 2 dup False contains True removed True 1 linq 3 3 True 3 2

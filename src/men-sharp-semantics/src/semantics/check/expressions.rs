@@ -357,8 +357,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             None
         };
         let mut meaning = self.check_primary_left(&primary.left, head_expected);
-        for right in primary.chain {
-            meaning = self.apply_primary_right(meaning, right);
+        for (index, right) in primary.chain.iter().enumerate() {
+            let invoked_next = matches!(
+                primary.chain.get(index + 1),
+                Some(PrimaryRight::Invocation { .. })
+            );
+            meaning = self.apply_primary_right(meaning, right, invoked_next);
         }
         let ty = self.value_of(
             meaning,
@@ -896,10 +900,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         false // refined when expression shapes are tracked further
     }
 
+    /// One step of a postfix chain. `invoked_next` says an argument list
+    /// follows this step, which matters for a member access alone.
     fn apply_primary_right(
         &mut self,
         meaning: Meaning<'ast>,
         right: &'ast PrimaryRight<'ast, 'ast>,
+        invoked_next: bool,
     ) -> Meaning<'ast> {
         match right {
             PrimaryRight::Member {
@@ -912,13 +919,43 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     return Meaning::Error;
                 };
                 let explicit_arguments = self.explicit_arguments(generics);
-                self.access_member(
+                let receiver = match &meaning {
+                    Meaning::Value(ty) => Some(self.member_receiver(ty.clone())),
+                    _ => None,
+                };
+                let node = EntityID::from(right);
+                let accessed = self.access_member(
                     meaning,
                     name.value,
-                    explicit_arguments,
+                    explicit_arguments.clone(),
                     span,
-                    Some(EntityID::from(right)),
-                )
+                    Some(node),
+                );
+                // `list.Count(n => n > 1)`: the member found is a property (or
+                // a field) that cannot be called, so the invocation binds to
+                // an extension method of that name instead, as C# does
+                // (§12.8.10.2) — the recorded property access is withdrawn
+                if invoked_next
+                    && let (Some(receiver), Meaning::Value(ty)) = (receiver, &accessed)
+                    && !matches!(ty, Type::Error)
+                    && self.delegate_invoke_of(ty).is_none()
+                {
+                    let probe = MethodGroup {
+                        candidates: Vec::new(),
+                        explicit_arguments,
+                        via_type: false,
+                        name: name.value,
+                        receiver: Some(receiver.clone()),
+                        allow_extensions: true,
+                        receiver_display: self.describe(&receiver),
+                        span: span.clone(),
+                    };
+                    if self.extension_group(&probe).is_some() {
+                        self.targets.remove(&node);
+                        return Meaning::Group(probe);
+                    }
+                }
+                accessed
             }
             PrimaryRight::Invocation { arguments, span } => self.invoke(
                 meaning,
@@ -1022,13 +1059,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 .unwrap_or(Meaning::Error)
             }
             Meaning::Value(ty) => {
-                // a reference annotation (`string?`) has the members of the
-                // type; a `Nullable<T>` has its own (`HasValue`, `Value`) —
-                // and the lookup roots add `T`'s after them
-                let receiver = match ty {
-                    Type::Nullable(inner) if self.system().is_reference_type(&inner) => *inner,
-                    other => other,
-                };
+                let receiver = self.member_receiver(ty);
                 if matches!(receiver, Type::Error) {
                     return Meaning::Error;
                 }
@@ -1097,6 +1128,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 Meaning::Error
             }
             Meaning::Error => Meaning::Error,
+        }
+    }
+
+    /// The type whose members a value of `ty` has: a reference annotation
+    /// (`string?`) has the members of the type; a `Nullable<T>` has its own
+    /// (`HasValue`, `Value`) — and the lookup roots add `T`'s after them.
+    fn member_receiver(&self, ty: Type) -> Type {
+        match ty {
+            Type::Nullable(inner) if self.system().is_reference_type(&inner) => *inner,
+            other => other,
         }
     }
 

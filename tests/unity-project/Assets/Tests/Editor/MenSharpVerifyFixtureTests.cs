@@ -137,6 +137,7 @@ public class MenSharpVerifyFixtureTests
         new Fixture { Type = "VerifyRemoteDoor", Events = new string[0] },
         new Fixture { Type = "VerifySequences" },
         new Fixture { Type = "VerifyString" },
+        new Fixture { Type = "VerifyStructKeys" },
         new Fixture { Type = "VerifyTuple" },
         new Fixture
         {

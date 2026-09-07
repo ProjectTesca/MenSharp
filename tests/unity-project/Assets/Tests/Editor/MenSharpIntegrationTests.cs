@@ -55,6 +55,7 @@ public class MenSharpIntegrationTests
         "VerifySequences",
         "VerifyString",
         "VerifyStringLoad",
+        "VerifyStructKeys",
         "VerifyTarget",
         "VerifyTuple",
         "VerifyUdonSharp",
