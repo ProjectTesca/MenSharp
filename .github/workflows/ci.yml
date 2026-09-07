@@ -58,6 +58,20 @@ jobs:
       UNITY_EMAIL: ${{ secrets.UNITY_EMAIL }}
       UNITY_PASSWORD: ${{ secrets.UNITY_PASSWORD }}
     steps:
+      # GitHub's hosted runners ship with ~14 GB free, and the Unity image
+      # needs that much to pull and unpack (the layers exist twice while
+      # extracting). The Android SDK, Haskell, .NET, CodeQL and the
+      # preinstalled Docker images are all unused here — dropping them frees
+      # about 25 GB. A self-hosted runner is left as it is.
+      - name: Free disk space on the hosted runner
+        if: vars.MENSHARP_UNITY_RUNNER == ''
+        run: |
+          df -h /
+          sudo rm -rf /usr/local/lib/android /opt/ghc /usr/share/dotnet /usr/local/share/boost \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup /usr/share/swift
+          sudo docker image prune --all --force
+          df -h /
+
       - uses: actions/checkout@v4
 
       - uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0
@@ -94,9 +108,11 @@ jobs:
         uses: game-ci/unity-test-runner@0ff419b913a3630032cbe0de48a0099b5a9f0ed9
         with:
           projectPath: tests/unity-project
+          # the plain editor image: edit-mode tests build no player, so the
+          # IL2CPP variant the action would pick by default is dead weight
+          customImage: unityci/editor:ubuntu-2022.3.22f1-base-3
           testMode: editmode
           customParameters: -assemblyNames ProjectTesca.MenSharp.IntegrationTests
-          coverageEnabled: false
           artifactsPath: artifacts/unity-tests
           githubToken: ${{ secrets.GITHUB_TOKEN }}
           checkName: MenSharp Unity integration tests
