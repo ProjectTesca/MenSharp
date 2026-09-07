@@ -16,10 +16,11 @@ use men_sharp_compiler::{Compiler, CompilerSettings, ParsedFile, ReferenceSet, S
 
 mod report;
 
+use men_sharp_diagnostics::{Format, Reporter};
 use men_sharp_semantics::{
     Declarations, MemberSignature, Signatures, SymbolId, SymbolKind, Type, TypeTarget,
 };
-use report::{Format, Reporter};
+use report::Files;
 
 const USAGE: &str = "usage: men-sharp [--threads N] [--reference lib.dll]... \
 [--udonsharp other.cs]... [--define NAME]... [--profile-dir dir] \
@@ -65,7 +66,7 @@ fn run() -> ExitCode {
     let mut out_name = "program".to_string();
     let mut out_dir = ".".to_string();
     let mut language: Option<String> = None;
-    let mut format = Format::from_environment();
+    let mut format = report::format_from_environment();
 
     let mut arguments = std::env::args().skip(1);
     while let Some(argument) = arguments.next() {
@@ -227,7 +228,13 @@ fn run() -> ExitCode {
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
 
     let language = report::language_from_environment(language.as_deref());
-    let reporter = Reporter::new(&files, &language, format, report::color_from_environment());
+    let sources = Files(&files);
+    let reporter = Reporter::new(
+        &sources,
+        &language,
+        format,
+        report::color_from_environment(),
+    );
     let mut diagnostics = {
         timescope::scope!("report");
         report::collect(&files, &declarations, &signatures, &bodies)

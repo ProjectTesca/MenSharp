@@ -11,15 +11,20 @@
 //! [`Edit`] the renderer applies to a copy of the source, so the reader
 //! sees the line the way it would be written after the fix.
 //!
-//! Rendering (colours, source excerpts, carets) is the CLI's business; see
-//! the `men-sharp` binary crate. Nothing here does I/O.
+//! [`Reporter`] renders them for a reader: colours, source excerpts and
+//! the marked span, in the language and format it is told. What it is not
+//! told it does not decide — which language, whether the output is a
+//! terminal, where the files are — so the crate reads no environment and
+//! does no I/O; that is the CLI's business, in the `men-sharp` binary.
 
 use std::borrow::Cow;
 use std::ops::Range;
 
 mod catalog;
+mod render;
 
 pub use catalog::{Catalog, LANGUAGES, language_from_locale};
+pub use render::{Format, Reporter, Sources, line_column};
 
 /// A catalog key with the values for its placeholders — `{expected}` in
 /// the template is filled from the argument named `expected`.
