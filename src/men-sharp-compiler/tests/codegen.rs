@@ -4104,6 +4104,183 @@ fn the_corlib_queue_and_stack_work_end_to_end() {
 }
 
 #[test]
+fn comparers_flow_through_the_collections_and_linq() {
+    let Some(emulator) = run_with_corlib(
+        r#"
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            // a comparer of one's own: by length, then by the string
+            public class ByLength : IComparer<string>
+            {
+                public int Compare(string x, string y)
+                {
+                    if (x.Length != y.Length) { return x.Length.CompareTo(y.Length); }
+                    return string.Compare(x, y, StringComparison.Ordinal);
+                }
+            }
+
+            // an equality comparer of one's own: ints modulo 10
+            public class ModTen : IEqualityComparer<int>
+            {
+                public bool Equals(int x, int y) { return x % 10 == y % 10; }
+                public int GetHashCode(int obj) { return obj % 10; }
+            }
+
+            public class Program
+            {
+                public static string sorted;
+                public static string searched;
+                public static string dictionary;
+                public static string set;
+                public static string ordered;
+                public static string sets;
+                public static string queries;
+                public static string grouped;
+                public static string defaults;
+
+                static string Join(IEnumerable<string> items)
+                {
+                    string text = "";
+                    foreach (string item in items) { text = text + item + ","; }
+                    return text;
+                }
+
+                static string JoinInts(IEnumerable<int> items)
+                {
+                    string text = "";
+                    foreach (int item in items) { text = text + item + ","; }
+                    return text;
+                }
+
+                public static void Main()
+                {
+                    var words = new List<string> { "pear", "Fig", "apple", "kiwi", "fig" };
+                    words.Sort(new ByLength());
+                    string byLength = Join(words);
+                    words.Sort(StringComparer.OrdinalIgnoreCase);
+                    string ignoringCase = Join(words);
+                    words.Sort(Comparer<string>.Create((a, b) => string.Compare(b, a, StringComparison.Ordinal)));
+                    string reversed = Join(words);
+                    words.Sort(Comparer<string>.Default);
+                    string plain = Join(words);
+                    words.Sort(1, 3, new ByLength());
+                    sorted = byLength + " " + ignoringCase + " " + reversed + " " + plain + " " + Join(words);
+
+                    words.Sort(new ByLength());        // Fig,fig,kiwi,pear,apple
+                    searched = words.BinarySearch("pear", new ByLength()) + " " + words.BinarySearch("zz", new ByLength())
+                        + " " + words.BinarySearch(0, 2, "fig", new ByLength()) + " " + words.BinarySearch("Fig", null);
+
+                    var ages = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+                    ages["Ann"] = 30;
+                    ages["ANN"] = 31;       // same key
+                    ages.Add("bob", 41);
+                    int found;
+                    bool got = ages.TryGetValue("BOB", out found);
+                    string keys = "";
+                    foreach (var key in ages.Keys) { keys = keys + key + ","; }
+                    var ordinal = new Dictionary<string, int>(StringComparer.Ordinal);
+                    ordinal["a"] = 1;
+                    ordinal["A"] = 2;
+                    dictionary = ages.Count + " " + ages["ann"] + " " + got + found + " " + keys + " " + ages.Remove("BoB") + ages.Count
+                        + " " + ordinal.Count + " " + ages.Comparer.Equals("x", "X") + ordinal.Comparer.Equals("x", "X");
+
+                    var tens = new HashSet<int>(new int[] { 1, 11, 2, 22, 3 }, new ModTen());
+                    bool again = tens.Add(21);
+                    tens.UnionWith(new int[] { 4, 14 });
+                    tens.IntersectWith(new int[] { 12, 13, 14, 15 });   // keeps 2, 3, 4 by mod 10
+                    var lower = new HashSet<string>(StringComparer.InvariantCultureIgnoreCase) { "A", "b" };
+                    set = JoinInts(tens) + " " + again + " " + tens.Contains(33) + tens.Contains(5)
+                        + " " + lower.Add("a") + lower.Contains("B") + lower.Count + " " + lower.SetEquals(new string[] { "a", "B" });
+
+                    string[] mixed = new string[] { "b", "A", "a", "B", "cc", "C" };
+                    ordered = Join(mixed.OrderBy(s => s, StringComparer.OrdinalIgnoreCase))
+                        + " " + Join(mixed.OrderByDescending(s => s, new ByLength()).ThenBy(s => s, StringComparer.Ordinal))
+                        + " " + Join(mixed.OrderBy(s => s.Length).ThenByDescending(s => s, StringComparer.OrdinalIgnoreCase));
+
+                    sets = Join(mixed.Distinct(StringComparer.OrdinalIgnoreCase))
+                        + " " + Join(new string[] { "x", "Y" }.Union(new string[] { "X", "z" }, StringComparer.OrdinalIgnoreCase))
+                        + " " + Join(mixed.Intersect(new string[] { "c", "b" }, StringComparer.OrdinalIgnoreCase))
+                        + " " + Join(mixed.Except(new string[] { "a", "cc" }, StringComparer.OrdinalIgnoreCase))
+                        + " " + JoinInts(new int[] { 5, 15, 6 }.Distinct(new ModTen()));
+
+                    queries = mixed.Contains("CC", StringComparer.OrdinalIgnoreCase) + "" + mixed.Contains("CC", StringComparer.Ordinal)
+                        + " " + new string[] { "a", "B" }.SequenceEqual(new string[] { "A", "b" }, StringComparer.OrdinalIgnoreCase)
+                        + new string[] { "a", "B" }.SequenceEqual(new string[] { "A", "b" }, EqualityComparer<string>.Default)
+                        + " " + mixed.ToHashSet(StringComparer.OrdinalIgnoreCase).Count
+                        + " " + new string[] { "k", "K" }.ToDictionary(s => s + "!", s => s.Length, StringComparer.Ordinal).Count;
+
+                    string groups = "";
+                    foreach (var group in mixed.GroupBy(s => s, StringComparer.OrdinalIgnoreCase))
+                    {
+                        groups = groups + group.Key + ":" + group.Count() + ",";
+                    }
+                    string chosen = "";
+                    foreach (var group in mixed.GroupBy(s => s, s => s.ToUpperInvariant(), StringComparer.OrdinalIgnoreCase))
+                    {
+                        chosen = chosen + Join(group).Length + ",";
+                    }
+                    grouped = groups + " " + chosen;
+
+                    var byDefault = Comparer<int>.Default;
+                    var equality = EqualityComparer<string>.Default;
+                    var culture = StringComparer.CurrentCultureIgnoreCase;
+                    defaults = byDefault.Compare(3, 5) + " " + byDefault.Compare(5, 5) + " " + equality.Equals("a", "a") + equality.Equals("a", null)
+                        + " " + (equality.GetHashCode("hi") == "hi".GetHashCode()) + " " + culture.Equals("Ab", "aB") + " " + (culture.GetHashCode("Ab") == culture.GetHashCode("aB"))
+                        + " " + (StringComparer.Ordinal.Compare("a", "B") > 0) + " " + (StringComparer.OrdinalIgnoreCase.Compare("a", "B") < 0)
+                        + " " + StringComparer.Ordinal.GetHashCode(null);
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    // the default order of strings is the culture's (`fig` before `Fig`);
+    // the last sort touches only positions 1..3, by length then ordinal
+    assert_eq!(
+        string_of(&emulator, "sorted"),
+        "Fig,fig,kiwi,pear,apple, apple,Fig,fig,kiwi,pear, pear,kiwi,fig,apple,Fig, apple,fig,Fig,kiwi,pear, apple,Fig,fig,kiwi,pear,"
+    );
+    // two-letter "zz" would go first by length: ~0 = -1; "fig" is found
+    // within the first two; "Fig" by the default order is first
+    assert_eq!(string_of(&emulator, "searched"), "3 -1 1 0");
+    assert_eq!(
+        string_of(&emulator, "dictionary"),
+        "2 31 True41 Ann,bob, True1 2 TrueFalse"
+    );
+    // by mod 10: {1, 2, 3} then 21 is a repeat; 4 joins; intersect keeps 2..4
+    assert_eq!(
+        string_of(&emulator, "set"),
+        "2,3,4, False TrueFalse FalseTrue2 True"
+    );
+    // stable within equal keys: A before a, b before B; the length-then-
+    // ordinal comparer never ties, so its ThenBy changes nothing
+    assert_eq!(
+        string_of(&emulator, "ordered"),
+        "A,a,b,B,C,cc, cc,b,a,C,B,A, C,b,B,A,a,cc,"
+    );
+    // Intersect and Except yield each element once under the comparer: the
+    // `B` after `b` and the `a` after `A` are repeats
+    assert_eq!(
+        string_of(&emulator, "sets"),
+        "b,A,cc,C, x,Y,z, b,C, b,C, 5,6,"
+    );
+    assert_eq!(string_of(&emulator, "queries"), "TrueFalse TrueFalse 4 2");
+    assert_eq!(
+        string_of(&emulator, "grouped"),
+        "b:2,A:2,cc:1,C:1, 4,4,3,2,"
+    );
+    assert_eq!(
+        string_of(&emulator, "defaults"),
+        "-1 0 TrueFalse True True True True True 0"
+    );
+}
+
+#[test]
 fn index_initializers_write_through_the_indexer() {
     let Some(emulator) = run(
         r#"

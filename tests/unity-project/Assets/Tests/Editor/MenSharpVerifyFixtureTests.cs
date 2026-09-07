@@ -89,6 +89,7 @@ public class MenSharpVerifyFixtureTests
         new Fixture { Type = "VerifyArrays" },
         new Fixture { Type = "VerifyAsync", Timeout = 6f },
         new Fixture { Type = "VerifyCollections" },
+        new Fixture { Type = "VerifyComparers" },
         new Fixture { Type = "VerifyCrash" },
         new Fixture { Type = "VerifyData" },
         new Fixture { Type = "VerifyDeconstruct" },

@@ -29,6 +29,7 @@ public class MenSharpIntegrationTests
         "VerifyArrays",
         "VerifyAsync",
         "VerifyCollections",
+        "VerifyComparers",
         "VerifyCrash",
         "VerifyData",
         "VerifyDeconstruct",

@@ -998,6 +998,62 @@ impl Emulator {
                 self.heap[args[2]] = Value::Int32(result);
                 Ok(())
             }
+            "SystemString.__Compare__SystemString_SystemString__SystemInt32"
+            | "SystemString.__Compare__SystemString_SystemString_SystemStringComparison__SystemInt32" =>
+            {
+                let takes_comparison = signature.contains("SystemStringComparison");
+                let args = self.pop_arguments(if takes_comparison { 4 } else { 3 })?;
+                let comparison = if takes_comparison {
+                    self.heap[args[2]].as_i32()?
+                } else {
+                    0
+                };
+                let a = self.heap[args[0]].clone();
+                let b = self.heap[args[1]].clone();
+                // null orders first, and equal to null, in every comparison
+                let result = match (a, b) {
+                    (Value::Null, Value::Null) => 0,
+                    (Value::Null, _) => -1,
+                    (_, Value::Null) => 1,
+                    (a, b) => compare_with(&a.as_str()?, &b.as_str()?, comparison),
+                };
+                self.heap[*args.last().expect("a return slot")] = Value::Int32(result);
+                Ok(())
+            }
+            "SystemString.__Equals__SystemString_SystemString__SystemBoolean"
+            | "SystemString.__Equals__SystemString_SystemString_SystemStringComparison__SystemBoolean" =>
+            {
+                let takes_comparison = signature.contains("SystemStringComparison");
+                let args = self.pop_arguments(if takes_comparison { 4 } else { 3 })?;
+                let comparison = if takes_comparison {
+                    self.heap[args[2]].as_i32()?
+                } else {
+                    4
+                };
+                let a = self.heap[args[0]].clone();
+                let b = self.heap[args[1]].clone();
+                let result = match (a, b) {
+                    (Value::Null, Value::Null) => true,
+                    (Value::Null, _) | (_, Value::Null) => false,
+                    (a, b) => compare_with(&a.as_str()?, &b.as_str()?, comparison) == 0,
+                };
+                self.heap[*args.last().expect("a return slot")] = Value::Boolean(result);
+                Ok(())
+            }
+            "SystemString.__ToUpper__SystemString"
+            | "SystemString.__ToUpperInvariant__SystemString"
+            | "SystemString.__ToLower__SystemString"
+            | "SystemString.__ToLowerInvariant__SystemString" => {
+                let args = self.pop_arguments(2)?;
+                let text = self.heap[args[0]].as_str()?;
+                let changed: String = if signature.contains("Upper") {
+                    text.to_uppercase()
+                } else {
+                    text.to_lowercase()
+                };
+                self.heap[args[1]] = Value::Str(Rc::from(changed));
+                Ok(())
+            }
             "SystemSingle.__IsNaN__SystemSingle__SystemBoolean" => {
                 let args = self.pop_arguments(2)?;
                 let value = self.heap[args[0]].as_f32()?;
@@ -1214,7 +1270,8 @@ impl Emulator {
                 self.heap[args[2]] = Value::Boolean(equal == signature.contains("op_Equality"));
                 Ok(())
             }
-            "SystemObject.__GetHashCode__SystemInt32" => {
+            "SystemObject.__GetHashCode__SystemInt32"
+            | "SystemString.__GetHashCode__SystemInt32" => {
                 let args = self.pop_arguments(2)?;
                 let hash = match &self.heap[args[0]] {
                     Value::Null => 0,
@@ -1569,6 +1626,32 @@ fn compare_culture(a: &str, b: &str) -> i32 {
     match folded {
         std::cmp::Ordering::Equal => b.cmp(a) as i32,
         order => order as i32,
+    }
+}
+
+/// `string.Compare(a, b, comparison)` for the `StringComparison` values:
+/// culture-flavoured ones (0..=3) order like [`compare_culture`], ordinal
+/// (4, 5) by code point; the odd ones fold case first.
+fn compare_with(a: &str, b: &str, comparison: i32) -> i32 {
+    match comparison {
+        4 => a.cmp(b) as i32,
+        5 => {
+            let fold = |text: &str| {
+                text.chars()
+                    .flat_map(char::to_uppercase)
+                    .collect::<String>()
+            };
+            fold(a).cmp(&fold(b)) as i32
+        }
+        1 | 3 => {
+            let fold = |text: &str| {
+                text.chars()
+                    .flat_map(char::to_lowercase)
+                    .collect::<String>()
+            };
+            fold(a).cmp(&fold(b)) as i32
+        }
+        _ => compare_culture(a, b),
     }
 }
 

@@ -1,0 +1,7 @@
+[verify-comparers] 1 sort: Fig,fig,kiwi,pear,apple by case apple,Fig,fig,kiwi,pear created pear,kiwi,fig,apple,Fig search 3 -1
+[verify-comparers] 2 dictionary: count 2 ann 31 BOB True 41 keys Ann,bob ordinal 2 comparer True False
+[verify-comparers] 3 set: 2,3,4 again False contains True False lower False True 2 equals True
+[verify-comparers] 4 order: A,a,b,B,C,cc then cc,b,a,C,B,A then C,b,B,A,a,cc
+[verify-comparers] 5 sets: distinct b,A,cc,C union x,Y,z intersect b,C except b,C mod 5,6
+[verify-comparers] 6 queries: contains True False sequence True False tohashset 4 groups b:2,A:2,cc:1,C:1
+[verify-comparers] 7 defaults: -1 0 True False hash True culture True True ordinal True True null 0

@@ -10,6 +10,8 @@
 // dispatch on the boxed value (strings, ints, enums, `Vector3` hash by
 // value); a struct of your own gets the compiler's field-wise versions and
 // a class its override or reference identity — as without a comparer.
+// With an `IEqualityComparer<TKey>` (the source twin from Comparers.cs;
+// `StringComparer.OrdinalIgnoreCase` is the usual one) both go through it.
 //
 // `this[missing]` throws KeyNotFoundException and `Add` on a present key
 // ArgumentException, as .NET's do. A null key is not checked and fails
@@ -55,6 +57,7 @@ namespace System.Collections.Generic
         private int count;      // entries ever used (high-water mark)
         private int freeList;   // head of the removed-entry chain, -1 if none
         private int freeCount;
+        private IEqualityComparer<TKey> comparer;   // null: the key's own
 
         public Dictionary()
         {
@@ -65,6 +68,29 @@ namespace System.Collections.Generic
         {
             if (capacity < 4) { capacity = 4; }
             Initialize(capacity);
+        }
+
+        public Dictionary(IEqualityComparer<TKey> comparer)
+        {
+            this.comparer = comparer;
+            Initialize(4);
+        }
+
+        public Dictionary(int capacity, IEqualityComparer<TKey> comparer)
+        {
+            if (capacity < 4) { capacity = 4; }
+            this.comparer = comparer;
+            Initialize(capacity);
+        }
+
+        /// The comparer the keys go through: the one given, else the default.
+        public IEqualityComparer<TKey> Comparer
+        {
+            get
+            {
+                if (comparer == null) { return EqualityComparer<TKey>.Default; }
+                return comparer;
+            }
         }
 
         private void Initialize(int capacity)
@@ -85,14 +111,16 @@ namespace System.Collections.Generic
         // field-wise Equals/GetHashCode) or a class overriding them is
         // honoured; for everything else these are the `object` externs,
         // which dispatch on the box
-        private static int Hash(TKey key)
+        private int Hash(TKey key)
         {
-            return key.GetHashCode() & 0x7FFFFFFF;
+            if (comparer == null) { return key.GetHashCode() & 0x7FFFFFFF; }
+            return comparer.GetHashCode(key) & 0x7FFFFFFF;
         }
 
-        private static bool KeyEquals(TKey a, TKey b)
+        private bool KeyEquals(TKey a, TKey b)
         {
-            return a.Equals(b);
+            if (comparer == null) { return a.Equals(b); }
+            return comparer.Equals(a, b);
         }
 
         private int FindEntry(TKey key)

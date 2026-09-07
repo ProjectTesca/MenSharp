@@ -232,7 +232,12 @@ namespace System.Linq
 
         public static IEnumerable<TSource> Distinct<TSource>(this IEnumerable<TSource> source)
         {
-            HashSet<TSource> seen = new HashSet<TSource>();
+            return Distinct(source, null);
+        }
+
+        public static IEnumerable<TSource> Distinct<TSource>(this IEnumerable<TSource> source, IEqualityComparer<TSource> comparer)
+        {
+            HashSet<TSource> seen = new HashSet<TSource>(comparer);
             foreach (TSource item in source)
             {
                 if (seen.Add(item)) { yield return item; }
@@ -241,7 +246,12 @@ namespace System.Linq
 
         public static IEnumerable<TSource> Union<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second)
         {
-            HashSet<TSource> seen = new HashSet<TSource>();
+            return Union(first, second, null);
+        }
+
+        public static IEnumerable<TSource> Union<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second, IEqualityComparer<TSource> comparer)
+        {
+            HashSet<TSource> seen = new HashSet<TSource>(comparer);
             foreach (TSource item in first)
             {
                 if (seen.Add(item)) { yield return item; }
@@ -254,7 +264,12 @@ namespace System.Linq
 
         public static IEnumerable<TSource> Intersect<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second)
         {
-            HashSet<TSource> candidates = new HashSet<TSource>();
+            return Intersect(first, second, null);
+        }
+
+        public static IEnumerable<TSource> Intersect<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second, IEqualityComparer<TSource> comparer)
+        {
+            HashSet<TSource> candidates = new HashSet<TSource>(comparer);
             foreach (TSource item in second) { candidates.Add(item); }
             foreach (TSource item in first)
             {
@@ -264,7 +279,12 @@ namespace System.Linq
 
         public static IEnumerable<TSource> Except<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second)
         {
-            HashSet<TSource> excluded = new HashSet<TSource>();
+            return Except(first, second, null);
+        }
+
+        public static IEnumerable<TSource> Except<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second, IEqualityComparer<TSource> comparer)
+        {
+            HashSet<TSource> excluded = new HashSet<TSource>(comparer);
             foreach (TSource item in second) { excluded.Add(item); }
             foreach (TSource item in first)
             {
@@ -276,22 +296,42 @@ namespace System.Linq
 
         public static IOrderedEnumerable<TSource> OrderBy<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector)
         {
-            return new OrderedEnumerable<TSource>(source, new KeyLevel<TSource, TKey>(keySelector, false));
+            return new OrderedEnumerable<TSource>(source, new KeyLevel<TSource, TKey>(keySelector, null, false));
+        }
+
+        public static IOrderedEnumerable<TSource> OrderBy<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, IComparer<TKey> comparer)
+        {
+            return new OrderedEnumerable<TSource>(source, new KeyLevel<TSource, TKey>(keySelector, comparer, false));
         }
 
         public static IOrderedEnumerable<TSource> OrderByDescending<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector)
         {
-            return new OrderedEnumerable<TSource>(source, new KeyLevel<TSource, TKey>(keySelector, true));
+            return new OrderedEnumerable<TSource>(source, new KeyLevel<TSource, TKey>(keySelector, null, true));
+        }
+
+        public static IOrderedEnumerable<TSource> OrderByDescending<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, IComparer<TKey> comparer)
+        {
+            return new OrderedEnumerable<TSource>(source, new KeyLevel<TSource, TKey>(keySelector, comparer, true));
         }
 
         public static IOrderedEnumerable<TSource> ThenBy<TSource, TKey>(this IOrderedEnumerable<TSource> source, Func<TSource, TKey> keySelector)
         {
-            return source.__Then(new KeyLevel<TSource, TKey>(keySelector, false));
+            return source.__Then(new KeyLevel<TSource, TKey>(keySelector, null, false));
+        }
+
+        public static IOrderedEnumerable<TSource> ThenBy<TSource, TKey>(this IOrderedEnumerable<TSource> source, Func<TSource, TKey> keySelector, IComparer<TKey> comparer)
+        {
+            return source.__Then(new KeyLevel<TSource, TKey>(keySelector, comparer, false));
         }
 
         public static IOrderedEnumerable<TSource> ThenByDescending<TSource, TKey>(this IOrderedEnumerable<TSource> source, Func<TSource, TKey> keySelector)
         {
-            return source.__Then(new KeyLevel<TSource, TKey>(keySelector, true));
+            return source.__Then(new KeyLevel<TSource, TKey>(keySelector, null, true));
+        }
+
+        public static IOrderedEnumerable<TSource> ThenByDescending<TSource, TKey>(this IOrderedEnumerable<TSource> source, Func<TSource, TKey> keySelector, IComparer<TKey> comparer)
+        {
+            return source.__Then(new KeyLevel<TSource, TKey>(keySelector, comparer, true));
         }
 
         public static IEnumerable<TSource> Reverse<TSource>(this IEnumerable<TSource> source)
@@ -307,7 +347,12 @@ namespace System.Linq
 
         public static IEnumerable<IGrouping<TKey, TSource>> GroupBy<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector)
         {
-            List<Grouping<TKey, TSource>> groups = Group(source, keySelector);
+            return GroupBy(source, keySelector, (IEqualityComparer<TKey>)null);
+        }
+
+        public static IEnumerable<IGrouping<TKey, TSource>> GroupBy<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, IEqualityComparer<TKey> comparer)
+        {
+            List<Grouping<TKey, TSource>> groups = Group(source, keySelector, comparer);
             foreach (Grouping<TKey, TSource> group in groups)
             {
                 yield return group;
@@ -316,7 +361,12 @@ namespace System.Linq
 
         public static IEnumerable<IGrouping<TKey, TElement>> GroupBy<TSource, TKey, TElement>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, Func<TSource, TElement> elementSelector)
         {
-            List<Grouping<TKey, TElement>> groups = Group(source, keySelector, elementSelector);
+            return GroupBy(source, keySelector, elementSelector, null);
+        }
+
+        public static IEnumerable<IGrouping<TKey, TElement>> GroupBy<TSource, TKey, TElement>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, Func<TSource, TElement> elementSelector, IEqualityComparer<TKey> comparer)
+        {
+            List<Grouping<TKey, TElement>> groups = Group(source, keySelector, elementSelector, comparer);
             foreach (Grouping<TKey, TElement> group in groups)
             {
                 yield return group;
@@ -325,7 +375,7 @@ namespace System.Linq
 
         public static IEnumerable<TResult> GroupBy<TSource, TKey, TResult>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, Func<TKey, IEnumerable<TSource>, TResult> resultSelector)
         {
-            List<Grouping<TKey, TSource>> groups = Group(source, keySelector);
+            List<Grouping<TKey, TSource>> groups = Group(source, keySelector, null);
             foreach (Grouping<TKey, TSource> group in groups)
             {
                 yield return resultSelector(group.Key, group);
@@ -333,33 +383,33 @@ namespace System.Linq
         }
 
         // the groups, in order of each key's first appearance, as .NET's
-        private static List<Grouping<TKey, TSource>> Group<TSource, TKey>(IEnumerable<TSource> source, Func<TSource, TKey> keySelector)
+        private static List<Grouping<TKey, TSource>> Group<TSource, TKey>(IEnumerable<TSource> source, Func<TSource, TKey> keySelector, IEqualityComparer<TKey> comparer)
         {
             List<Grouping<TKey, TSource>> groups = new List<Grouping<TKey, TSource>>();
             foreach (TSource item in source)
             {
-                FindGroup(groups, keySelector(item)).Add(item);
+                FindGroup(groups, keySelector(item), comparer).Add(item);
             }
             return groups;
         }
 
-        private static List<Grouping<TKey, TElement>> Group<TSource, TKey, TElement>(IEnumerable<TSource> source, Func<TSource, TKey> keySelector, Func<TSource, TElement> elementSelector)
+        private static List<Grouping<TKey, TElement>> Group<TSource, TKey, TElement>(IEnumerable<TSource> source, Func<TSource, TKey> keySelector, Func<TSource, TElement> elementSelector, IEqualityComparer<TKey> comparer)
         {
             List<Grouping<TKey, TElement>> groups = new List<Grouping<TKey, TElement>>();
             foreach (TSource item in source)
             {
-                FindGroup(groups, keySelector(item)).Add(elementSelector(item));
+                FindGroup(groups, keySelector(item), comparer).Add(elementSelector(item));
             }
             return groups;
         }
 
-        private static Grouping<TKey, TElement> FindGroup<TKey, TElement>(List<Grouping<TKey, TElement>> groups, TKey key)
+        private static Grouping<TKey, TElement> FindGroup<TKey, TElement>(List<Grouping<TKey, TElement>> groups, TKey key, IEqualityComparer<TKey> comparer)
         {
-            int hash = Comparers.Hash(key);
+            int hash = comparer == null ? Comparers.Hash(key) : comparer.GetHashCode(key);
             for (int i = 0; i < groups.Count; i++)
             {
                 Grouping<TKey, TElement> group = groups[i];
-                if (group.__hash == hash && Comparers.Equal(group.Key, key))
+                if (group.__hash == hash && (comparer == null ? Comparers.Equal(group.Key, key) : comparer.Equals(group.Key, key)))
                 {
                     return group;
                 }
@@ -436,7 +486,22 @@ namespace System.Linq
             return false;
         }
 
+        public static bool Contains<TSource>(this IEnumerable<TSource> source, TSource value, IEqualityComparer<TSource> comparer)
+        {
+            if (comparer == null) { return Contains(source, value); }
+            foreach (TSource item in source)
+            {
+                if (comparer.Equals(item, value)) { return true; }
+            }
+            return false;
+        }
+
         public static bool SequenceEqual<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second)
+        {
+            return SequenceEqual(first, second, null);
+        }
+
+        public static bool SequenceEqual<TSource>(this IEnumerable<TSource> first, IEnumerable<TSource> second, IEqualityComparer<TSource> comparer)
         {
             IEnumerator<TSource> left = first.GetEnumerator();
             try
@@ -447,7 +512,10 @@ namespace System.Linq
                     while (left.MoveNext())
                     {
                         if (!right.MoveNext()) { return false; }
-                        if (!Comparers.Equal(left.Current, right.Current)) { return false; }
+                        bool same = comparer == null
+                            ? Comparers.Equal(left.Current, right.Current)
+                            : comparer.Equals(left.Current, right.Current);
+                        if (!same) { return false; }
                     }
                     return !right.MoveNext();
                 }
@@ -1043,9 +1111,19 @@ namespace System.Linq
             return new HashSet<TSource>(source);
         }
 
+        public static HashSet<TSource> ToHashSet<TSource>(this IEnumerable<TSource> source, IEqualityComparer<TSource> comparer)
+        {
+            return new HashSet<TSource>(source, comparer);
+        }
+
         public static Dictionary<TKey, TSource> ToDictionary<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector)
         {
-            Dictionary<TKey, TSource> dictionary = new Dictionary<TKey, TSource>();
+            return ToDictionary(source, keySelector, (IEqualityComparer<TKey>)null);
+        }
+
+        public static Dictionary<TKey, TSource> ToDictionary<TSource, TKey>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, IEqualityComparer<TKey> comparer)
+        {
+            Dictionary<TKey, TSource> dictionary = new Dictionary<TKey, TSource>(comparer);
             foreach (TSource item in source)
             {
                 dictionary.Add(keySelector(item), item);
@@ -1055,7 +1133,12 @@ namespace System.Linq
 
         public static Dictionary<TKey, TElement> ToDictionary<TSource, TKey, TElement>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, Func<TSource, TElement> elementSelector)
         {
-            Dictionary<TKey, TElement> dictionary = new Dictionary<TKey, TElement>();
+            return ToDictionary(source, keySelector, elementSelector, null);
+        }
+
+        public static Dictionary<TKey, TElement> ToDictionary<TSource, TKey, TElement>(this IEnumerable<TSource> source, Func<TSource, TKey> keySelector, Func<TSource, TElement> elementSelector, IEqualityComparer<TKey> comparer)
+        {
+            Dictionary<TKey, TElement> dictionary = new Dictionary<TKey, TElement>(comparer);
             foreach (TSource item in source)
             {
                 dictionary.Add(keySelector(item), elementSelector(item));
@@ -1083,11 +1166,13 @@ namespace MenSharp.Internal
     public sealed class KeyLevel<TElement, TKey> : SortLevel<TElement>
     {
         private readonly Func<TElement, TKey> keySelector;
+        private readonly IComparer<TKey> comparer;   // null: the key's own order
         private readonly bool descending;
 
-        public KeyLevel(Func<TElement, TKey> keySelector, bool descending)
+        public KeyLevel(Func<TElement, TKey> keySelector, IComparer<TKey> comparer, bool descending)
         {
             this.keySelector = keySelector;
+            this.comparer = comparer;
             this.descending = descending;
         }
 
@@ -1098,11 +1183,20 @@ namespace MenSharp.Internal
             {
                 keys[i] = keySelector(items[i]);
             }
+            if (comparer == null)
+            {
+                if (descending)
+                {
+                    return (i, j) => Comparers.Compare(keys[j], keys[i]);
+                }
+                return (i, j) => Comparers.Compare(keys[i], keys[j]);
+            }
+            IComparer<TKey> order = comparer;
             if (descending)
             {
-                return (i, j) => Comparers.Compare(keys[j], keys[i]);
+                return (i, j) => order.Compare(keys[j], keys[i]);
             }
-            return (i, j) => Comparers.Compare(keys[i], keys[j]);
+            return (i, j) => order.Compare(keys[i], keys[j]);
         }
     }
 

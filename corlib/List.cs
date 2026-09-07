@@ -12,11 +12,11 @@
 // wanted. `Sort()`, `BinarySearch`, `Contains` and `IndexOf` order and
 // compare through `MenSharp.Internal.Comparers` (see Comparers.cs). The
 // indexer, `Insert`, `RemoveAt` and the range members throw
-// ArgumentOutOfRangeException as .NET's do.
+// ArgumentOutOfRangeException as .NET's do. The `IComparer<T>` overloads
+// take the source twin from Comparers.cs; a `null` comparer means the
+// default, as in .NET.
 //
-// Not here: the overloads taking an `IComparer<T>` / `IEqualityComparer<T>`
-// (M# has no comparer objects; `Sort(Comparison<T>)` covers custom orders)
-// and `AsReadOnly` (no `ReadOnlyCollection<T>`).
+// Not here: `AsReadOnly` (no `ReadOnlyCollection<T>`).
 
 using System;
 
@@ -224,12 +224,25 @@ namespace System.Collections.Generic
         /// complement: Udon has no `~` extern for ints.)
         public int BinarySearch(T item)
         {
-            int low = 0;
-            int high = size - 1;
+            return BinarySearch(0, size, item, null);
+        }
+
+        public int BinarySearch(T item, IComparer<T> comparer)
+        {
+            return BinarySearch(0, size, item, comparer);
+        }
+
+        public int BinarySearch(int index, int count, T item, IComparer<T> comparer)
+        {
+            if (index < 0 || count < 0 || index + count > size) { throw new ArgumentOutOfRangeException("index"); }
+            int low = index;
+            int high = index + count - 1;
             while (low <= high)
             {
                 int middle = low + (high - low) / 2;
-                int order = MenSharp.Internal.Comparers.Compare(items[middle], item);
+                int order = comparer == null
+                    ? MenSharp.Internal.Comparers.Compare(items[middle], item)
+                    : comparer.Compare(items[middle], item);
                 if (order == 0) { return middle; }
                 if (order < 0) { low = middle + 1; }
                 else { high = middle - 1; }
@@ -428,6 +441,30 @@ namespace System.Collections.Generic
                 T key = items[i];
                 int j = i - 1;
                 while (j >= 0 && comparison(items[j], key) > 0)
+                {
+                    items[j + 1] = items[j];
+                    j--;
+                }
+                items[j + 1] = key;
+            }
+        }
+
+        public void Sort(IComparer<T> comparer)
+        {
+            Sort(0, size, comparer);
+        }
+
+        public void Sort(int index, int count, IComparer<T> comparer)
+        {
+            if (index < 0 || count < 0 || index + count > size) { throw new ArgumentOutOfRangeException("index"); }
+            int end = index + count;
+            for (int i = index + 1; i < end; i++)
+            {
+                T key = items[i];
+                int j = i - 1;
+                while (j >= index && (comparer == null
+                    ? MenSharp.Internal.Comparers.Compare(items[j], key)
+                    : comparer.Compare(items[j], key)) > 0)
                 {
                     items[j + 1] = items[j];
                     j--;

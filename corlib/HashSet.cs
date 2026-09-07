@@ -12,8 +12,9 @@
 // `null` is a member like any other in .NET; it hashes nowhere, so it lives
 // in a flag beside the table and enumerates last. The set operators
 // (`UnionWith`, `IntersectWith`, ...) accept any sequence, including the
-// set itself. Not here: the constructors and members taking an
-// `IEqualityComparer<T>` (M# has no comparer objects).
+// set itself. An `IEqualityComparer<T>` (the source twin from Comparers.cs)
+// replaces the element's own `Equals`/`GetHashCode`; the sets the operators
+// build internally share it.
 
 using System;
 
@@ -30,6 +31,7 @@ namespace System.Collections.Generic
         private int freeList;   // head of the removed-entry chain, -1 if none
         private int freeCount;
         private bool hasNull;
+        private IEqualityComparer<T> comparer;   // null: the element's own
 
         public HashSet()
         {
@@ -46,6 +48,36 @@ namespace System.Collections.Generic
         {
             Initialize(4);
             UnionWith(collection);
+        }
+
+        public HashSet(IEqualityComparer<T> comparer)
+        {
+            this.comparer = comparer;
+            Initialize(4);
+        }
+
+        public HashSet(int capacity, IEqualityComparer<T> comparer)
+        {
+            if (capacity < 4) { capacity = 4; }
+            this.comparer = comparer;
+            Initialize(capacity);
+        }
+
+        public HashSet(IEnumerable<T> collection, IEqualityComparer<T> comparer)
+        {
+            this.comparer = comparer;
+            Initialize(4);
+            UnionWith(collection);
+        }
+
+        /// The comparer the elements go through: the one given, else the default.
+        public IEqualityComparer<T> Comparer
+        {
+            get
+            {
+                if (comparer == null) { return EqualityComparer<T>.Default; }
+                return comparer;
+            }
         }
 
         private void Initialize(int capacity)
@@ -71,14 +103,16 @@ namespace System.Collections.Generic
             return boxed == null;
         }
 
-        private static int Hash(T item)
+        private int Hash(T item)
         {
-            return item.GetHashCode() & 0x7FFFFFFF;
+            if (comparer == null) { return item.GetHashCode() & 0x7FFFFFFF; }
+            return comparer.GetHashCode(item) & 0x7FFFFFFF;
         }
 
-        private static bool ItemEquals(T a, T b)
+        private bool ItemEquals(T a, T b)
         {
-            return a.Equals(b);
+            if (comparer == null) { return a.Equals(b); }
+            return comparer.Equals(a, b);
         }
 
         // the entry holding a non-null `item`, or -1
@@ -295,7 +329,7 @@ namespace System.Collections.Generic
         private HashSet<T> AsSet(IEnumerable<T> other)
         {
             if (IsThis(other)) { return this; }
-            return new HashSet<T>(other);
+            return new HashSet<T>(other, comparer);
         }
 
         public void UnionWith(IEnumerable<T> other)
@@ -307,7 +341,7 @@ namespace System.Collections.Generic
         public void IntersectWith(IEnumerable<T> other)
         {
             if (IsThis(other)) { return; }
-            var keep = new HashSet<T>(other);
+            var keep = new HashSet<T>(other, comparer);
             for (int i = 0; i < count; i++)
             {
                 if (hashes[i] >= 0 && !keep.Contains(slots[i])) { RemoveEntryAt(i); }
@@ -335,7 +369,7 @@ namespace System.Collections.Generic
             }
             // an element `other` repeats must not be removed on its second
             // appearance after being added on its first
-            var added = new HashSet<T>();
+            var added = new HashSet<T>(comparer);
             foreach (T item in other)
             {
                 if (added.Contains(item)) { continue; }
