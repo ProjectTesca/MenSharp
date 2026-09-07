@@ -34,6 +34,21 @@ MenSharpとはVRChatで使用されるUdon Assemblyへのコンパイラです�
 ## インストール方法
 インストールは非常に簡単です。
 
+### VCC(VRChat Creator Companion)の場合
+まずはMenSharpパッケージのzipをダウンロードして適当なディレクトリに展開します。
+
+その後、VCCの設定のパッケージタブからユーザーパッケージとして追加します。
+
+![](./assets/vcc0.png)
+
+次に、プロジェクトを新規作成するか既存のプロジェクトの管理画面を開いてMenSharpを追加します。
+
+![](./assets/vcc1.png)
+
+追加できたら、次の[使い方](#使い方)セクションに進んでください。
+
+<div style="page-break-before:always"></div>
+
 ### ALCOMの場合
 まずはMenSharpパッケージのzipをダウンロードして適当なディレクトリに展開します。
 
@@ -44,6 +59,8 @@ MenSharpとはVRChatで使用されるUdon Assemblyへのコンパイラです�
 次に、プロジェクトを新規作成するか既存のプロジェクトの管理画面を開きます。開いたら先ほど登録したパッケージをプロジェクトにインストールします。
 
 ![](./assets/alcom1.png)
+
+追加できたら、次の[使い方](#使い方)セクションに進んでください。
 
 <div style="page-break-before:always"></div>
 
@@ -93,6 +110,8 @@ public class Test : MenSharpBehaviour
 最後にPlayボタンを押してCubeをクリックし、以下のように出れば成功です。
 
 ![](./assets/unity3.png)
+
+このように、MenSharpはソースコードが保存されると自動的にUdon Assemblyへコンパイルされ、ドラッグアンドドロップするだけで自動的に登録されます。
 
 <div style="page-break-before:always"></div>
 
