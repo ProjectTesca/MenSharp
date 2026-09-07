@@ -17,8 +17,8 @@ use std::collections::HashMap;
 use men_sharp_parser::ast::EntityID;
 
 use crate::{
-    collect::{DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode},
     error::{SemanticError, SemanticErrorKind},
+    semantics::collect::{DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode},
     symbol::{
         Accessibility, DeclarationSite, FileId, Symbol, SymbolId, SymbolKind, SymbolTable,
         SyntaxRef, new_symbol,

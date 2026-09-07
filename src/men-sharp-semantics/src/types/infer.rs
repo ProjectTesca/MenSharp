@@ -24,8 +24,8 @@
 use std::collections::HashMap;
 
 use crate::{
-    lookup::TypeSystem,
     symbol::SymbolId,
+    types::lookup::TypeSystem,
     types::{MemberSignature, Type, TypeTarget, TypeVariance},
 };
 

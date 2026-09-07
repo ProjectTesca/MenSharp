@@ -1,4 +1,19 @@
-//! The semantic type model.
+//! The type system: what a type *is*, and every question asked about one.
+//!
+//! [`Type`] and the signatures below are the vocabulary; the modules around
+//! them are the answers:
+//!
+//! - [`external`] is the way in to types the compilation only references —
+//!   a trait the driver implements over the assemblies it loaded.
+//! - [`lookup`] is [`TypeSystem`](lookup::TypeSystem): what `receiver.name`
+//!   can mean, walking base classes and interfaces and instantiating
+//!   generics on the way.
+//! - [`conversions`] decides what converts to what, implicitly or with a
+//!   cast, including the operators a type declares itself.
+//! - `infer` unifies parameters against arguments for a generic call.
+//!
+//! What this reads of the program — the symbol table, the declarations and
+//! the resolved signatures — it is handed; it runs no phase of its own.
 //!
 //! A [`Type`] is what a written type *means* once names are resolved: `int` becomes
 //! the external `System.Int32`, `Player` becomes a source symbol, `List<Player>`
@@ -10,10 +25,15 @@
 //! answers `Error`, which downstream phases treat as compatible-with-anything to
 //! avoid error cascades — the same philosophy as the parser's holes.
 
+pub mod conversions;
+pub mod external;
+pub(crate) mod infer;
+pub mod lookup;
+
 use crate::symbol::SymbolId;
 
 /// A type defined outside the compilation, in a referenced assembly. Opaque here:
-/// only the [`crate::external::ExternalTypes`] provider can look inside it.
+/// only the [`crate::types::external::ExternalTypes`] provider can look inside it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ExternalTypeId {
     /// Which referenced assembly, in the provider's numbering.
@@ -141,7 +161,7 @@ impl Eq for ParameterSignature {}
 pub enum DefaultArgument {
     /// A metadata constant (`int count = -1`, an enum's member as its
     /// underlying value, ...).
-    Constant(crate::external::ExternalConstant),
+    Constant(crate::types::external::ExternalConstant),
     /// `= null`.
     Null,
     /// `= default`, or `[Optional]` with no value.

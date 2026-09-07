@@ -28,8 +28,8 @@ use men_sharp_diagnostics::{Edit, Hint, Message};
 
 use super::{Checker, ResolvedTarget};
 use crate::error::SemanticErrorKind;
-use crate::lookup::MemberOrigin;
 use crate::symbol::{SymbolId, SymbolKind, SyntaxRef};
+use crate::types::lookup::MemberOrigin;
 use crate::types::{Type, TypeTarget};
 
 /// Everything a switch over one type has to handle.

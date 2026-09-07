@@ -16,10 +16,10 @@
 //! case. Each is additive when its time comes.
 
 use crate::{
-    external::ExternalTypeKind,
-    lookup::{MemberOrigin, TypeSystem},
     symbol::SymbolId,
     symbol::SymbolKind,
+    types::external::ExternalTypeKind,
+    types::lookup::{MemberOrigin, TypeSystem},
     types::{MemberSignature, Type, TypeTarget},
 };
 

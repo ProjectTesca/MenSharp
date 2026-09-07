@@ -32,11 +32,11 @@ use men_sharp_parser::ast::{
 };
 
 use crate::{
-    collect::{DeclarationNode, MemberNode, NamespaceNode, TypeNode},
     error::{SemanticError, SemanticErrorKind},
-    external::{ExternalTypeKind, ExternalTypes},
-    merge::Declarations,
+    semantics::collect::{DeclarationNode, MemberNode, NamespaceNode, TypeNode},
+    semantics::merge::Declarations,
     symbol::{FileId, SymbolId, SymbolKind, SyntaxRef},
+    types::external::{ExternalTypeKind, ExternalTypes},
     types::{
         FunctionSignature, MemberSignature, ParameterPassing, ParameterSignature, TupleElement,
         Type, TypeTarget,

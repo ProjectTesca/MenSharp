@@ -4,7 +4,7 @@
 //! namespaces, types, members and the `using` directives that will drive name
 //! resolution. It touches no shared state, so the compiler driver runs it on every
 //! file in parallel; the sequential merge into one [`crate::symbol::SymbolTable`]
-//! happens afterwards in [`crate::merge`].
+//! happens afterwards in [`crate::semantics::merge`].
 //!
 //! Only declaration *shapes* are read (names, arities, modifiers). Written types —
 //! return types, parameter types, base types — stay in the syntax tree, reachable

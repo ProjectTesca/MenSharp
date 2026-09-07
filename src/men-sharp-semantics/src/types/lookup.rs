@@ -26,10 +26,10 @@ use std::collections::HashSet;
 use men_sharp_parser::ast::EntityID;
 
 use crate::{
-    external::{ExternalMember, ExternalMemberKind, ExternalTypeKind, ExternalTypes},
-    merge::Declarations,
-    resolve::Signatures,
+    semantics::merge::Declarations,
+    semantics::resolve::Signatures,
     symbol::{Accessibility, SymbolId, SymbolKind},
+    types::external::{ExternalMember, ExternalMemberKind, ExternalTypeKind, ExternalTypes},
     types::{ExternalTypeId, MemberSignature, Type, TypeTarget},
 };
 
