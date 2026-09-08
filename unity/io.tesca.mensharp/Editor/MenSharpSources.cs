@@ -27,7 +27,7 @@ public static class MenSharpSources
     public const string RuntimeAssembly = "ProjectTesca.MenSharp.Runtime";
     public const string SourceRoot = "Assets/MenSharp";
     public const string DefaultProgramsFolder = SourceRoot + "/Programs";
-    public const string PackageName = "com.projecttesca.mensharp";
+    public const string PackageName = "io.tesca.mensharp";
 
     /// The classified sources of one compilation.
     public sealed class SourceSet

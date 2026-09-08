@@ -20,11 +20,11 @@ manifest["zipSHA256"] = os.environ["SHA256"]
 
 listing = {
     "name": "MenSharp",
-    "id": "com.projecttesca.mensharp.repo",
+    "id": "io.tesca.mensharp.repo",
     "url": f"{pages_url}/index.json",
     "author": "ProjectTesca",
     "packages": {
-        "com.projecttesca.mensharp": {
+        "io.tesca.mensharp": {
             "versions": {version: manifest},
         },
     },

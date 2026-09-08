@@ -24,10 +24,10 @@ repo="$(cd "$(dirname "$0")/.." && pwd)"
 echo "building the compiler (release)..."
 cargo build --release -p men-sharp --manifest-path "$repo/Cargo.toml"
 
-destination="$project/Packages/com.projecttesca.mensharp"
+destination="$project/Packages/io.tesca.mensharp"
 echo "installing package to $destination"
 mkdir -p "$destination"
-cp -r "$repo/unity/com.projecttesca.mensharp/." "$destination/"
+cp -r "$repo/unity/io.tesca.mensharp/." "$destination/"
 
 mkdir -p "$destination/Compiler~"
 case "$(uname -s)" in

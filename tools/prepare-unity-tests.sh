@@ -19,7 +19,7 @@ set -euo pipefail
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 project="$repo/tests/unity-project"
 packages="$project/Packages"
-mensharp="$packages/com.projecttesca.mensharp"
+mensharp="$packages/io.tesca.mensharp"
 
 if [[ -n "${MENSHARP_CARGO_TARGET:-}" ]]; then
     cargo build --release -p men-sharp --manifest-path "$repo/Cargo.toml" \
@@ -32,7 +32,7 @@ fi
 
 rm -rf "$mensharp"
 mkdir -p "$mensharp"
-cp -r "$repo/unity/com.projecttesca.mensharp/." "$mensharp/"
+cp -r "$repo/unity/io.tesca.mensharp/." "$mensharp/"
 mkdir -p "$mensharp/Compiler~"
 cp "$binary" "$mensharp/Compiler~/men-sharp-linux-x64"
 chmod +x "$mensharp/Compiler~/men-sharp-linux-x64"

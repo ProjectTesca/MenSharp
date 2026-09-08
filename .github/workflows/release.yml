@@ -63,7 +63,7 @@ jobs:
         id: assemble
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          PKG=com.projecttesca.mensharp
+          PKG=io.tesca.mensharp
           ZIP="$PKG-$VERSION.zip"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "zip=$ZIP" >> "$GITHUB_OUTPUT"

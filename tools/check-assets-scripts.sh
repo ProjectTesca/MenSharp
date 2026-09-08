@@ -59,8 +59,8 @@ echo "type-checking $compile_dir as C# $langversion (what Unity uses)"
 # the package's Runtime sources are compiled in rather than referenced as
 # Unity's built dll, so a twin class added to the package counts before
 # Unity has rebuilt it
-runtime_dir="$project/Packages/com.projecttesca.mensharp/Runtime"
-[[ -d "$runtime_dir" ]] || runtime_dir="$(cd "$(dirname "$0")/.." && pwd)/unity/com.projecttesca.mensharp/Runtime"
+runtime_dir="$project/Packages/io.tesca.mensharp/Runtime"
+[[ -d "$runtime_dir" ]] || runtime_dir="$(cd "$(dirname "$0")/.." && pwd)/unity/io.tesca.mensharp/Runtime"
 dotnet "$csc" -nologo -target:library -nostdlib -langversion:"$langversion" \
     "${references[@]}" -out:"$output/assets.dll" "$compile_dir"/*.cs "$runtime_dir"/*.cs
 echo "ok"

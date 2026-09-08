@@ -14,7 +14,7 @@ set -euo pipefail
 project="${1:-$HOME/ALCOM/Projects/MenSharpTest}"
 unity_data="${2:-$HOME/Unity/Hub/Editor/2022.3.22f1/Editor/Data}"
 repo="$(cd "$(dirname "$0")/.." && pwd)"
-package="$repo/unity/com.projecttesca.mensharp"
+package="$repo/unity/io.tesca.mensharp"
 
 skip() {
     echo "skipped: $1" >&2
