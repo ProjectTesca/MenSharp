@@ -687,7 +687,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     pub(super) fn emit_resume_thunk(&mut self, label: LabelId, target: &FunctionKey) {
         let shape = Self::action_shape();
         let invoker = self.invokers[&shape].clone();
-        let saved_frame = self.current_frame.replace(invoker.clone());
+        let saved_frame = self.enter_frame(Some(invoker.clone()));
         let ctx = self.dispatcher_ctx(&invoker);
         let (invoker_parameters, invoker_return) = {
             let function = &self.functions[&invoker];
@@ -730,7 +730,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::Label(continuation));
         self.program.code.push(Op::RestoreFrame(marker));
         self.program.code.push(Op::JumpIndirect(invoker_return));
-        self.current_frame = saved_frame;
+        self.leave_frame(saved_frame);
     }
 
     // ------------------------------------------------------- scheduler

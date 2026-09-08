@@ -115,6 +115,8 @@ pub fn generate(
         export_layouts: HashMap::default(),
         call_edges: HashMap::default(),
         temp_counter: 0,
+        temp_live: Vec::new(),
+        temp_pool: HashMap::default(),
         entry_class: None,
         entry_chain: Vec::new(),
         marker: behaviour_marker(declarations),
@@ -267,6 +269,13 @@ struct Function {
     frame: Vec<DataId>,
 }
 
+/// What `enter_frame` sets aside; see there.
+struct FrameState {
+    key: Option<FunctionKey>,
+    live: Vec<(DataId, String)>,
+    pool: HashMap<String, Vec<DataId>>,
+}
+
 /// Layout of one instantiated class: `object[]` size and field slot indices.
 #[derive(Debug, Clone)]
 struct Layout {
@@ -416,6 +425,14 @@ struct Generator<'a, 'ast> {
     export_layouts: HashMap<SymbolId, HashMap<programs::LayoutKey, programs::ExportLayout>>,
     call_edges: HashMap<FunctionKey, HashSet<FunctionKey>>,
     temp_counter: usize,
+    /// The temps of the function being compiled, in allocation order, each
+    /// with its Udon type. A statement releases what it allocated once it is
+    /// lowered (`release_temps`), so the next statement's temps reuse the
+    /// slots: a function's frame holds as many temps as its busiest
+    /// statement needs, not one per temporary ever written.
+    temp_live: Vec<(DataId, String)>,
+    /// Released temps of the function being compiled, by Udon type.
+    temp_pool: HashMap<String, Vec<DataId>>,
     /// Set when the entry class is a `MenSharpBehaviour` subclass: its
     /// instance fields live in named heap slots and its instance methods have
     /// no `this` — the behaviour is the program.
@@ -2233,7 +2250,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// A slot for an intermediate value, typed as Udon sees it.
+    ///
+    /// Inside a body, a slot a finished statement released is handed out
+    /// again before a new one is declared. Whatever the last statement left
+    /// in it is still there: a temp is written before it is read, never
+    /// relied on to start out null. Outside a body (`current_frame` unset)
+    /// every temp is fresh.
     fn temp(&mut self, udon_type: &str) -> DataId {
+        if self.current_frame.is_some()
+            && let Some(slot) = self.temp_pool.get_mut(udon_type).and_then(Vec::pop)
+        {
+            self.temp_live.push((slot, udon_type.to_string()));
+            return slot;
+        }
         self.temp_counter += 1;
         let name = format!("__t{}", self.temp_counter);
         let slot = self.program.add_data(DataSymbol {
@@ -2244,13 +2274,60 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             sync: None,
         });
         // a temp allocated while a body compiles is part of that function's
-        // static frame — what a re-entrant call has to save
+        // static frame — what a re-entrant call has to save, and what an
+        // `await` or `yield` snapshots
         if let Some(key) = &self.current_frame
             && let Some(function) = self.functions.get_mut(key)
         {
             function.frame.push(slot);
+            self.temp_live.push((slot, udon_type.to_string()));
         }
         slot
+    }
+
+    /// Starts compiling code for `key`'s frame (or none): the temps of
+    /// whatever was being compiled are set aside and come back with
+    /// `leave_frame`, so a body emitted in the middle of another keeps
+    /// its slots to itself.
+    fn enter_frame(&mut self, key: Option<FunctionKey>) -> FrameState {
+        FrameState {
+            key: std::mem::replace(&mut self.current_frame, key),
+            live: std::mem::take(&mut self.temp_live),
+            pool: std::mem::take(&mut self.temp_pool),
+        }
+    }
+
+    fn leave_frame(&mut self, saved: FrameState) {
+        self.current_frame = saved.key;
+        self.temp_live = saved.live;
+        self.temp_pool = saved.pool;
+    }
+
+    /// Hands back the temps a statement or expression allocated and no
+    /// longer needs: everything since `mark`, except `keep` (an expression's
+    /// result, for its parent to consume), the slots locals live in (a
+    /// declaration's local outlives its statement; the block that closes
+    /// its scope releases it) and a `catch` clause's exception slot.
+    fn release_temps(&mut self, ctx: &Ctx<'ast>, mark: usize, keep: Option<DataId>) {
+        if mark >= self.temp_live.len() {
+            return;
+        }
+        let held = |slot: DataId| {
+            keep == Some(slot)
+                || ctx.caught.contains(&slot)
+                || ctx
+                    .locals
+                    .iter()
+                    .any(|scope| scope.values().any(|local| local.slot == slot))
+        };
+        let released: Vec<(DataId, String)> = self.temp_live.drain(mark..).collect();
+        for (slot, udon_type) in released {
+            if held(slot) {
+                self.temp_live.push((slot, udon_type));
+            } else {
+                self.temp_pool.entry(udon_type).or_default().push(slot);
+            }
+        }
     }
 
     fn temp_for(&mut self, ty: &Type) -> DataId {

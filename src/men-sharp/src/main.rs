@@ -350,8 +350,10 @@ fn run() -> ExitCode {
             }
         };
         let meta = output.program.to_meta_json().expect("assembled above");
+        let blob = output.program.to_blob().expect("assembled above");
         let uasm_path = format!("{out_name}.uasm");
         let meta_path = format!("{out_name}.meta.json");
+        let blob_path = format!("{out_name}.uprog");
         if let Err(error) = std::fs::write(&uasm_path, uasm) {
             eprintln!("{uasm_path}: {error}");
             return ExitCode::FAILURE;
@@ -360,7 +362,11 @@ fn run() -> ExitCode {
             eprintln!("{meta_path}: {error}");
             return ExitCode::FAILURE;
         }
-        println!("wrote {uasm_path} and {meta_path}");
+        if let Err(error) = std::fs::write(&blob_path, blob) {
+            eprintln!("{blob_path}: {error}");
+            return ExitCode::FAILURE;
+        }
+        println!("wrote {uasm_path}, {meta_path} and {blob_path}");
         return ExitCode::SUCCESS;
     }
 

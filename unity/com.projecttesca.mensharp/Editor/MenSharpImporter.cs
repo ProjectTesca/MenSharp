@@ -37,10 +37,16 @@ public static class MenSharpImporter
         out bool unchanged)
     {
         unchanged = false;
+        var watch = System.Diagnostics.Stopwatch.StartNew();
         string assembly = File.ReadAllText(uasmPath);
         string metaJson = File.ReadAllText(metaPath);
+        // the binary program beside them, when the compiler wrote one
+        string blobPath = Path.ChangeExtension(uasmPath, ".uprog");
+        byte[] blob = File.Exists(blobPath) ? File.ReadAllBytes(blobPath) : null;
 
         var programAsset = AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(assetPath);
+        LoadMilliseconds += watch.ElapsedMilliseconds;
+        watch.Restart();
         bool created = programAsset == null;
         var assemblyField = typeof(UdonAssemblyProgramAsset).GetField(
             "udonAssembly", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
@@ -59,6 +65,7 @@ public static class MenSharpImporter
         }
 
         programAsset.metaJson = metaJson;
+        programAsset.programBlob = blob;
         assemblyField.SetValue(programAsset, assembly);
 
         if (created)
@@ -67,10 +74,21 @@ public static class MenSharpImporter
             // sub-asset can be created next to it
             AssetDatabase.CreateAsset(programAsset, assetPath);
         }
+        CreateMilliseconds += watch.ElapsedMilliseconds;
+        watch.Restart();
         programAsset.RefreshProgram();
+        RefreshMilliseconds += watch.ElapsedMilliseconds;
+        watch.Restart();
         EditorUtility.SetDirty(programAsset);
+        DirtyMilliseconds += watch.ElapsedMilliseconds;
         return programAsset;
     }
+
+    /// Where a compile's import time goes, summed over its programs.
+    public static long LoadMilliseconds;
+    public static long CreateMilliseconds;
+    public static long RefreshMilliseconds;
+    public static long DirtyMilliseconds;
 
     [MenuItem("MenSharp/Import Udon Program (manual)")]
     public static void ImportManually()

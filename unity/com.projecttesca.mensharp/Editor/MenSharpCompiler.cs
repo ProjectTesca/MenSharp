@@ -121,6 +121,17 @@ public static class MenSharpCompiler
         var produced = Directory.GetFiles(outputDirectory, "*.uasm");
         int updated = 0;
         int unchanged = 0;
+        MenSharpProgramAsset.AssembleMilliseconds = 0;
+        MenSharpProgramAsset.MetaMilliseconds = 0;
+        MenSharpProgramBuilder.ParseMilliseconds = 0;
+        MenSharpProgramBuilder.CodeMilliseconds = 0;
+        MenSharpProgramBuilder.HeapMilliseconds = 0;
+        MenSharpProgramBuilder.ProgramMilliseconds = 0;
+        MenSharpImporter.LoadMilliseconds = 0;
+        MenSharpImporter.CreateMilliseconds = 0;
+        MenSharpImporter.RefreshMilliseconds = 0;
+        MenSharpImporter.DirtyMilliseconds = 0;
+        long importMilliseconds = 0;
         var current = new Dictionary<string, HashSet<string>>();
         foreach (string folder in set.ProgramsFolders)
         {
@@ -143,8 +154,10 @@ public static class MenSharpCompiler
                 folder = ProgramsFolder;
                 EnsureAssetFolder(folder);
             }
+            long before = stopwatch.ElapsedMilliseconds;
             MenSharpImporter.CreateOrUpdate(
                 uasmPath, metaPath, $"{folder}/{classPath}.asset", force, out bool sameAsBefore);
+            importMilliseconds += stopwatch.ElapsedMilliseconds - before;
             if (sameAsBefore)
             {
                 unchanged++;
@@ -163,7 +176,9 @@ public static class MenSharpCompiler
         {
             DeleteProgramsWithoutABehaviour(entry.Key, entry.Value);
         }
+        long beforeSave = stopwatch.ElapsedMilliseconds;
         AssetDatabase.SaveAssets();
+        long saveMilliseconds = stopwatch.ElapsedMilliseconds - beforeSave;
         MenSharpSources.InvalidateProgramIndex();
 
         long totalMilliseconds = stopwatch.ElapsedMilliseconds;
@@ -171,7 +186,10 @@ public static class MenSharpCompiler
             $"MenSharp: compiled {produced.Length} behaviour(s) from {set.MenSharp.Count} "
             + $"file(s) (+{set.Library.Count} library file(s)) in {totalMilliseconds}ms "
             + $"(compiler {compilerMilliseconds}ms, program assets {totalMilliseconds - compilerMilliseconds}ms: "
-            + $"{updated} updated, {unchanged} unchanged).");
+            + $"{updated} updated, {unchanged} unchanged; build {MenSharpProgramAsset.AssembleMilliseconds}ms, "
+            + $"heap init {MenSharpProgramAsset.MetaMilliseconds}ms, store "
+            + $"{MenSharpImporter.RefreshMilliseconds - MenSharpProgramAsset.AssembleMilliseconds - MenSharpProgramAsset.MetaMilliseconds}ms, "
+            + $"save {saveMilliseconds}ms).");
     }
 
     /// Every source path with its last-write time, plus the compiler's — the

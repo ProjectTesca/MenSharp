@@ -456,6 +456,119 @@ impl Program {
         Ok(out)
     }
 
+    /// The program as the Unity importer builds it, in one binary blob:
+    /// what the `.uasm` text says, minus the parsing. Little-endian
+    /// throughout except the byte code, which is the VM's (big-endian words).
+    ///
+    /// ```text
+    /// "MSHP" u32 version=1
+    /// u32 symbols; each: str name, str udon type, u8 flags (1 = `this`,
+    ///                    2 = exported), str sync mode ("" = none)
+    /// u32 externs; each: str signature — heap slot `symbols + i`, in the
+    ///                    order the code first uses them
+    /// u32 entry points; each: str name, u32 code address (all exported)
+    /// u32 code bytes; the byte code
+    /// str = u32 byte length, UTF-8
+    /// ```
+    ///
+    /// Initial heap values still ride in [`Program::to_meta_json`]: they
+    /// need the editor to decode (`System.Type`, enums), and the importer
+    /// applies them after building either way.
+    pub fn to_blob(&self) -> Result<Vec<u8>, AssembleError> {
+        timescope::scope!("to blob");
+        let layout = self.layout()?;
+
+        fn str(out: &mut Vec<u8>, text: &str) {
+            out.extend_from_slice(&(text.len() as u32).to_le_bytes());
+            out.extend_from_slice(text.as_bytes());
+        }
+        fn u32(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_le_bytes());
+        }
+        fn word(out: &mut Vec<u8>, value: u32) {
+            out.extend_from_slice(&value.to_be_bytes());
+        }
+
+        let mut out = Vec::with_capacity(64 + self.data.len() * 40 + self.code.len() * 8);
+        out.extend_from_slice(b"MSHP");
+        u32(&mut out, 1);
+
+        u32(&mut out, self.data.len() as u32);
+        for symbol in &self.data {
+            str(&mut out, &symbol.name);
+            str(&mut out, &symbol.udon_type);
+            let mut flags = 0u8;
+            if matches!(symbol.init, HeapInit::SelfReference) {
+                flags |= 1;
+            }
+            if symbol.export {
+                flags |= 2;
+            }
+            out.push(flags);
+            str(&mut out, symbol.sync.as_deref().unwrap_or(""));
+        }
+
+        let mut extern_slots: HashMap<&str, u32> = HashMap::default();
+        let mut externs: Vec<&str> = Vec::new();
+        for op in &self.code {
+            if let Op::Extern(signature) = op
+                && !extern_slots.contains_key(signature.as_str())
+            {
+                extern_slots.insert(signature, (self.data.len() + externs.len()) as u32);
+                externs.push(signature);
+            }
+        }
+        u32(&mut out, externs.len() as u32);
+        for signature in &externs {
+            str(&mut out, signature);
+        }
+
+        u32(&mut out, self.entry_points.len() as u32);
+        for entry in &self.entry_points {
+            str(&mut out, &entry.name);
+            u32(&mut out, layout.label_addresses[entry.label.0]);
+        }
+
+        u32(&mut out, layout.end_address);
+        let code_start = out.len();
+        for op in &self.code {
+            match op {
+                Op::Label(_)
+                | Op::Comment(_)
+                | Op::SaveFrame(_)
+                | Op::RestoreFrame(_)
+                | Op::SnapshotFrame(_)
+                | Op::RestoreSnapshot(_)
+                | Op::Source(_) => {}
+                Op::Nop => word(&mut out, 0),
+                Op::Pop => word(&mut out, 2),
+                Op::Copy => word(&mut out, 9),
+                Op::Push(data) => {
+                    word(&mut out, 1);
+                    word(&mut out, data.0 as u32);
+                }
+                Op::JumpIfFalse(target) => {
+                    word(&mut out, 4);
+                    word(&mut out, layout.resolve(target));
+                }
+                Op::Jump(target) => {
+                    word(&mut out, 5);
+                    word(&mut out, layout.resolve(target));
+                }
+                Op::Extern(signature) => {
+                    word(&mut out, 6);
+                    word(&mut out, extern_slots[signature.as_str()]);
+                }
+                Op::JumpIndirect(data) => {
+                    word(&mut out, 8);
+                    word(&mut out, data.0 as u32);
+                }
+            }
+        }
+        debug_assert_eq!(out.len() - code_start, layout.end_address as usize);
+        Ok(out)
+    }
+
     /// Sidecar JSON: initial heap values (which `.uasm` cannot express) and
     /// entry points. The Unity importer applies this after assembling; the
     /// emulator applies the same values, so both worlds start identically.

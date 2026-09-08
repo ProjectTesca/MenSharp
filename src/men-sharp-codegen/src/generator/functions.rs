@@ -251,9 +251,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     pub(super) fn compile_function(&mut self, key: &FunctionKey) {
         timescope::scope!("compile function");
-        self.current_frame = Some(key.clone());
+        let saved = self.enter_frame(Some(key.clone()));
         self.compile_function_body(key);
-        self.current_frame = None;
+        self.leave_frame(saved);
     }
 
     fn compile_function_body(&mut self, key: &FunctionKey) {
@@ -1710,7 +1710,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
             self.program.code.push(Op::Label(label));
             // the dispatcher's own temps belong to its frame, like any body's
-            self.current_frame = Some(key.clone());
+            let saved_frame = self.enter_frame(Some(key.clone()));
 
             let mut ctx = Ctx {
                 key: key.clone(),
@@ -1814,7 +1814,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
             // no type matched: return default
             self.program.code.push(Op::JumpIndirect(return_slot));
-            self.current_frame = None;
+            self.leave_frame(saved_frame);
         }
         emitted
     }

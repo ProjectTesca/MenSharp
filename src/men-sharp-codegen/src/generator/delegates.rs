@@ -1064,7 +1064,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     fn emit_multicast_thunk(&mut self, label: LabelId, shape_index: u32) {
         let shape = self.delegate_shapes[shape_index as usize].clone();
         let invoker = self.invokers[&shape].clone();
-        let saved_frame = self.current_frame.replace(invoker.clone());
+        let saved_frame = self.enter_frame(Some(invoker.clone()));
         let mut ctx = self.dispatcher_ctx(&invoker);
         let (invoker_label, invoker_parameters, invoker_return) = {
             let function = &self.functions[&invoker];
@@ -1134,6 +1134,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::Label(done));
         self.program.code.push(Op::JumpIndirect(invoker_return));
         let _ = &mut ctx;
-        self.current_frame = saved_frame;
+        self.leave_frame(saved_frame);
     }
 }

@@ -473,8 +473,9 @@ impl Compiler {
             programs
                 .par_iter()
                 .map(|program| {
-                    Self::emit_one(program)
-                        .map(|emitted| emitted.map(|(uasm, meta)| EmittedProgram { uasm, meta }))
+                    Self::emit_one(program).map(|emitted| {
+                        emitted.map(|(uasm, meta, blob)| EmittedProgram { uasm, meta, blob })
+                    })
                 })
                 .collect()
         })
@@ -494,7 +495,7 @@ impl Compiler {
             programs
                 .par_iter()
                 .map(|program| {
-                    let (uasm, meta) = match Self::emit_one(program)? {
+                    let (uasm, meta, blob) = match Self::emit_one(program)? {
                         Ok(texts) => texts,
                         Err(error) => return Some(Err(EmitError::Assemble(error))),
                     };
@@ -502,12 +503,17 @@ impl Compiler {
                     // not swapped in (`Game.Door` must not become `Game.uasm`)
                     let uasm_path = out_dir.join(format!("{}.uasm", program.class_path));
                     let meta_path = out_dir.join(format!("{}.meta.json", program.class_path));
+                    let blob_path = out_dir.join(format!("{}.uprog", program.class_path));
                     timescope::scope!("write program files");
                     let written = std::fs::write(&uasm_path, uasm)
                         .map_err(|error| EmitError::Write(uasm_path.clone(), error))
                         .and_then(|()| {
                             std::fs::write(&meta_path, meta)
                                 .map_err(|error| EmitError::Write(meta_path, error))
+                        })
+                        .and_then(|()| {
+                            std::fs::write(&blob_path, blob)
+                                .map_err(|error| EmitError::Write(blob_path, error))
                         });
                     Some(written.map(|()| uasm_path))
                 })
@@ -515,26 +521,37 @@ impl Compiler {
         })
     }
 
-    /// The two texts of one program; `None` when it has codegen errors. The
-    /// `.uasm` and the sidecar are independent, so they are built side by side.
-    fn emit_one(program: &UdonBehaviourProgram) -> Option<Result<(String, String), AssembleError>> {
+    /// The three outputs of one program — `.uasm` text, meta JSON sidecar and
+    /// the binary program blob — or `None` when it has codegen errors. They
+    /// are independent, so they are built side by side.
+    #[allow(clippy::type_complexity)]
+    fn emit_one(
+        program: &UdonBehaviourProgram,
+    ) -> Option<Result<(String, String, Vec<u8>), AssembleError>> {
         if !program.output.errors.is_empty() {
             return None;
         }
         timescope::scope!("assemble program");
-        let (uasm, meta) = rayon::join(
+        let (uasm, (meta, blob)) = rayon::join(
             || program.output.program.to_uasm(),
-            || program.output.program.to_meta_json(),
+            || {
+                rayon::join(
+                    || program.output.program.to_meta_json(),
+                    || program.output.program.to_blob(),
+                )
+            },
         );
-        Some(uasm.and_then(|uasm| meta.map(|meta| (uasm, meta))))
+        Some(uasm.and_then(|uasm| meta.and_then(|meta| blob.map(|blob| (uasm, meta, blob)))))
     }
 }
 
-/// One behaviour's assembled output: the `.uasm` text and the meta JSON
-/// sidecar the Unity importer applies alongside it.
+/// One behaviour's assembled output: the `.uasm` text, the meta JSON
+/// sidecar the Unity importer applies alongside it, and the binary program
+/// blob the importer builds the program from (see [`men_sharp_asm::Program::to_blob`]).
 pub struct EmittedProgram {
     pub uasm: String,
     pub meta: String,
+    pub blob: Vec<u8>,
 }
 
 /// Why a program could not be written out.

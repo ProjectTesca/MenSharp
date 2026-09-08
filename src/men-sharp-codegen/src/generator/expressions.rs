@@ -22,7 +22,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn lower_statement(&mut self, ctx: &mut Ctx<'ast>, statement: &'ast Statement<'ast, 'ast>) {
+        let temps_before = self.temp_live.len();
         self.emit_source_mark(ctx, &statement.span());
+        self.lower_statement_kind(ctx, statement);
+        self.release_temps(ctx, temps_before, None);
+    }
+
+    fn lower_statement_kind(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        statement: &'ast Statement<'ast, 'ast>,
+    ) {
         match statement {
             Statement::Block(block) => self.lower_block(ctx, block),
             Statement::Empty { .. } => {}
@@ -820,7 +830,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     // ---------------------------------------------------------- expressions
 
+    /// Lowers `expression` to the slot holding its value. The temps its
+    /// sub-expressions used are released on the way out — only the result
+    /// (and any pattern variable it declared, which lives in a local) stays
+    /// — so `a + b + c` reuses one slot per operand, not one per node.
     pub(super) fn lower_expression(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        expression: &'ast Expression<'ast, 'ast>,
+    ) -> Option<DataId> {
+        let temps_before = self.temp_live.len();
+        let result = self.lower_expression_unreleased(ctx, expression);
+        self.release_temps(ctx, temps_before, result);
+        result
+    }
+
+    fn lower_expression_unreleased(
         &mut self,
         ctx: &mut Ctx<'ast>,
         expression: &'ast Expression<'ast, 'ast>,

@@ -32,10 +32,72 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
     [SerializeField]
     public string metaJson;
 
+    /// The compiler's binary program (`.uprog`), from which the program is
+    /// built without parsing the assembly text. Empty on assets imported by
+    /// an older package; the text is the fallback either way.
+    [SerializeField]
+    public byte[] programBlob;
+
+    /// Where a compile's program-asset time goes, accumulated across the
+    /// programs of one compile (MenSharpCompiler resets and reports them).
+    public static long AssembleMilliseconds;
+    public static long MetaMilliseconds;
+
     protected override void RefreshProgramImpl()
     {
-        AssembleWithSizedHeap();
+        var watch = System.Diagnostics.Stopwatch.StartNew();
+        if (!BuildDirectly())
+        {
+            AssembleWithSizedHeap();
+        }
+        AssembleMilliseconds += watch.ElapsedMilliseconds;
+        watch.Restart();
         ApplyMenSharpMeta();
+        MetaMilliseconds += watch.ElapsedMilliseconds;
+        // the base RefreshProgram stores `program` (with the network-calling
+        // metadata) right after this returns; nothing to store here
+    }
+
+    /// The program from the text through [`MenSharpProgramBuilder`]: the
+    /// SDK assembler's result, in a fraction of its time. False — with the
+    /// program left for the SDK assembler — when the text is not the
+    /// compiler's own shape or the SDK's type resolver is not reachable.
+    private bool BuildDirectly()
+    {
+        IUAssemblyTypeResolver resolver = TypeResolver();
+        if (resolver == null)
+        {
+            return false;
+        }
+        try
+        {
+            program = programBlob != null && programBlob.Length > 0
+                ? MenSharpProgramBuilder.Build(programBlob, resolver)
+                : MenSharpProgramBuilder.Build(udonAssembly, resolver);
+            assemblyError = null;
+        }
+        catch (MenSharpProgramBuilder.FormatException e)
+        {
+            Debug.LogWarning($"MenSharp: {name}: {e.Message}; assembling with the SDK assembler instead", this);
+            return false;
+        }
+        if (Environment.GetEnvironmentVariable("MENSHARP_VERIFY_PROGRAM_BUILDER") == "1")
+        {
+            IUdonProgram built = program;
+            AssembleWithSizedHeap();
+            var differences = MenSharpProgramBuilder.Differences(built, program);
+            if (differences.Count > 0)
+            {
+                Debug.LogError($"MenSharp: {name}: program builder differs from the SDK assembler: "
+                    + string.Join(", ", differences), this);
+            }
+            else
+            {
+                Debug.Log($"MenSharp: {name}: program builder verified against the SDK assembler", this);
+            }
+            program = built;
+        }
+        return true;
     }
 
     /// The `[NetworkCallable]` metadata from the sidecar, in the SDK's
@@ -142,11 +204,15 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         return (uint)(symbols + externs.Count);
     }
 
-    private static UAssemblyAssembler SizedAssembler()
+    private static IUAssemblyTypeResolver typeResolver;
+
+    /// The SDK's type resolver (Udon type name → System.Type), borrowed from
+    /// its editor interface; null while that is not ready.
+    private static IUAssemblyTypeResolver TypeResolver()
     {
-        if (assembler != null)
+        if (typeResolver != null)
         {
-            return assembler;
+            return typeResolver;
         }
         UdonEditorInterface editorInterface = SharedEditorInterface();
         if (editorInterface == null)
@@ -161,6 +227,21 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             Debug.LogWarning(
                 "MenSharp: cannot size the Udon heap on this SDK (UdonEditorInterface has no "
                 + "_typeResolverGroup); programs over 512 heap slots will fail to assemble");
+            return null;
+        }
+        typeResolver = resolver;
+        return resolver;
+    }
+
+    private static UAssemblyAssembler SizedAssembler()
+    {
+        if (assembler != null)
+        {
+            return assembler;
+        }
+        IUAssemblyTypeResolver resolver = TypeResolver();
+        if (resolver == null)
+        {
             return null;
         }
         heapFactory = new SizedHeapFactory();
@@ -321,8 +402,8 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             current.Heap.SetHeapVariable(address, value, declared ?? value.GetType());
         }
 
-        // persist the patched heap so the runtime loads the same state
-        SerializedProgramAsset.StoreProgram(current);
+        // the caller (RefreshProgram) stores the patched heap so the runtime
+        // loads the same state
     }
 
     private static object Decode(MenSharpHeapEntry entry)

@@ -242,7 +242,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let target = self.dispatchers[key].receiver.clone();
 
         self.program.code.push(Op::Label(label));
-        self.current_frame = Some(key.clone());
+        let saved_frame = self.enter_frame(Some(key.clone()));
         let mut ctx = self.dispatcher_ctx(key);
 
         let no = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
@@ -276,7 +276,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         self.program.code.push(Op::Label(fail));
         self.program.code.push(Op::JumpIndirect(return_slot));
-        self.current_frame = None;
+        self.leave_frame(saved_frame);
     }
 
     /// `value is T` as a bool slot: a type with a type id through its
@@ -626,7 +626,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let name = self.dispatchers[key].name.clone();
 
         self.program.code.push(Op::Label(label));
-        self.current_frame = Some(key.clone());
+        let saved_frame = self.enter_frame(Some(key.clone()));
         let mut ctx = self.dispatcher_ctx(key);
 
         let fallback = self.fresh_label("object_fallback");
@@ -693,7 +693,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         self.call_extern(&ctx, signature, &pushed, 0..0);
         self.program.code.push(Op::JumpIndirect(return_slot));
-        self.current_frame = None;
+        self.leave_frame(saved_frame);
     }
 
     /// Whether a value of static type `ty` may at runtime be an object of
