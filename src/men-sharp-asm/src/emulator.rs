@@ -11,8 +11,8 @@
 //! to add one. Whether a signature exists in the real whitelist is a separate
 //! question, checked against the SDK dump by the codegen crate's tests.
 
+use rustc_hash::FxHashMap as HashMap;
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 
 use crate::program::{Assembled, HALT_ADDRESS, HeapInit, Program, Resolved};
@@ -260,7 +260,7 @@ impl Emulator {
     /// applied (the same values `to_meta_json` ships to Unity).
     pub fn new(program: &Program, assembled: &Assembled) -> Self {
         let mut heap = Vec::with_capacity(program.data.len());
-        let mut names = HashMap::new();
+        let mut names = HashMap::default();
         for (index, symbol) in program.data.iter().enumerate() {
             names.insert(symbol.name.clone(), index);
             heap.push(match &symbol.init {

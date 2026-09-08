@@ -25,7 +25,7 @@
 //! and the real values ride along in [`Program::to_meta_json`], which the Unity
 //! importer (and the emulator) applies after assembling.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::fmt::Write;
 
 /// Jumping here (or past the end of code) halts the program. This is the same
@@ -246,10 +246,15 @@ impl Program {
         LabelId(self.labels.len() - 1)
     }
 
-    /// Resolves labels to byte addresses. Fails on labels that were created
-    /// but never placed.
-    pub fn assemble(&self) -> Result<Assembled, AssembleError> {
-        timescope::scope!("assemble");
+    /// Resolves every label to its byte address and checks what assembly
+    /// would reject: a label placed twice, a jump or entry point to a label
+    /// never placed, a frame marker that codegen failed to resolve.
+    ///
+    /// This is all the text emitters need, so they take it instead of
+    /// [`Program::assemble`], which also materialises every instruction
+    /// (and used to run twice per program, once per emitter).
+    pub fn layout(&self) -> Result<Layout, AssembleError> {
+        timescope::scope!("layout");
         let mut label_addresses = vec![None; self.labels.len()];
         let mut address = 0u32;
         for op in &self.code {
@@ -262,15 +267,52 @@ impl Program {
             address += op.byte_size();
         }
 
-        let resolve = |target: &Target| -> Result<u32, AssembleError> {
+        let check = |target: &Target| -> Result<(), AssembleError> {
             match target {
-                Target::Address(address) => Ok(*address),
+                Target::Address(_) => Ok(()),
                 Target::Label(label) => label_addresses[label.0]
+                    .map(|_| ())
                     .ok_or_else(|| AssembleError::UnplacedLabel(self.labels[label.0].clone())),
             }
         };
+        for op in &self.code {
+            match op {
+                Op::SaveFrame(_)
+                | Op::RestoreFrame(_)
+                | Op::SnapshotFrame(_)
+                | Op::RestoreSnapshot(_) => return Err(AssembleError::UnresolvedFrameMarker),
+                Op::Jump(target) | Op::JumpIfFalse(target) => check(target)?,
+                _ => {}
+            }
+        }
+        for entry in &self.entry_points {
+            label_addresses[entry.label.0]
+                .ok_or_else(|| AssembleError::UnplacedLabel(entry.name.clone()))?;
+        }
 
-        let mut instructions = Vec::new();
+        Ok(Layout {
+            end_address: address,
+            label_addresses: label_addresses
+                .into_iter()
+                .map(|a| a.unwrap_or(HALT_ADDRESS))
+                .collect(),
+        })
+    }
+
+    /// Resolves labels to byte addresses and materialises every instruction
+    /// — what the emulator runs. Fails on what [`Program::layout`] fails on.
+    pub fn assemble(&self) -> Result<Assembled, AssembleError> {
+        timescope::scope!("assemble");
+        let layout = self.layout()?;
+
+        let resolve = |target: &Target| -> u32 {
+            match target {
+                Target::Address(address) => *address,
+                Target::Label(label) => layout.label_addresses[label.0],
+            }
+        };
+
+        let mut instructions = Vec::with_capacity(self.code.len());
         let mut address = 0u32;
         for op in &self.code {
             let size = op.byte_size();
@@ -279,15 +321,13 @@ impl Program {
                 Op::SaveFrame(_)
                 | Op::RestoreFrame(_)
                 | Op::SnapshotFrame(_)
-                | Op::RestoreSnapshot(_) => {
-                    return Err(AssembleError::UnresolvedFrameMarker);
-                }
+                | Op::RestoreSnapshot(_) => unreachable!("rejected by layout"),
                 Op::Nop => Some(Resolved::Nop),
                 Op::Pop => Some(Resolved::Pop),
                 Op::Copy => Some(Resolved::Copy),
                 Op::Push(data) => Some(Resolved::Push(*data)),
-                Op::Jump(target) => Some(Resolved::Jump(resolve(target)?)),
-                Op::JumpIfFalse(target) => Some(Resolved::JumpIfFalse(resolve(target)?)),
+                Op::Jump(target) => Some(Resolved::Jump(resolve(target))),
+                Op::JumpIfFalse(target) => Some(Resolved::JumpIfFalse(resolve(target))),
                 Op::JumpIndirect(data) => Some(Resolved::JumpIndirect(*data)),
                 Op::Extern(signature) => Some(Resolved::Extern(signature.clone())),
             };
@@ -297,21 +337,17 @@ impl Program {
             address += size;
         }
 
-        let mut entry_addresses = HashMap::new();
-        for entry in &self.entry_points {
-            let address = label_addresses[entry.label.0]
-                .ok_or_else(|| AssembleError::UnplacedLabel(entry.name.clone()))?;
-            entry_addresses.insert(entry.name.clone(), address);
-        }
+        let entry_addresses = self
+            .entry_points
+            .iter()
+            .map(|entry| (entry.name.clone(), layout.label_addresses[entry.label.0]))
+            .collect();
 
         Ok(Assembled {
             instructions,
             entry_addresses,
-            end_address: address,
-            label_addresses: label_addresses
-                .into_iter()
-                .map(|a| a.unwrap_or(HALT_ADDRESS))
-                .collect(),
+            end_address: layout.end_address,
+            label_addresses: layout.label_addresses,
         })
     }
 
@@ -327,14 +363,16 @@ impl Program {
     /// are emitted as resolved addresses.
     pub fn to_uasm(&self) -> Result<String, AssembleError> {
         timescope::scope!("to uasm");
-        let assembled = self.assemble()?;
+        let layout = self.layout()?;
         // label id → exported event name (the label line must match `.export`)
         let entry_labels: HashMap<usize, &str> = self
             .entry_points
             .iter()
             .map(|entry| (entry.label.0, entry.name.as_str()))
             .collect();
-        let mut out = String::new();
+        // a data line is about 40 bytes, a code line about 30; a few
+        // reallocations at most instead of one per kilobyte
+        let mut out = String::with_capacity(64 + self.data.len() * 48 + self.code.len() * 32);
 
         out.push_str(".data_start\n");
         for symbol in &self.data {
@@ -358,7 +396,6 @@ impl Program {
         for entry in &self.entry_points {
             let _ = writeln!(out, "    .export {}", entry.name);
         }
-        let mut address = 0u32;
         let mut pending_labels: Vec<&str> = Vec::new();
         for op in &self.code {
             match op {
@@ -377,22 +414,30 @@ impl Program {
                     for label in pending_labels.drain(..) {
                         let _ = writeln!(out, "    {label}:");
                     }
-                    let text = match op {
-                        Op::Nop => "NOP".to_string(),
-                        Op::Pop => "POP".to_string(),
-                        Op::Copy => "COPY".to_string(),
-                        Op::Push(data) => format!("PUSH, {}", self.data[data.0].name),
+                    out.push_str("        ");
+                    match op {
+                        Op::Nop => out.push_str("NOP"),
+                        Op::Pop => out.push_str("POP"),
+                        Op::Copy => out.push_str("COPY"),
+                        Op::Push(data) => {
+                            out.push_str("PUSH, ");
+                            out.push_str(&self.data[data.0].name);
+                        }
                         Op::Jump(target) => {
-                            format!("JUMP, 0x{:08X}", self.resolve_for_text(&assembled, target))
+                            let _ = write!(out, "JUMP, 0x{:08X}", layout.resolve(target));
                         }
-                        Op::JumpIfFalse(target) => format!(
-                            "JUMP_IF_FALSE, 0x{:08X}",
-                            self.resolve_for_text(&assembled, target)
-                        ),
+                        Op::JumpIfFalse(target) => {
+                            let _ = write!(out, "JUMP_IF_FALSE, 0x{:08X}", layout.resolve(target));
+                        }
                         Op::JumpIndirect(data) => {
-                            format!("JUMP_INDIRECT, {}", self.data[data.0].name)
+                            out.push_str("JUMP_INDIRECT, ");
+                            out.push_str(&self.data[data.0].name);
                         }
-                        Op::Extern(signature) => format!("EXTERN, \"{signature}\""),
+                        Op::Extern(signature) => {
+                            out.push_str("EXTERN, \"");
+                            out.push_str(signature);
+                            out.push('"');
+                        }
                         Op::Label(_)
                         | Op::Comment(_)
                         | Op::SaveFrame(_)
@@ -402,22 +447,13 @@ impl Program {
                         | Op::Source(_) => {
                             unreachable!()
                         }
-                    };
-                    let _ = writeln!(out, "        {text}");
-                    address += op.byte_size();
+                    }
+                    out.push('\n');
                 }
             }
         }
-        let _ = address;
         out.push_str(".code_end\n");
         Ok(out)
-    }
-
-    fn resolve_for_text(&self, assembled: &Assembled, target: &Target) -> u32 {
-        match target {
-            Target::Address(address) => *address,
-            Target::Label(label) => assembled.label_addresses[label.0],
-        }
     }
 
     /// Sidecar JSON: initial heap values (which `.uasm` cannot express) and
@@ -425,8 +461,9 @@ impl Program {
     /// emulator applies the same values, so both worlds start identically.
     pub fn to_meta_json(&self) -> Result<String, AssembleError> {
         timescope::scope!("to meta json");
-        let assembled = self.assemble()?;
-        let mut out = String::from("{\n  \"heap\": [\n");
+        let layout = self.layout()?;
+        let mut out = String::with_capacity(256 + self.data.len() * 64 + self.code.len() * 8);
+        out.push_str("{\n  \"heap\": [\n");
         let mut first = true;
         for symbol in &self.data {
             // `null` needs no entry, and `this` is already in the `.uasm`
@@ -439,40 +476,57 @@ impl Program {
                 out.push_str(",\n");
             }
             first = false;
-            let (kind, value) = match &symbol.init {
+            out.push_str("    {\"name\": ");
+            write_json_string(&mut out, &symbol.name);
+            out.push_str(", \"kind\": \"");
+            // string-like values are JSON strings already; numbers are
+            // quoted so the importer parses every value the same way
+            match &symbol.init {
                 HeapInit::Null | HeapInit::SelfReference => unreachable!(),
-                HeapInit::Boolean(v) => ("Boolean", v.to_string()),
-                HeapInit::Int32(v) => ("Int32", v.to_string()),
-                HeapInit::Int64(v) => ("Int64", v.to_string()),
-                HeapInit::UInt32(v) => ("UInt32", v.to_string()),
-                HeapInit::Single(v) => ("Single", format!("{v:?}")),
-                HeapInit::Double(v) => ("Double", format!("{v:?}")),
-                HeapInit::Char(v) => ("Char", (*v as u32).to_string()),
-                HeapInit::Str(v) => ("String", json_string(v)),
-                HeapInit::TypeOf(v) => ("Type", json_string(v)),
+                HeapInit::Boolean(v) => {
+                    let _ = write!(out, "Boolean\", \"value\": \"{v}\"");
+                }
+                HeapInit::Int32(v) => {
+                    let _ = write!(out, "Int32\", \"value\": \"{v}\"");
+                }
+                HeapInit::Int64(v) => {
+                    let _ = write!(out, "Int64\", \"value\": \"{v}\"");
+                }
+                HeapInit::UInt32(v) => {
+                    let _ = write!(out, "UInt32\", \"value\": \"{v}\"");
+                }
+                HeapInit::Single(v) => {
+                    let _ = write!(out, "Single\", \"value\": \"{v:?}\"");
+                }
+                HeapInit::Double(v) => {
+                    let _ = write!(out, "Double\", \"value\": \"{v:?}\"");
+                }
+                HeapInit::Char(v) => {
+                    let _ = write!(out, "Char\", \"value\": \"{}\"", *v as u32);
+                }
+                HeapInit::Str(v) => {
+                    out.push_str("String\", \"value\": ");
+                    write_json_string(&mut out, v);
+                }
+                HeapInit::TypeOf(v) => {
+                    out.push_str("Type\", \"value\": ");
+                    write_json_string(&mut out, v);
+                }
                 // `.NET full name # underlying value`; the importer builds
                 // the boxed value with Enum.ToObject
                 HeapInit::EnumValue { dotnet_type, value } => {
-                    ("Enum", json_string(&format!("{dotnet_type}#{value}")))
+                    out.push_str("Enum\", \"value\": ");
+                    write_json_string(&mut out, &format!("{dotnet_type}#{value}"));
                 }
                 HeapInit::CodeAddress(label) => {
-                    ("UInt32", assembled.label_addresses[label.0].to_string())
+                    let _ = write!(
+                        out,
+                        "UInt32\", \"value\": \"{}\"",
+                        layout.label_addresses[label.0]
+                    );
                 }
-            };
-            let _ = write!(
-                out,
-                "    {{\"name\": {}, \"kind\": \"{}\", \"value\": {}}}",
-                json_string(&symbol.name),
-                kind,
-                if matches!(
-                    symbol.init,
-                    HeapInit::Str(_) | HeapInit::TypeOf(_) | HeapInit::EnumValue { .. }
-                ) {
-                    value
-                } else {
-                    format!("\"{value}\"")
-                }
-            );
+            }
+            out.push('}');
         }
         out.push_str("\n  ],\n  \"entryPoints\": [");
         let mut first = true;
@@ -481,14 +535,16 @@ impl Program {
                 out.push_str(", ");
             }
             first = false;
-            out.push_str(&json_string(&entry.name));
+            write_json_string(&mut out, &entry.name);
         }
         out.push(']');
         if let Some(mode) = &self.sync_mode {
-            let _ = write!(out, ",\n  \"syncMode\": {}", json_string(mode));
+            out.push_str(",\n  \"syncMode\": ");
+            write_json_string(&mut out, mode);
         }
         if let Some(source) = &self.source {
-            let _ = write!(out, ",\n  \"source\": {}", json_string(source));
+            out.push_str(",\n  \"source\": ");
+            write_json_string(&mut out, source);
         }
         if let Some(id) = self.program_id {
             let _ = write!(out, ",\n  \"programId\": {id}");
@@ -502,21 +558,18 @@ impl Program {
                 let rate = callable
                     .max_events_per_second
                     .map_or("0".to_string(), |rate| rate.to_string());
-                let _ = write!(
-                    out,
-                    "\n    {{\"event\": {}, \"maxEventsPerSecond\": {rate}, \"parameters\": [",
-                    json_string(&callable.event)
-                );
+                out.push_str("\n    {\"event\": ");
+                write_json_string(&mut out, &callable.event);
+                let _ = write!(out, ", \"maxEventsPerSecond\": {rate}, \"parameters\": [");
                 for (position, (name, dotnet)) in callable.parameters.iter().enumerate() {
                     if position > 0 {
                         out.push(',');
                     }
-                    let _ = write!(
-                        out,
-                        " {{\"name\": {}, \"type\": {}}}",
-                        json_string(name),
-                        json_string(dotnet)
-                    );
+                    out.push_str(" {\"name\": ");
+                    write_json_string(&mut out, name);
+                    out.push_str(", \"type\": ");
+                    write_json_string(&mut out, dotnet);
+                    out.push('}');
                 }
                 out.push_str(" ]}");
             }
@@ -542,14 +595,16 @@ impl Program {
                     SourceMarkKind::FunctionStart => ", \"kind\": \"function\"",
                     SourceMarkKind::Halt => ", \"kind\": \"halt\"",
                 };
+                let _ = write!(out, "\n    {{\"address\": {address}, \"file\": ");
+                write_json_string(&mut out, &mark.file);
                 let _ = write!(
                     out,
-                    "\n    {{\"address\": {address}, \"file\": {}, \"line\": {}, \"column\": {}, \"function\": {}{kind}}}",
-                    json_string(&mark.file),
-                    mark.line,
-                    mark.column,
-                    json_string(&mark.function)
+                    ", \"line\": {}, \"column\": {}, \"function\": ",
+                    mark.line, mark.column
                 );
+                write_json_string(&mut out, &mark.function);
+                out.push_str(kind);
+                out.push('}');
                 last = Some(*index);
             }
             address += op.byte_size();
@@ -590,24 +645,31 @@ impl Program {
     }
 }
 
-fn json_string(value: &str) -> String {
-    let mut out = String::with_capacity(value.len() + 2);
+/// Appends `value` as a JSON string literal, quotes included.
+fn write_json_string(out: &mut String, value: &str) {
     out.push('"');
-    for c in value.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => {
-                let _ = write!(out, "\\u{:04x}", c as u32);
+    // the common case has nothing to escape: one copy, no per-char pushes
+    if value
+        .bytes()
+        .all(|byte| byte >= 0x20 && byte != b'"' && byte != b'\\')
+    {
+        out.push_str(value);
+    } else {
+        for c in value.chars() {
+            match c {
+                '"' => out.push_str("\\\""),
+                '\\' => out.push_str("\\\\"),
+                '\n' => out.push_str("\\n"),
+                '\r' => out.push_str("\\r"),
+                '\t' => out.push_str("\\t"),
+                c if (c as u32) < 0x20 => {
+                    let _ = write!(out, "\\u{:04x}", c as u32);
+                }
+                c => out.push(c),
             }
-            c => out.push(c),
         }
     }
     out.push('"');
-    out
 }
 
 /// A label-resolved instruction, paired with its byte address.
@@ -621,6 +683,25 @@ pub enum Resolved {
     JumpIfFalse(u32),
     JumpIndirect(DataId),
     Extern(String),
+}
+
+/// Where every label landed, and how long the code is. See [`Program::layout`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Layout {
+    pub end_address: u32,
+    /// Indexed by [`LabelId`]; [`HALT_ADDRESS`] for a label never placed
+    /// (only reachable for labels nothing jumps to — a placed target is
+    /// checked by `layout`).
+    pub label_addresses: Vec<u32>,
+}
+
+impl Layout {
+    pub fn resolve(&self, target: &Target) -> u32 {
+        match target {
+            Target::Address(address) => *address,
+            Target::Label(label) => self.label_addresses[label.0],
+        }
+    }
 }
 
 #[derive(Debug)]

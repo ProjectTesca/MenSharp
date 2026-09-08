@@ -22,7 +22,7 @@
 //! threads and merges the returned [`Signatures`] — while [`resolve_signatures`]
 //! is the sequential whole-compilation convenience.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::ops::Range;
 
 use men_sharp_parser::ast::{

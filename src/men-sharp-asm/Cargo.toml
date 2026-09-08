@@ -6,3 +6,4 @@ edition = "2024"
 
 [dependencies]
 timescope = { workspace = true }
+rustc-hash = { workspace = true }

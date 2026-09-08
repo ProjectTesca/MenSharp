@@ -21,7 +21,7 @@
 //! Everything here is read-only over the phase outputs, so the driver may call it
 //! from any number of threads at once.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 use men_sharp_parser::ast::EntityID;
 
@@ -72,7 +72,7 @@ impl TypeSystem<'_, '_> {
     /// Every member candidate for `receiver.name`, nearest declaring type first.
     pub fn members_named(&self, receiver: &Type, name: &str) -> Vec<MemberCandidate> {
         let mut out = Vec::new();
-        let mut visited: HashSet<Type> = HashSet::new();
+        let mut visited: HashSet<Type> = HashSet::default();
         let mut queue: Vec<Type> = self.lookup_roots(receiver);
 
         while !queue.is_empty() {
@@ -118,7 +118,7 @@ impl TypeSystem<'_, '_> {
             return false;
         };
         let mut queue: Vec<SymbolId> = vec![owner];
-        let mut seen: HashSet<SymbolId> = HashSet::new();
+        let mut seen: HashSet<SymbolId> = HashSet::default();
         while let Some(current) = queue.pop() {
             if !seen.insert(current) {
                 continue;

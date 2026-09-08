@@ -21,7 +21,7 @@
 //! against the now-concrete parameter types, feed their return types back as lower
 //! bounds, fix the rest). This module only supplies the bound arithmetic.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::{
     symbol::SymbolId,
@@ -55,8 +55,8 @@ impl Inference {
     pub fn new(keys: Vec<InferenceKey>) -> Self {
         Self {
             keys,
-            bounds: HashMap::new(),
-            fixed: HashMap::new(),
+            bounds: HashMap::default(),
+            fixed: HashMap::default(),
         }
     }
 
@@ -430,7 +430,7 @@ pub(crate) fn best_common_type(system: &TypeSystem, types: &[Type]) -> Option<Ty
 /// (itself, base classes, interfaces).
 fn unique_instantiation(system: &TypeSystem, ty: &Type, wanted: &TypeTarget) -> Option<Vec<Type>> {
     let mut found: Option<Vec<Type>> = None;
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = rustc_hash::FxHashSet::default();
     let mut queue = vec![ty.clone()];
 
     while let Some(current) = queue.pop() {

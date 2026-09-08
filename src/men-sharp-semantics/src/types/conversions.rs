@@ -462,7 +462,7 @@ impl TypeSystem<'_, '_> {
 
     /// Walks base classes and interfaces (instantiated) looking for `wanted`.
     fn inheritance_closure_contains(&self, from: &Type, wanted: &Type) -> bool {
-        let mut visited = std::collections::HashSet::new();
+        let mut visited = rustc_hash::FxHashSet::default();
         let mut queue = vec![from.clone()];
 
         while let Some(current) = queue.pop() {

@@ -12,7 +12,7 @@
 //! merged as if it were `partial`, so members of both declarations stay visible to
 //! later phases instead of one whole declaration vanishing.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use men_sharp_parser::ast::EntityID;
 
@@ -91,7 +91,7 @@ impl<'ast> Declarations<'ast> {
 pub fn merge_declarations<'ast>(files: Vec<FileDeclarations<'ast>>) -> Declarations<'ast> {
     let mut merger = Merger {
         table: SymbolTable::new(),
-        symbol_of: HashMap::new(),
+        symbol_of: HashMap::default(),
         errors: Vec::new(),
         foreign: false,
     };
@@ -341,7 +341,7 @@ impl<'ast> Merger<'ast> {
         file: FileId,
         parameters: &[&'ast men_sharp_parser::ast::GenericsParameter<'ast, 'ast>],
     ) {
-        let mut seen: HashMap<&str, DeclarationSite> = HashMap::new();
+        let mut seen: HashMap<&str, DeclarationSite> = HashMap::default();
 
         for parameter in parameters {
             let site = DeclarationSite {

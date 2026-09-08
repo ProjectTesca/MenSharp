@@ -10,3 +10,4 @@ timescope = { workspace = true }
 men-sharp-asm = { workspace = true }
 men-sharp-parser = { workspace = true }
 men-sharp-semantics = { workspace = true }
+rustc-hash = { workspace = true }

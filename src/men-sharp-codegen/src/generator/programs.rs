@@ -20,7 +20,7 @@
 //! declarations only (`Declarations::foreign_files`): the class is a
 //! reference to a program UdonSharp compiled, never something to compile.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::ops::Range;
 
 use men_sharp_parser::ast::{AccessorKind, FunctionBody, Modifier};
@@ -336,8 +336,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// the chain, base first, in declaration order, each drawing its names
     /// from counters the bases already advanced.
     fn build_export_layouts(&self, class: SymbolId) -> HashMap<LayoutKey, ExportLayout> {
-        let mut layouts = HashMap::new();
-        let mut counters: HashMap<String, u32> = HashMap::new();
+        let mut layouts = HashMap::default();
+        let mut counters: HashMap<String, u32> = HashMap::default();
         for owner in self.program_class_chain(class) {
             let members: Vec<SymbolId> = self.declarations.table.symbol(owner).members.to_vec();
             for member in members {

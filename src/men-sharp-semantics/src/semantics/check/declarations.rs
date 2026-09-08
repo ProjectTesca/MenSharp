@@ -415,7 +415,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         // (contract type, member) pairs to satisfy
         let mut required: Vec<(Type, SymbolId)> = Vec::new();
-        let mut visited: std::collections::HashSet<Type> = std::collections::HashSet::new();
+        let mut visited: rustc_hash::FxHashSet<Type> = rustc_hash::FxHashSet::default();
         let mut queue: Vec<Type> = vec![self_type.clone()];
         while let Some(current) = queue.pop() {
             if !visited.insert(current.clone()) {

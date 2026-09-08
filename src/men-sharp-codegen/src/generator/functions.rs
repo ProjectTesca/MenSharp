@@ -290,7 +290,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let mut ctx = Ctx {
             key: key.clone(),
             file,
-            locals: vec![HashMap::new()],
+            locals: vec![HashMap::default()],
             boxed: self
                 .bodies
                 .captured_locals
@@ -1486,7 +1486,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             external: self.external,
         };
         let mut out: Vec<Type> = Vec::new();
-        let mut visited: HashSet<Type> = HashSet::new();
+        let mut visited: HashSet<Type> = HashSet::default();
         let mut queue = vec![ty.clone()];
         while let Some(current) = queue.pop() {
             if !visited.insert(current.clone()) {
@@ -1636,7 +1636,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             signatures: self.signatures,
             external: self.external,
         };
-        let mut visited: HashSet<Type> = HashSet::new();
+        let mut visited: HashSet<Type> = HashSet::default();
         let mut queue = vec![ty.clone()];
         while let Some(current) = queue.pop() {
             if &current == interface {
@@ -1715,7 +1715,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let mut ctx = Ctx {
                 key: key.clone(),
                 file: FileId(0),
-                locals: vec![HashMap::new()],
+                locals: vec![HashMap::default()],
                 boxed: Vec::new(),
                 this_slot: Some(this_slot),
                 this_type: None,

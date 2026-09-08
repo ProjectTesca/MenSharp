@@ -601,7 +601,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 None => object.clone(),
             };
-            ctx.locals.push(HashMap::new());
+            ctx.locals.push(HashMap::default());
             if let Some(name) = &clause.name {
                 let local = self.temp_for(&caught_type);
                 self.copy(saved, local);

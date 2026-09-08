@@ -11,7 +11,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     // ---------------------------------------------------------- statements
 
     pub(super) fn lower_block(&mut self, ctx: &mut Ctx<'ast>, block: &'ast Block<'ast, 'ast>) {
-        ctx.locals.push(HashMap::new());
+        ctx.locals.push(HashMap::default());
         // before the statements: a local function may be called from above
         // its own declaration
         self.register_local_functions(ctx, block);
@@ -60,7 +60,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.program.code.push(Op::Label(break_label));
             }
             Statement::For(statement) => {
-                ctx.locals.push(HashMap::new());
+                ctx.locals.push(HashMap::default());
                 match &statement.initializer {
                     Some(ForInitializer::Declaration(declaration)) => {
                         self.lower_local(ctx, declaration)
@@ -383,7 +383,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return;
         };
 
-        ctx.locals.push(HashMap::new());
+        ctx.locals.push(HashMap::default());
         let length = self.array_length(ctx, array, &array_type, statement.span.clone());
         let index = self.temp("SystemInt32");
         let zero = self.int_constant(0);
@@ -493,7 +493,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             });
         }
 
-        ctx.locals.push(HashMap::new());
+        ctx.locals.push(HashMap::default());
         let head = self.fresh_label("foreach_head");
         let break_label = self.fresh_label("foreach_break");
         self.program.code.push(Op::Label(head));
@@ -609,7 +609,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         for (index, section) in sections.iter().enumerate() {
             let body = self.fresh_label(&format!("switch_body_{index}"));
             let next = self.fresh_label(&format!("switch_try_{}", index + 1));
-            ctx.locals.push(HashMap::new());
+            ctx.locals.push(HashMap::default());
             for label in section.labels {
                 match label {
                     SwitchLabel::Default { .. } => default_body = Some(body),
@@ -686,7 +686,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         for arm in arms {
             let next = self.fresh_label("arm_next");
-            ctx.locals.push(HashMap::new());
+            ctx.locals.push(HashMap::default());
             let matched = self.lower_pattern(ctx, value, &value_type, &arm.pattern);
             if let Some(matched) = matched {
                 self.program.code.push(Op::Push(matched));

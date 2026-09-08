@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 men-sharp-diagnostics = { workspace = true }
 men-sharp-parser = { workspace = true }
+rustc-hash = { workspace = true }

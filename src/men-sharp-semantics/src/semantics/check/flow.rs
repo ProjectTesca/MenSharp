@@ -471,7 +471,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             "IEnumerable",
             1,
         ) {
-            let mut visited = std::collections::HashSet::new();
+            let mut visited = rustc_hash::FxHashSet::default();
             let mut queue = vec![collection.clone()];
             while let Some(current) = queue.pop() {
                 if !visited.insert(current.clone()) {

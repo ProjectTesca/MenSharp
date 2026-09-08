@@ -8,7 +8,8 @@
 //! contents alive for as long as the model is used, same as the parser crate's
 //! relationship between tree and source.
 
-use std::collections::HashMap;
+use rayon::prelude::*;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::{
     error::MetadataError,
@@ -416,8 +417,8 @@ fn build<'data>(
         .collect::<Result<Vec<_>, MetadataError>>()?;
 
     // constants, keyed by parent row
-    let mut field_constants = HashMap::new();
-    let mut param_constants = HashMap::new();
+    let mut field_constants = HashMap::default();
+    let mut param_constants = HashMap::default();
     for row in &raw.constants {
         let value = decode_constant(row.element_type, heap_blob(blobs, row.value)?)?;
         match row.parent.table {
@@ -446,78 +447,89 @@ fn build<'data>(
     let (_, _, params_parameters) =
         attribute_carriers(raw, strings, &method_owner, "System", "ParamArrayAttribute")?;
 
-    let mut types = Vec::with_capacity(raw.type_defs.len());
-    for (index, row) in raw.type_defs.iter().enumerate() {
-        let extends = if row.extends.row == 0 {
-            None
-        } else {
-            Some(coded_to_sig(row.extends, &type_specs)?)
-        };
+    // every type decodes from immutable tables, and mscorlib has thousands of
+    // them: this is the bulk of loading a reference, so it is spread over the
+    // pool the caller installed (rayon falls back to the global pool otherwise)
+    let mut types: Vec<TypeDefinition<'data>> = raw
+        .type_defs
+        .par_iter()
+        .enumerate()
+        .map(
+            |(index, row)| -> Result<TypeDefinition<'data>, MetadataError> {
+                let extends = if row.extends.row == 0 {
+                    None
+                } else {
+                    Some(coded_to_sig(row.extends, &type_specs)?)
+                };
 
-        let (field_start, field_end) = list_range(&field_lists, index, raw.fields.len() as u32);
-        let mut fields = Vec::with_capacity((field_end - field_start) as usize);
-        for field_row in field_start..field_end {
-            let field = &raw.fields[field_row as usize - 1];
-            fields.push(FieldDefinition {
-                name: heap_string(strings, field.name)?,
-                flags: field.flags,
-                field_type: signature::parse_field(heap_blob(blobs, field.signature)?)?,
-                constant: field_constants.get(&field_row).cloned(),
-            });
-        }
-
-        let (method_start, method_end) = list_range(&method_lists, index, raw.methods.len() as u32);
-        let mut methods = Vec::with_capacity((method_end - method_start) as usize);
-        for method_row in method_start..method_end {
-            let method = &raw.methods[method_row as usize - 1];
-            let sig = signature::parse_method(heap_blob(blobs, method.signature)?)?;
-
-            let (param_start, param_end) = list_range(
-                &param_lists,
-                method_row as usize - 1,
-                raw.params.len() as u32,
-            );
-            let mut parameters = vec![ParameterDefinition::default(); sig.parameters.len()];
-            for param_row in param_start..param_end {
-                let param = &raw.params[param_row as usize - 1];
-                // sequence 0 is the return value; parameters start at 1
-                if param.sequence >= 1 && (param.sequence as usize) <= parameters.len() {
-                    parameters[param.sequence as usize - 1] = ParameterDefinition {
-                        name: heap_string(strings, param.name)?,
-                        flags: param.flags,
-                        constant: param_constants.get(&param_row).cloned(),
-                        is_params: params_parameters.contains(&param_row),
-                    };
+                let (field_start, field_end) =
+                    list_range(&field_lists, index, raw.fields.len() as u32);
+                let mut fields = Vec::with_capacity((field_end - field_start) as usize);
+                for field_row in field_start..field_end {
+                    let field = &raw.fields[field_row as usize - 1];
+                    fields.push(FieldDefinition {
+                        name: heap_string(strings, field.name)?,
+                        flags: field.flags,
+                        field_type: signature::parse_field(heap_blob(blobs, field.signature)?)?,
+                        constant: field_constants.get(&field_row).cloned(),
+                    });
                 }
-            }
 
-            methods.push(MethodDefinition {
-                name: heap_string(strings, method.name)?,
-                flags: method.flags,
-                is_extension: extension_methods.contains(&method_row),
-                signature: sig,
-                parameters,
-            });
-        }
+                let (method_start, method_end) =
+                    list_range(&method_lists, index, raw.methods.len() as u32);
+                let mut methods = Vec::with_capacity((method_end - method_start) as usize);
+                for method_row in method_start..method_end {
+                    let method = &raw.methods[method_row as usize - 1];
+                    let sig = signature::parse_method(heap_blob(blobs, method.signature)?)?;
 
-        types.push(TypeDefinition {
-            namespace: heap_string(strings, row.namespace)?,
-            name: heap_string(strings, row.name)?,
-            flags: row.flags,
-            is_value_type: false, // filled in below
-            is_enum: false,
-            is_extension: extension_types.contains(&(index as u32 + 1)),
-            extends,
-            interfaces: Vec::new(),
-            generic_parameters: Vec::new(),
-            fields,
-            methods,
-            properties: Vec::new(),
-            events: Vec::new(),
-            nested_types: Vec::new(),
-            enclosing_type: None,
-        });
-    }
+                    let (param_start, param_end) = list_range(
+                        &param_lists,
+                        method_row as usize - 1,
+                        raw.params.len() as u32,
+                    );
+                    let mut parameters = vec![ParameterDefinition::default(); sig.parameters.len()];
+                    for param_row in param_start..param_end {
+                        let param = &raw.params[param_row as usize - 1];
+                        // sequence 0 is the return value; parameters start at 1
+                        if param.sequence >= 1 && (param.sequence as usize) <= parameters.len() {
+                            parameters[param.sequence as usize - 1] = ParameterDefinition {
+                                name: heap_string(strings, param.name)?,
+                                flags: param.flags,
+                                constant: param_constants.get(&param_row).cloned(),
+                                is_params: params_parameters.contains(&param_row),
+                            };
+                        }
+                    }
+
+                    methods.push(MethodDefinition {
+                        name: heap_string(strings, method.name)?,
+                        flags: method.flags,
+                        is_extension: extension_methods.contains(&method_row),
+                        signature: sig,
+                        parameters,
+                    });
+                }
+
+                Ok(TypeDefinition {
+                    namespace: heap_string(strings, row.namespace)?,
+                    name: heap_string(strings, row.name)?,
+                    flags: row.flags,
+                    is_value_type: false, // filled in below
+                    is_enum: false,
+                    is_extension: extension_types.contains(&(index as u32 + 1)),
+                    extends,
+                    interfaces: Vec::new(),
+                    generic_parameters: Vec::new(),
+                    fields,
+                    methods,
+                    properties: Vec::new(),
+                    events: Vec::new(),
+                    nested_types: Vec::new(),
+                    enclosing_type: None,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>, _>>()?;
 
     // value-type / enum detection off the base type's name
     for index in 0..types.len() {
@@ -581,7 +593,7 @@ fn build<'data>(
     }
 
     // generic parameters, with their constraints grouped by owning parameter first
-    let mut constraints_of: HashMap<u32, Vec<CodedIndex>> = HashMap::new();
+    let mut constraints_of: HashMap<u32, Vec<CodedIndex>> = HashMap::default();
     for constraint in &raw.generic_param_constraints {
         if constraint.constraint.row > 0 {
             constraints_of
@@ -622,8 +634,8 @@ fn build<'data>(
     }
 
     // properties and events, wired to their accessor methods
-    let mut property_accessors: HashMap<u32, (Option<u32>, Option<u32>)> = HashMap::new();
-    let mut event_accessors: HashMap<u32, (Option<u32>, Option<u32>)> = HashMap::new();
+    let mut property_accessors: HashMap<u32, (Option<u32>, Option<u32>)> = HashMap::default();
+    let mut event_accessors: HashMap<u32, (Option<u32>, Option<u32>)> = HashMap::default();
     for row in &raw.method_semantics {
         let Some(&(_, local)) = method_owner.get(&row.method) else {
             continue;
@@ -719,7 +731,7 @@ fn build<'data>(
         })
         .collect::<Result<Vec<_>, MetadataError>>()?;
 
-    let mut top_level = HashMap::new();
+    let mut top_level = HashMap::default();
     for (index, definition) in types.iter().enumerate() {
         if definition.enclosing_type.is_none() {
             top_level.insert((definition.namespace, definition.name), index as u32);
@@ -754,7 +766,7 @@ fn build<'data>(
 }
 
 /// 1-based rows of one table.
-type RowSet = std::collections::HashSet<u32>;
+type RowSet = rustc_hash::FxHashSet<u32>;
 
 /// The 1-based MethodDef, TypeDef and Param rows that carry the attribute
 /// `namespace.name` (`ExtensionAttribute`, `ParamArrayAttribute`, ...).
@@ -765,9 +777,9 @@ fn attribute_carriers(
     namespace: &str,
     name: &str,
 ) -> Result<(RowSet, RowSet, RowSet), MetadataError> {
-    let mut methods = RowSet::new();
-    let mut types = RowSet::new();
-    let mut params = RowSet::new();
+    let mut methods = RowSet::default();
+    let mut types = RowSet::default();
+    let mut params = RowSet::default();
 
     for attribute in &raw.custom_attributes {
         // the attribute type is named by its constructor: a MethodDef in this
@@ -870,7 +882,7 @@ fn clamp_range(start: u32, end: u32, owned_rows: u32) -> (u32, u32) {
 
 /// 1-based row -> (owner index, local index within the owner's range).
 fn owner_of_ranges(starts: &[u32], owned_rows: u32) -> HashMap<u32, (u32, u32)> {
-    let mut map = HashMap::new();
+    let mut map = HashMap::default();
 
     for (owner, &start) in starts.iter().enumerate() {
         let end = starts.get(owner + 1).copied().unwrap_or(owned_rows + 1);

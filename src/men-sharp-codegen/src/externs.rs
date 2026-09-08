@@ -13,7 +13,7 @@
 //! names like `SystemInt32` are .NET full names with `.`, `+` and generic
 //! backticks squeezed out — [`mangle_dotnet_name`] implements that rule.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::OnceLock;
 
 /// One embedded dump per supported Unity editor version, newest last.
@@ -57,7 +57,7 @@ pub struct UdonNodes {
     /// Built-in events by their `Event_`-less name (`OnPlayerJoined`).
     events: HashMap<String, EventNode>,
     /// Mangled names of types the heap can declare (`Type_…` nodes).
-    types: std::collections::HashSet<String>,
+    types: rustc_hash::FxHashSet<String>,
 }
 
 impl UdonNodes {
@@ -129,21 +129,28 @@ pub fn mangle_dotnet_name(full: &str) -> String {
 
 fn parse_dump(version: &str, json: &str) -> UdonNodes {
     let mut reader = Reader {
+        text: json,
         bytes: json.as_bytes(),
         at: 0,
     };
+    // about one node per 300 bytes of dump; sized up front so the maps never
+    // rehash while they fill (2022.3.22f1: ~36k externs, ~2k types)
+    let nodes_estimate = json.len() / 300;
     let mut nodes = UdonNodes {
         unity_version: version.to_string(),
-        externs: HashMap::new(),
-        events: HashMap::new(),
-        types: std::collections::HashSet::new(),
+        externs: HashMap::with_capacity_and_hasher(nodes_estimate, Default::default()),
+        events: HashMap::default(),
+        types: rustc_hash::FxHashSet::with_capacity_and_hasher(
+            nodes_estimate / 16,
+            Default::default(),
+        ),
     };
 
     reader.expect(b'{');
     loop {
-        let key = reader.string();
+        let key = reader.key();
         reader.expect(b':');
-        match key.as_str() {
+        match key {
             "unityVersion" => {
                 nodes.unity_version = reader.string();
             }
@@ -175,18 +182,21 @@ fn parse_node(reader: &mut Reader, nodes: &mut UdonNodes) {
 
     reader.expect(b'{');
     loop {
-        let key = reader.string();
+        let key = reader.key();
         reader.expect(b':');
-        match key.as_str() {
+        match key {
             "fullName" => full_name = reader.string(),
-            "relatedType" => {
-                reader.string();
-            }
+            "relatedType" => reader.skip_string(),
             "parameters" => {
+                // parameter names and types are only kept for events; an
+                // extern's are dropped, so they are not even copied out.
+                // (`fullName` comes first in the dump; if it ever did not,
+                // the names would be read and dropped, as before.)
+                let keep_names = full_name.is_empty() || full_name.starts_with("Event_");
                 reader.expect(b'[');
                 if !reader.consume(b']') {
                     loop {
-                        parameters.push(parse_parameter(reader));
+                        parameters.push(parse_parameter(reader, keep_names));
                         if !reader.consume(b',') {
                             break;
                         }
@@ -246,7 +256,7 @@ struct ParsedParameter {
     kind: ParameterKind,
 }
 
-fn parse_parameter(reader: &mut Reader) -> ParsedParameter {
+fn parse_parameter(reader: &mut Reader, keep_names: bool) -> ParsedParameter {
     let mut parameter = ParsedParameter {
         name: None,
         dotnet_type: None,
@@ -254,11 +264,11 @@ fn parse_parameter(reader: &mut Reader) -> ParsedParameter {
     };
     reader.expect(b'{');
     loop {
-        let key = reader.string();
+        let key = reader.key();
         reader.expect(b':');
-        match key.as_str() {
+        match key {
             "kind" => {
-                parameter.kind = match reader.string().as_str() {
+                parameter.kind = match reader.key() {
                     "IN" => ParameterKind::In,
                     "OUT" => ParameterKind::Out,
                     "IN_OUT" => ParameterKind::InOut,
@@ -267,13 +277,19 @@ fn parse_parameter(reader: &mut Reader) -> ParsedParameter {
             }
             // either may be the literal `null`
             "name" => {
-                if !reader.consume_null() {
+                if reader.consume_null() {
+                } else if keep_names {
                     parameter.name = Some(reader.string());
+                } else {
+                    reader.skip_string();
                 }
             }
             "type" => {
-                if !reader.consume_null() {
+                if reader.consume_null() {
+                } else if keep_names {
                     parameter.dotnet_type = Some(reader.string());
+                } else {
+                    reader.skip_string();
                 }
             }
             other => panic!("unexpected parameter key {other:?}"),
@@ -287,11 +303,12 @@ fn parse_parameter(reader: &mut Reader) -> ParsedParameter {
 }
 
 struct Reader<'a> {
+    text: &'a str,
     bytes: &'a [u8],
     at: usize,
 }
 
-impl Reader<'_> {
+impl<'a> Reader<'a> {
     fn skip_whitespace(&mut self) {
         while self
             .bytes
@@ -334,6 +351,40 @@ impl Reader<'_> {
         }
     }
 
+    /// A string that is only looked at, never kept: an object key, an enum-like
+    /// value. Borrowed from the input, so it must not contain escapes (none of
+    /// the dump's keys do; `string` handles the values that might).
+    fn key(&mut self) -> &'a str {
+        self.expect(b'"');
+        let start = self.at;
+        while !matches!(self.bytes[self.at], b'"' | b'\\') {
+            self.at += 1;
+        }
+        assert_eq!(
+            self.bytes[self.at], b'"',
+            "udon dump: escape in a key at offset {}",
+            self.at
+        );
+        self.at += 1;
+        // both ends sit on ASCII quotes, so this is a char boundary
+        &self.text[start..self.at - 1]
+    }
+
+    /// Skips a string value nothing needs.
+    fn skip_string(&mut self) {
+        self.expect(b'"');
+        loop {
+            match self.bytes[self.at] {
+                b'"' => {
+                    self.at += 1;
+                    return;
+                }
+                b'\\' => self.at += 2,
+                _ => self.at += 1,
+            }
+        }
+    }
+
     fn string(&mut self) -> String {
         self.expect(b'"');
         let mut out = String::new();
@@ -369,7 +420,8 @@ impl Reader<'_> {
                     while !matches!(self.bytes[self.at], b'"' | b'\\') {
                         self.at += 1;
                     }
-                    out.push_str(std::str::from_utf8(&self.bytes[start..self.at]).unwrap());
+                    // delimited by ASCII bytes on both sides: a char boundary
+                    out.push_str(&self.text[start..self.at]);
                 }
             }
         }

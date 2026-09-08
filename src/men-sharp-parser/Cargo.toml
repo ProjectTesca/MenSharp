@@ -10,3 +10,4 @@ bumpalo = { workspace = true }
 allocator-api2 = { workspace = true }
 extension-fn = { workspace = true }
 typeid = { workspace = true }
+rustc-hash = { workspace = true }

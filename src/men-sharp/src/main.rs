@@ -14,6 +14,13 @@ use std::process::ExitCode;
 
 use men_sharp_compiler::{Compiler, CompilerSettings, ParsedFile, ReferenceSet, SourceCode};
 
+/// The compiler is allocation heavy in short bursts (codegen strings, per-file
+/// tables) across many threads. mimalloc handles that noticeably better than
+/// the system allocator, and being statically linked it adds no runtime
+/// dependency to the shipped binary.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod report;
 
 use men_sharp_diagnostics::{Format, Reporter};
@@ -278,43 +285,37 @@ fn run() -> ExitCode {
         if !codegen_diagnostics.is_empty() {
             eprint!("{}", reporter.render(&mut codegen_diagnostics));
         }
-        for program in &programs {
-            if !program.output.errors.is_empty() {
-                failed += 1;
-                continue;
-            }
-            let uasm = match program.output.program.to_uasm() {
-                Ok(uasm) => uasm,
-                Err(error) => {
+        let written = compiler.write_udon_behaviours(&programs, std::path::Path::new(&out_dir));
+        for (program, written) in programs.iter().zip(written) {
+            match written {
+                Some(Ok(uasm_path)) => println!("wrote {}", uasm_path.display()),
+                Some(Err(men_sharp_compiler::EmitError::Assemble(error))) => {
                     eprintln!("{}: assembly error: {error:?}", program.class_path);
                     failed += 1;
-                    continue;
                 }
-            };
-            let meta = program
-                .output
-                .program
-                .to_meta_json()
-                .expect("assembled above");
-            // the class path contains dots, so extensions are appended, not
-            // swapped in (`Game.Door` must not become `Game.uasm`)
-            let directory = std::path::Path::new(&out_dir);
-            let uasm_path = directory.join(format!("{}.uasm", program.class_path));
-            let meta_path = directory.join(format!("{}.meta.json", program.class_path));
-            timescope::scope!("write program files");
-            if let Err(error) =
-                std::fs::write(&uasm_path, uasm).and_then(|()| std::fs::write(&meta_path, meta))
-            {
-                eprintln!("{}: {error}", uasm_path.display());
-                failed += 1;
-                continue;
+                Some(Err(men_sharp_compiler::EmitError::Write(path, error))) => {
+                    eprintln!("{}: {error}", path.display());
+                    failed += 1;
+                }
+                // codegen errors, reported above
+                None => failed += 1,
             }
-            println!("wrote {}", uasm_path.display());
         }
         if failed > 0 {
             eprintln!("{}", reporter.count_line("ui.programs_failed", failed));
             return ExitCode::FAILURE;
         }
+        // The process is about to exit: freeing 43 programs, the checked
+        // compilation and the reference metadata one allocation at a time
+        // is pure cost (a few ms, on the main thread, after the last useful
+        // byte was written). The OS reclaims it all at once.
+        std::mem::forget(programs);
+        std::mem::forget(bodies);
+        std::mem::forget(signatures);
+        std::mem::forget(declarations);
+        std::mem::forget(files);
+        std::mem::forget(references);
+        std::mem::forget(reference_bytes);
         return ExitCode::SUCCESS;
     }
 

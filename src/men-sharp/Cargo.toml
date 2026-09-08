@@ -11,3 +11,4 @@ men-sharp-semantics = { workspace = true }
 men-sharp-codegen = { workspace = true }
 men-sharp-diagnostics = { workspace = true }
 sys-locale = { workspace = true }
+mimalloc = { workspace = true }

@@ -292,7 +292,7 @@ impl<'ast> SymbolTable<'ast> {
             is_extension: false,
             members: Vec::new(),
             type_parameters: Vec::new(),
-            member_map: HashMap::new(),
+            member_map: HashMap::default(),
         };
 
         Self {
@@ -398,7 +398,7 @@ pub(crate) fn new_symbol<'ast>(
         is_extension: false,
         members: Vec::new(),
         type_parameters: Vec::new(),
-        member_map: HashMap::new(),
+        member_map: HashMap::default(),
     }
 }
 

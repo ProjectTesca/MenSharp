@@ -646,7 +646,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Type::Named {
                 target: TypeTarget::External(id),
                 ..
-            } => Some(self.external.display_name(*id)),
+            } => Some(self.external_type_display_name(*id).to_string()),
             _ => None,
         }
     }

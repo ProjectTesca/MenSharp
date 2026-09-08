@@ -39,7 +39,8 @@
 //! (does a `switch` cover every case?) and `checker` (the plumbing they
 //! share).
 
-use std::collections::{BTreeSet, HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::BTreeSet;
 use std::ops::Range;
 
 mod calls;
@@ -162,7 +163,7 @@ pub fn uncompilable_foreign_members(
     bodies: &BodyCheck,
 ) -> HashMap<SymbolId, String> {
     // per foreign file: every declaration span in it
-    let mut spans: HashMap<FileId, Vec<(std::ops::Range<usize>, SymbolId)>> = HashMap::new();
+    let mut spans: HashMap<FileId, Vec<(std::ops::Range<usize>, SymbolId)>> = HashMap::default();
     for (id, symbol) in declarations.table.iter() {
         if symbol.kind == SymbolKind::Namespace {
             continue;
@@ -177,10 +178,10 @@ pub fn uncompilable_foreign_members(
         }
     }
     if spans.is_empty() {
-        return HashMap::new();
+        return HashMap::default();
     }
 
-    let mut out: HashMap<SymbolId, String> = HashMap::new();
+    let mut out: HashMap<SymbolId, String> = HashMap::default();
     let mut record = |file: FileId, span: &std::ops::Range<usize>, message: String| {
         let Some(candidates) = spans.get(&file) else {
             return;
@@ -334,31 +335,31 @@ pub fn check_file(
         lambda_probe_returns: None,
         lambda_stack: Vec::new(),
         current_member: None,
-        captures: HashMap::new(),
-        captured_locals: HashMap::new(),
-        capture_types: HashMap::new(),
-        local_functions: HashMap::new(),
-        local_calls: HashMap::new(),
-        declared_names: HashMap::new(),
-        static_local_functions: HashSet::new(),
+        captures: HashMap::default(),
+        captured_locals: HashMap::default(),
+        capture_types: HashMap::default(),
+        local_functions: HashMap::default(),
+        local_calls: HashMap::default(),
+        declared_names: HashMap::default(),
+        static_local_functions: HashSet::default(),
         local_order: 0,
-        local_function_order: HashMap::new(),
-        expression_types: HashMap::new(),
-        attribute_types: HashMap::new(),
-        targets: HashMap::new(),
-        pattern_inputs: HashMap::new(),
-        enumerations: HashMap::new(),
-        constructor_chains: HashMap::new(),
+        local_function_order: HashMap::default(),
+        expression_types: HashMap::default(),
+        attribute_types: HashMap::default(),
+        targets: HashMap::default(),
+        pattern_inputs: HashMap::default(),
+        enumerations: HashMap::default(),
+        constructor_chains: HashMap::default(),
         catch_depth: 0,
         in_async: false,
-        awaits: HashMap::new(),
+        awaits: HashMap::default(),
         iterator_element: None,
         yield_seen: false,
         value_return_seen: false,
         guarded_depth: 0,
         catch_depth_for_yield: 0,
         finally_depth: 0,
-        iterators: HashSet::new(),
+        iterators: HashSet::default(),
     };
 
     // rebuild the same file scope signature resolution used
@@ -396,7 +397,7 @@ pub fn check_file(
         enumerations: checker.enumerations,
         constructor_chains: checker.constructor_chains,
         errors: checker.resolver.out.errors,
-        uncompilable: HashMap::new(),
+        uncompilable: HashMap::default(),
         captures: checker
             .captures
             .into_iter()

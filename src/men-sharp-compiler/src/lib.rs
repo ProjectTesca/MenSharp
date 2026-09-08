@@ -30,6 +30,7 @@
 
 use std::sync::Arc;
 
+use men_sharp_asm::AssembleError;
 use men_sharp_dotnet::DotNetAssembly;
 use men_sharp_parser::MenSharpAST;
 use men_sharp_semantics::{
@@ -110,10 +111,15 @@ impl Compiler {
             builder = builder.num_threads(count);
         }
 
-        Ok(Self {
-            settings,
-            pool: builder.build()?,
-        })
+        let pool = builder.build()?;
+        // The Udon whitelist is parsed on first use, which is inside codegen. With
+        // programs generated in parallel that parse would sit on the critical path
+        // of whichever program asked first, so it is warmed while the front end runs.
+        pool.spawn(|| {
+            men_sharp_codegen::UdonNodes::for_unity_version(None);
+        });
+
+        Ok(Self { settings, pool })
     }
 
     pub fn settings(&self) -> &CompilerSettings {
@@ -422,6 +428,10 @@ impl Compiler {
     /// Discovers every `MenSharp.MenSharpBehaviour` subclass and lowers each
     /// to its own Udon program — the auto-discovery path the Unity package
     /// uses (no entry list needed).
+    ///
+    /// Programs are generated in parallel: each one lowers the same, finished
+    /// compilation and shares nothing mutable with the others. The result
+    /// keeps the discovery order of [`men_sharp_codegen::behaviour_classes`].
     pub fn generate_udon_behaviours(
         &self,
         declarations: &Declarations<'_>,
@@ -431,21 +441,108 @@ impl Compiler {
         files: &[ParsedFile],
     ) -> Vec<UdonBehaviourProgram> {
         timescope::scope!("generate programs");
-        men_sharp_codegen::behaviour_classes(declarations, signatures)
-            .into_iter()
-            .map(|class_path| {
-                let segments: Vec<&str> = class_path.split('.').collect();
-                let mut output =
-                    self.generate_udon(declarations, signatures, bodies, external, &segments);
-                // codegen deals in file ids; the names live here
-                output.program.source = output
-                    .source_file
-                    .and_then(|file| files.get(file.0 as usize))
-                    .map(|file| file.name.to_string());
-                UdonBehaviourProgram { class_path, output }
-            })
-            .collect()
+        let class_paths = men_sharp_codegen::behaviour_classes(declarations, signatures);
+        self.pool.install(|| {
+            class_paths
+                .into_par_iter()
+                .map(|class_path| {
+                    let segments: Vec<&str> = class_path.split('.').collect();
+                    let mut output =
+                        self.generate_udon(declarations, signatures, bodies, external, &segments);
+                    // codegen deals in file ids; the names live here
+                    output.program.source = output
+                        .source_file
+                        .and_then(|file| files.get(file.0 as usize))
+                        .map(|file| file.name.to_string());
+                    UdonBehaviourProgram { class_path, output }
+                })
+                .collect()
+        })
     }
+
+    /// Assembles every program that generated without errors, in parallel:
+    /// the `.uasm` text and its meta JSON sidecar. `None` where the program
+    /// has codegen errors (there is nothing to assemble). Order matches
+    /// `programs`.
+    pub fn emit_udon_behaviours(
+        &self,
+        programs: &[UdonBehaviourProgram],
+    ) -> Vec<Option<Result<EmittedProgram, AssembleError>>> {
+        timescope::scope!("assemble programs");
+        self.pool.install(|| {
+            programs
+                .par_iter()
+                .map(|program| {
+                    Self::emit_one(program)
+                        .map(|emitted| emitted.map(|(uasm, meta)| EmittedProgram { uasm, meta }))
+                })
+                .collect()
+        })
+    }
+
+    /// [`Compiler::emit_udon_behaviours`] that also writes each program's two
+    /// files into `out_dir` (`<class path>.uasm` and `<class path>.meta.json`),
+    /// in parallel. Each entry is the `.uasm` path written, `None` for a
+    /// program with codegen errors, or the failure. Order matches `programs`.
+    pub fn write_udon_behaviours(
+        &self,
+        programs: &[UdonBehaviourProgram],
+        out_dir: &std::path::Path,
+    ) -> Vec<Option<Result<std::path::PathBuf, EmitError>>> {
+        timescope::scope!("write programs");
+        self.pool.install(|| {
+            programs
+                .par_iter()
+                .map(|program| {
+                    let (uasm, meta) = match Self::emit_one(program)? {
+                        Ok(texts) => texts,
+                        Err(error) => return Some(Err(EmitError::Assemble(error))),
+                    };
+                    // the class path contains dots, so extensions are appended,
+                    // not swapped in (`Game.Door` must not become `Game.uasm`)
+                    let uasm_path = out_dir.join(format!("{}.uasm", program.class_path));
+                    let meta_path = out_dir.join(format!("{}.meta.json", program.class_path));
+                    timescope::scope!("write program files");
+                    let written = std::fs::write(&uasm_path, uasm)
+                        .map_err(|error| EmitError::Write(uasm_path.clone(), error))
+                        .and_then(|()| {
+                            std::fs::write(&meta_path, meta)
+                                .map_err(|error| EmitError::Write(meta_path, error))
+                        });
+                    Some(written.map(|()| uasm_path))
+                })
+                .collect()
+        })
+    }
+
+    /// The two texts of one program; `None` when it has codegen errors. The
+    /// `.uasm` and the sidecar are independent, so they are built side by side.
+    fn emit_one(program: &UdonBehaviourProgram) -> Option<Result<(String, String), AssembleError>> {
+        if !program.output.errors.is_empty() {
+            return None;
+        }
+        timescope::scope!("assemble program");
+        let (uasm, meta) = rayon::join(
+            || program.output.program.to_uasm(),
+            || program.output.program.to_meta_json(),
+        );
+        Some(uasm.and_then(|uasm| meta.map(|meta| (uasm, meta))))
+    }
+}
+
+/// One behaviour's assembled output: the `.uasm` text and the meta JSON
+/// sidecar the Unity importer applies alongside it.
+pub struct EmittedProgram {
+    pub uasm: String,
+    pub meta: String,
+}
+
+/// Why a program could not be written out.
+#[derive(Debug)]
+pub enum EmitError {
+    Assemble(AssembleError),
+    /// The path that could not be written, and why.
+    Write(std::path::PathBuf, std::io::Error),
 }
 
 /// One behaviour's compiled program, tagged with its class path (`Demo.Door`).

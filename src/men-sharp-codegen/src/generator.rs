@@ -29,7 +29,8 @@
 //! gives every expression's type (with type parameters still free — this module
 //! substitutes per instantiation).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use men_sharp_asm::{
@@ -42,6 +43,7 @@ use men_sharp_parser::ast::{
     LiteralExpression, PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, TypeRefBase,
     UnaryOperator,
 };
+use men_sharp_semantics::types::ExternalTypeId;
 use men_sharp_semantics::{
     Accessibility, BodyCheck, ConstructorChain, ConstructorChainKind, Declarations, ExternalTypes,
     FileId, ForeachEnumeration, MemberOrigin, MemberSignature, ResolvedCall, ResolvedMember,
@@ -92,42 +94,45 @@ pub fn generate(
         nodes,
         program: Program::default(),
         errors: Vec::new(),
-        constants: HashMap::new(),
-        functions: HashMap::new(),
+        constants: HashMap::default(),
+        constant_key: String::new(),
+        display_names: Default::default(),
+        mangled_names: Default::default(),
+        functions: HashMap::default(),
         queue: VecDeque::new(),
-        statics: HashMap::new(),
+        statics: HashMap::default(),
         static_init: Vec::new(),
-        static_init_emitted: HashSet::new(),
+        static_init_emitted: HashSet::default(),
         static_init_phase: false,
         static_constructors: Vec::new(),
-        layouts: HashMap::new(),
+        layouts: HashMap::default(),
         type_order: Vec::new(),
         exception_state: None,
-        line_starts: HashMap::new(),
+        line_starts: HashMap::default(),
         last_source_mark: None,
-        dispatchers: HashMap::new(),
-        emitted_dispatchers: HashSet::new(),
-        export_layouts: HashMap::new(),
-        call_edges: HashMap::new(),
+        dispatchers: HashMap::default(),
+        emitted_dispatchers: HashSet::default(),
+        export_layouts: HashMap::default(),
+        call_edges: HashMap::default(),
         temp_counter: 0,
         entry_class: None,
         entry_chain: Vec::new(),
         marker: behaviour_marker(declarations),
         entry_file: None,
         entry: None,
-        lambdas: HashMap::new(),
-        local_functions: HashMap::new(),
+        lambdas: HashMap::default(),
+        local_functions: HashMap::default(),
         delegate_shapes: Vec::new(),
-        invokers: HashMap::new(),
-        thunks: HashMap::new(),
+        invokers: HashMap::default(),
+        thunks: HashMap::default(),
         thunk_queue: VecDeque::new(),
-        multicast_thunks: HashMap::new(),
-        thunk_addresses: HashMap::new(),
+        multicast_thunks: HashMap::default(),
+        thunk_addresses: HashMap::default(),
         current_frame: None,
         frame_markers: Vec::new(),
-        external_callers: HashSet::new(),
+        external_callers: HashSet::default(),
         async_snapshots: Vec::new(),
-        resume_thunks: HashMap::new(),
+        resume_thunks: HashMap::default(),
         self_behaviour: None,
         incoming_resume: None,
     };
@@ -324,6 +329,38 @@ struct Dispatcher {
     emitted_for: Vec<Type>,
 }
 
+/// See [`Generator::call_closure`].
+struct CallClosure {
+    ids: HashMap<FunctionKey, usize>,
+    /// `reach[from]` is a bitset over ids of everything reachable from `from`.
+    reach: Vec<Vec<u64>>,
+}
+
+impl CallClosure {
+    fn contains(&self, from: usize, to: usize) -> bool {
+        self.reach[from][to / 64] & (1u64 << (to % 64)) != 0
+    }
+
+    /// Can a call from `from` end up in `to`?
+    fn reaches(&self, from: &FunctionKey, to: &FunctionKey) -> bool {
+        match (self.ids.get(from), self.ids.get(to)) {
+            (Some(&from), Some(&to)) => self.contains(from, to),
+            _ => false,
+        }
+    }
+
+    /// Can a call from `from` end up in any of `targets`?
+    fn reaches_any(&self, from: &FunctionKey, targets: &HashSet<FunctionKey>) -> bool {
+        let Some(&from) = self.ids.get(from) else {
+            return false;
+        };
+        targets
+            .iter()
+            .filter_map(|target| self.ids.get(target))
+            .any(|&to| self.contains(from, to))
+    }
+}
+
 struct Generator<'a, 'ast> {
     declarations: &'a Declarations<'ast>,
     signatures: &'a Signatures,
@@ -333,7 +370,15 @@ struct Generator<'a, 'ast> {
 
     program: Program,
     errors: Vec<CodegenError>,
-    constants: HashMap<(String, String), DataId>,
+    /// Constant slots by `<udon type>\0<value kind>\0<value>`: one string key,
+    /// built in `constant_key` so a lookup allocates nothing.
+    constants: HashMap<String, DataId>,
+    constant_key: String,
+    /// `display_name` of an external type, formatted once per program.
+    display_names: std::cell::RefCell<HashMap<ExternalTypeId, std::rc::Rc<str>>>,
+    /// The mangled (heap/extern) spelling of an external type, mangled once
+    /// per program. Type arguments are appended by the callers.
+    mangled_names: std::cell::RefCell<HashMap<ExternalTypeId, std::rc::Rc<str>>>,
     functions: HashMap<FunctionKey, Function>,
     queue: VecDeque<FunctionKey>,
     statics: HashMap<SymbolId, DataId>,
@@ -708,7 +753,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // inherited events too — walking the chain most-derived first means an
         // override claims the event name before the method it overrides.
         let mut entries: Vec<EventEntry> = Vec::new();
-        let mut claimed: HashSet<String> = HashSet::new();
+        let mut claimed: HashSet<String> = HashSet::default();
         let classes = if self.entry_chain.is_empty() {
             vec![entry]
         } else {
@@ -1080,7 +1125,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// UdonSharp validates them.
     fn collect_field_callbacks(&mut self) -> Vec<FieldCallback> {
         let mut callbacks = Vec::new();
-        let mut claimed: HashSet<SymbolId> = HashSet::new();
+        let mut claimed: HashSet<SymbolId> = HashSet::default();
         for class in self.entry_chain.clone() {
             let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
             for member in members {
@@ -1286,7 +1331,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let mut ctx = Ctx {
                 key: key.clone(),
                 file,
-                locals: vec![HashMap::new()],
+                locals: vec![HashMap::default()],
                 boxed: Vec::new(),
                 this_slot: None,
                 this_type: None,
@@ -1368,7 +1413,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 bindings: Vec::new(),
             },
             file,
-            locals: vec![HashMap::new()],
+            locals: vec![HashMap::default()],
             boxed: Vec::new(),
             this_slot: None,
             this_type: None,
@@ -1399,21 +1444,51 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     /// Which functions each function can (transitively) call.
-    fn call_closure(&self) -> HashMap<FunctionKey, HashSet<FunctionKey>> {
-        let mut closure = HashMap::new();
-        for start in self.call_edges.keys() {
-            let mut seen: HashSet<FunctionKey> = HashSet::new();
-            let mut stack: Vec<&FunctionKey> = self.call_edges[start].iter().collect();
+    /// Transitive reachability over `call_edges`: which functions a call
+    /// from each function can end up in (the function itself only through a
+    /// cycle). Computed on dense ids and bitsets — a `FunctionKey` carries
+    /// its type bindings, so a closure of cloned keys cost more than the
+    /// codegen of the functions it described.
+    fn call_closure(&self) -> CallClosure {
+        fn dense_id<'k>(ids: &mut HashMap<&'k FunctionKey, usize>, key: &'k FunctionKey) -> usize {
+            let next = ids.len();
+            *ids.entry(key).or_insert(next)
+        }
+        let mut ids: HashMap<&FunctionKey, usize> = HashMap::default();
+        let mut edges: Vec<Vec<usize>> = Vec::new();
+        for (caller, callees) in &self.call_edges {
+            let from = dense_id(&mut ids, caller);
+            let targets: Vec<usize> = callees
+                .iter()
+                .map(|callee| dense_id(&mut ids, callee))
+                .collect();
+            if edges.len() <= from {
+                edges.resize_with(from + 1, Vec::new);
+            }
+            edges[from] = targets;
+        }
+        let count = ids.len();
+        edges.resize_with(count, Vec::new);
+
+        let words = count.div_ceil(64);
+        let mut reach = vec![vec![0u64; words]; count];
+        let mut stack = Vec::new();
+        for start in 0..count {
+            let bits = &mut reach[start];
+            stack.extend(edges[start].iter().copied());
             while let Some(next) = stack.pop() {
-                if seen.insert(next.clone())
-                    && let Some(more) = self.call_edges.get(next)
-                {
-                    stack.extend(more.iter());
+                let (word, bit) = (next / 64, 1u64 << (next % 64));
+                if bits[word] & bit == 0 {
+                    bits[word] |= bit;
+                    stack.extend(edges[next].iter().copied());
                 }
             }
-            closure.insert(start.clone(), seen);
         }
-        closure
+
+        CallClosure {
+            ids: ids.into_iter().map(|(key, id)| (key.clone(), id)).collect(),
+            reach,
+        }
     }
 
     /// Runs after every body is emitted, when the call graph is complete.
@@ -1439,12 +1514,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let expand: Vec<bool> = self
             .frame_markers
             .iter()
-            .map(|(caller, callee)| {
-                callee == caller
-                    || closure
-                        .get(callee)
-                        .is_some_and(|reachable| reachable.contains(caller))
-            })
+            .map(|(caller, callee)| callee == caller || closure.reaches(callee, caller))
             .collect();
         let any_recursion = expand.iter().any(|&needed| needed);
 
@@ -1453,11 +1523,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .keys()
             .filter(|function| {
                 self.external_callers.contains(*function)
-                    || closure.get(*function).is_some_and(|reachable| {
-                        reachable
-                            .iter()
-                            .any(|callee| self.external_callers.contains(callee))
-                    })
+                    || closure.reaches_any(function, &self.external_callers)
             })
             .cloned()
             .collect();
@@ -1474,9 +1540,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         // one guard per function: the `am I already running?` flag and the
         // message logged when the answer is yes
-        let mut guards: HashMap<FunctionKey, (DataId, DataId)> = HashMap::new();
-        let mut label_guards: HashMap<LabelId, FunctionKey> = HashMap::new();
-        let mut return_guards: HashMap<DataId, FunctionKey> = HashMap::new();
+        let mut guards: HashMap<FunctionKey, (DataId, DataId)> = HashMap::default();
+        let mut label_guards: HashMap<LabelId, FunctionKey> = HashMap::default();
+        let mut return_guards: HashMap<DataId, FunctionKey> = HashMap::default();
         for key in guarded {
             let function = &self.functions[&key];
             let (label, return_slot, name) =
@@ -1830,25 +1896,58 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     fn constant(&mut self, udon_type: &str, repr: &str, init: HeapInit) -> DataId {
+        use std::fmt::Write;
         // keyed by the value's kind too: the string literal "null" and a
         // null string slot are both spelled `null` by their callers
-        let key = (
-            udon_type.to_string(),
-            format!("{:?}:{repr}", std::mem::discriminant(&init)),
-        );
-        if let Some(&id) = self.constants.get(&key) {
-            return id;
-        }
-        let index = self.constants.len();
-        let id = self.program.add_data(DataSymbol {
-            name: format!("__const_{index}_{udon_type}"),
-            udon_type: udon_type.to_string(),
-            init,
-            export: false,
-            sync: None,
-        });
-        self.constants.insert(key, id);
+        let mut key = std::mem::take(&mut self.constant_key);
+        key.clear();
+        key.push_str(udon_type);
+        key.push('\0');
+        let _ = write!(key, "{:?}", std::mem::discriminant(&init));
+        key.push('\0');
+        key.push_str(repr);
+
+        let id = match self.constants.get(key.as_str()) {
+            Some(&id) => id,
+            None => {
+                let index = self.constants.len();
+                let id = self.program.add_data(DataSymbol {
+                    name: format!("__const_{index}_{udon_type}"),
+                    udon_type: udon_type.to_string(),
+                    init,
+                    export: false,
+                    sync: None,
+                });
+                self.constants.insert(key.clone(), id);
+                id
+            }
+        };
+        self.constant_key = key;
         id
+    }
+
+    /// [`ExternalTypes::display_name`], cached: codegen asks for the same few
+    /// types thousands of times per program.
+    fn external_type_display_name(&self, id: ExternalTypeId) -> std::rc::Rc<str> {
+        if let Some(name) = self.display_names.borrow().get(&id) {
+            return name.clone();
+        }
+        let name: std::rc::Rc<str> = self.external.display_name(id).into();
+        self.display_names.borrow_mut().insert(id, name.clone());
+        name
+    }
+
+    /// `mangle_dotnet_name(display_name)`, cached likewise. Returns an owned
+    /// `String` because every caller appends type arguments to it.
+    fn external_type_mangled_name(&self, id: ExternalTypeId) -> String {
+        if let Some(name) = self.mangled_names.borrow().get(&id) {
+            return name.to_string();
+        }
+        let name = mangle_dotnet_name(&self.external_type_display_name(id));
+        self.mangled_names
+            .borrow_mut()
+            .insert(id, name.as_str().into());
+        name
     }
 
     /// A `%SystemType` constant naming an external type. Udon has no generics:
@@ -1970,7 +2069,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         ExternalConstant::UInt(value) => *value as i64,
                         _ => return None,
                     };
-                    let dotnet_type = self.external.display_name(id);
+                    let dotnet_type = self.external_type_display_name(id).to_string();
                     let udon_type = self.heap_type(ty);
                     let slot = self.constant(
                         &udon_type,
@@ -2031,8 +2130,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         else {
             return None;
         };
-        let name = self.external.display_name(*id);
-        Some(self.constant("SystemType", &name, HeapInit::TypeOf(name.clone())))
+        let name = self.external_type_display_name(*id);
+        Some(self.constant("SystemType", &name, HeapInit::TypeOf(name.to_string())))
     }
 
     /// `typeof(object[])` — what every M# object is at runtime, and the first
@@ -2260,7 +2359,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 target: TypeTarget::External(id),
                 arguments,
             } => {
-                let mut name = mangle_dotnet_name(&self.external.display_name(*id));
+                let mut name = self.external_type_mangled_name(*id);
                 for argument in arguments {
                     name.push_str(&self.heap_type_component(argument));
                 }
@@ -2318,7 +2417,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 target: TypeTarget::External(id),
                 arguments,
             } => {
-                let mut name = mangle_dotnet_name(&self.external.display_name(*id));
+                let mut name = self.external_type_mangled_name(*id);
                 for argument in arguments {
                     name.push_str(&self.heap_type_component(argument));
                 }
@@ -2356,7 +2455,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             target: TypeTarget::External(id),
             ..
         } = ty
-            && mangle_dotnet_name(&self.external.display_name(*id)) == BEHAVIOUR_HEAP_TYPE
+            && *self.external_type_mangled_name(*id) == *BEHAVIOUR_HEAP_TYPE
         {
             return Some(BEHAVIOUR_EXTERN_TYPE.into());
         }
@@ -2365,7 +2464,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 target: TypeTarget::External(id),
                 arguments,
             } => {
-                let mut name = mangle_dotnet_name(&self.external.display_name(*id));
+                let mut name = self.external_type_mangled_name(*id);
                 for argument in arguments {
                     name.push_str(&self.extern_type_name(argument)?);
                 }
@@ -2393,7 +2492,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let layout = Layout {
                 type_id,
                 size: elements.len() + 1,
-                slots: HashMap::new(),
+                slots: HashMap::default(),
             };
             self.layouts.insert(ty.clone(), layout.clone());
             self.type_order.push(ty.clone());
@@ -2406,7 +2505,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let layout = Layout {
                 type_id,
                 size: 2 + rank as usize,
-                slots: HashMap::new(),
+                slots: HashMap::default(),
             };
             self.layouts.insert(ty.clone(), layout.clone());
             self.type_order.push(ty.clone());
@@ -2454,7 +2553,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let members: Vec<SymbolId> = entry.members.to_vec();
 
         // base first, so inherited field indices stay valid in subclasses
-        let mut slots = HashMap::new();
+        let mut slots = HashMap::default();
         let mut size = 1usize; // slot 0: type id
         let base = self
             .signatures
@@ -2636,7 +2735,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     fn collect_entry_instance_fields(&mut self, class: SymbolId) {
         let mut chain = self.behaviour_chain(class);
         chain.reverse();
-        let mut exported: HashMap<String, SymbolId> = HashMap::new();
+        let mut exported: HashMap<String, SymbolId> = HashMap::default();
         for class in chain {
             let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
             for member in members {

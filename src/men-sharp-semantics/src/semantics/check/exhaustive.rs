@@ -16,7 +16,7 @@
 //! patterns and list patterns cover nothing — the message says which cases
 //! are missing, and `_ =>` is always accepted.
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use std::ops::Range;
 
 use men_sharp_parser::ast::{
@@ -279,7 +279,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if target != want || arguments.len() != want_arguments.len() {
                     continue;
                 }
-                let mut bindings: HashMap<SymbolId, Type> = HashMap::new();
+                let mut bindings: HashMap<SymbolId, Type> = HashMap::default();
                 let fits = arguments
                     .iter()
                     .zip(want_arguments)
@@ -331,7 +331,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     fn is_subtype(&self, sub: &Type, sup: &Type) -> bool {
         let system = self.system();
         let mut stack = vec![sub.clone()];
-        let mut seen: HashSet<Type> = HashSet::new();
+        let mut seen: HashSet<Type> = HashSet::default();
         while let Some(current) = stack.pop() {
             if &current == sup {
                 return true;
@@ -384,7 +384,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if self.is_union_type(symbol) =>
             {
                 let mut types = Vec::new();
-                self.union_cases(value, &mut types, &mut HashSet::new(), span);
+                self.union_cases(value, &mut types, &mut HashSet::default(), span);
                 let cases = types
                     .into_iter()
                     .map(|ty| Case {

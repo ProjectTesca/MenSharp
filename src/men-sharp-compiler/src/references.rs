@@ -19,7 +19,7 @@
 //! `params` on external methods is not detected yet (it lives in a custom
 //! attribute, which the metadata reader does not decode).
 
-use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use men_sharp_dotnet::{
     DotNetAssembly, MetadataError, MethodSig, TypeDefinition, TypeSig, TypeToken,
@@ -47,11 +47,11 @@ pub struct ReferenceSet<'data> {
 impl<'data> ReferenceSet<'data> {
     /// Indexes already-parsed assemblies.
     pub fn new(assemblies: Vec<DotNetAssembly<'data>>) -> Self {
-        let mut types = HashMap::new();
-        let mut namespaces = HashSet::new();
-        let mut assembly_by_name = HashMap::new();
+        let mut types = HashMap::default();
+        let mut namespaces = HashSet::default();
+        let mut assembly_by_name = HashMap::default();
         let mut forwarders = Vec::with_capacity(assemblies.len());
-        let mut extensions: HashMap<(&str, &str), Vec<ExternalTypeId>> = HashMap::new();
+        let mut extensions: HashMap<(&str, &str), Vec<ExternalTypeId>> = HashMap::default();
 
         for (assembly_index, assembly) in assemblies.iter().enumerate() {
             assembly_by_name

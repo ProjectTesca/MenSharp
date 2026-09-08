@@ -11,3 +11,4 @@ men-sharp-dotnet = { workspace = true }
 men-sharp-parser = { workspace = true }
 men-sharp-semantics = { workspace = true }
 rayon = { workspace = true }
+rustc-hash = { workspace = true }

@@ -8,7 +8,7 @@
 //! English to the key itself, so a missing translation is never a crash,
 //! only a line of English (or a key) in the output.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 use crate::Message;
 
@@ -122,7 +122,7 @@ fn fill(
 
 /// The flat TOML subset the catalogs are written in.
 fn parse(text: &str) -> HashMap<String, String> {
-    let mut entries = HashMap::new();
+    let mut entries = HashMap::default();
     let mut section = String::new();
     let mut lines = text.lines();
     while let Some(line) = lines.next() {

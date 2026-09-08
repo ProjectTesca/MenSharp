@@ -13,7 +13,7 @@
 //! `||`, `==`, `!=`, parentheses. A malformed condition counts as false; an
 //! unbalanced `#endif` is ignored; an unclosed `#if` runs to the end.
 
-use std::collections::HashSet;
+use rustc_hash::FxHashSet as HashSet;
 
 /// The source with every inactive conditional arm blanked out.
 ///
