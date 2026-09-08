@@ -787,6 +787,26 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         slot
     }
 
+    /// Whether anything compiled so far lives in `MenSharp.Scheduler` — the
+    /// sign that this program can queue a continuation and so needs the
+    /// scheduler's drain in its event stubs. Nothing reaches the queue
+    /// except through the scheduler's own methods, so this is exact.
+    pub(super) fn scheduler_in_use(&self) -> bool {
+        let Some(scheduler) = self.find_symbol(&SCHEDULER_PATH) else {
+            return false;
+        };
+        self.functions.keys().any(|key| {
+            let mut current = Some(key.symbol);
+            while let Some(symbol) = current {
+                if symbol == scheduler {
+                    return true;
+                }
+                current = self.declarations.table.symbol(symbol).parent;
+            }
+            false
+        })
+    }
+
     /// `MenSharp.Scheduler.<name>`, scheduled for compilation.
     pub(super) fn scheduler_key(&mut self, name: &str) -> Option<FunctionKey> {
         let scheduler = self.find_symbol(&SCHEDULER_PATH)?;

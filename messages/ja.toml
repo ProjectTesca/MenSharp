@@ -194,6 +194,7 @@ break_outside_a_loop_or_switch = "ループでも `switch` でもない場所で
 continue_outside_a_loop = "ループの外での `continue`"
 this_statement_is_not_supported_by_the = "この文は Udon バックエンドではまだ未対応です"
 foreach_over_this_type_is_not_supported = "この型に対する `foreach` は Udon バックエンドでは未対応です: コンパイラが呼べる `GetEnumerator()` がありません"
+a_static_initializer_cannot_start_a_task = "static フィールドの初期化子でタスク（`async` 呼び出しや時間待ち）を開始することは Udon バックエンドでは未対応です: `Start` などのイベントから開始してください"
 anonymous_methods_delegate_are_not_supported_by = "匿名メソッド（`delegate (...) { ... }`）は Udon バックエンドではまだ未対応です: 代わりにラムダ（`(...) => { ... }`）を書いてください"
 this_expression_is_not_supported_by_the = "この式は Udon バックエンドではまだ未対応です"
 a_rectangular_array_cannot_be_used_as = "矩形配列は Udon では `System.Array` として使えません（Udon にそのような配列型が無いため）: `Length`/`GetLength`/`Clone` を直接使ってください"

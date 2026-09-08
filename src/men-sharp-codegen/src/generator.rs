@@ -921,37 +921,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // else, since it dispatches `ToString` and `Message`
         let unhandled = self.unhandled_key();
         self.ensure_function(&unhandled);
-        // every event drains the continuation queue when its body is done,
-        // and the resume event feeds the timed ones into it (see `tasks`)
-        self.scheduler_key("__Drain");
-        self.scheduler_key("__OnResume");
+        self.compile_fixpoint(&mut entries, &mut claimed);
 
-        // fixpoint: draining the queue may register new types, which may make
-        // dispatchers incomplete, which enqueues more functions, ...
-        // ... and a dispatcher body may itself schedule functions (the
-        // fallbacks it calls) or meet a cast that needs a type test, so the
-        // whole thing repeats until nothing is left to emit
-        loop {
-            loop {
-                while let Some(key) = self.queue.pop_front() {
-                    self.compile_function(&key);
-                }
-                // a thunk emits no new function, so this never re-fills the
-                // queue — but the invoker it jumps from may still be queued
-                self.emit_thunks();
-                if !self.ensure_dispatcher_impls() {
-                    break;
-                }
-            }
-            // the std's `Http` needs the SDK's string-loading events: added
-            // once a program compiles anything of it, then compiled like
-            // any other entry
-            if self.add_std_event_handlers(&mut entries, &mut claimed) {
-                continue;
-            }
-            if !self.emit_dispatcher_bodies() && self.queue.is_empty() {
-                break;
-            }
+        // The continuation scheduler (see `tasks`): every event drains its
+        // queue after its body, and the resume event feeds timed
+        // continuations into it. It is only compiled in when something can
+        // put a continuation there — an `await`, a timed wait, a `yield`, a
+        // task resumed from another behaviour — which shows as a Scheduler
+        // function among the compiled ones. A behaviour that spins a cube
+        // does not carry 40 KB of scheduler for the events it never awaits.
+        let scheduler = self.scheduler_in_use();
+        if scheduler {
+            self.scheduler_key("__Drain");
+            self.scheduler_key("__OnResume");
+            self.compile_fixpoint(&mut entries, &mut claimed);
         }
 
         // entry stubs: initialize statics once, call the method, halt
@@ -1040,14 +1023,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             // continuations of tasks the body completed run now, with the
             // body's frames all returned from
-            self.emit_scheduler_call("__Drain", name);
+            if scheduler {
+                self.emit_scheduler_call("__Drain", name);
+            }
             self.program
                 .code
                 .push(Op::Jump(Target::Address(HALT_ADDRESS)));
         }
 
         // the event `SendCustomEventDelayed…` raises for timed continuations
-        if self.scheduler_key("__OnResume").is_some() {
+        if scheduler {
             let name = tasks::RESUME_EVENT;
             self.begin_entry_stub(name, init_label, init_return, initialized);
             self.emit_scheduler_call("__OnResume", name);
@@ -1095,8 +1080,48 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.compile_function(&key);
         }
         self.emit_thunks();
+        // ... but not ones that would need the scheduler: the stubs above
+        // were emitted without its drain, and its own statics missed the
+        // initializer. Said plainly rather than left to fail at run time.
+        if !scheduler && self.scheduler_in_use() {
+            self.errors.push(CodegenError {
+                message: Message::key("codegen.a_static_initializer_cannot_start_a_task"),
+                file: FileId(0),
+                span: 0..0,
+            });
+        }
 
         self.resolve_frame_markers(init_label);
+    }
+
+    /// Compiles everything queued, to a fixpoint: draining the queue may
+    /// register new types, which may make dispatchers incomplete, which
+    /// enqueues more functions, ... and a dispatcher body may itself schedule
+    /// functions (the fallbacks it calls) or meet a cast that needs a type
+    /// test, so the whole thing repeats until nothing is left to emit.
+    fn compile_fixpoint(&mut self, entries: &mut Vec<EventEntry>, claimed: &mut HashSet<String>) {
+        loop {
+            loop {
+                while let Some(key) = self.queue.pop_front() {
+                    self.compile_function(&key);
+                }
+                // a thunk emits no new function, so this never re-fills the
+                // queue — but the invoker it jumps from may still be queued
+                self.emit_thunks();
+                if !self.ensure_dispatcher_impls() {
+                    break;
+                }
+            }
+            // the std's `Http` needs the SDK's string-loading events: added
+            // once a program compiles anything of it, then compiled like
+            // any other entry
+            if self.add_std_event_handlers(entries, claimed) {
+                continue;
+            }
+            if !self.emit_dispatcher_bodies() && self.queue.is_empty() {
+                break;
+            }
+        }
     }
 
     /// Opens one exported entry point: label, `.export`, and the check that
