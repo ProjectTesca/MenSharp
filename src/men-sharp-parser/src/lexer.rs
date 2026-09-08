@@ -284,25 +284,22 @@ pub enum TokenKind {
 
 /// The tokenizer table.
 ///
-/// Every tokenizer is tried at the current position and the **longest** match wins
-/// (maximal munch). On a tie the tokenizer that appears **earlier** in this table wins,
-/// which is why keywords are listed before [`TokenKind::Identifier`] and doc comments
-/// before ordinary comments.
+/// Every tokenizer that can start with the byte under the cursor (see
+/// [`dispatch_table`]) is tried, and the **longest** match wins (maximal munch). On a
+/// tie the tokenizer that appears **earlier** in this table wins, which is why keywords
+/// are listed before [`TokenKind::Identifier`] and doc comments before ordinary comments.
 static TOKENIZERS: &[Tokenizer] = &[
     // ---------- preprocessor ----------
     // Before `Hash`, so a bare `#` on its own line is still a (malformed) directive.
     Tokenizer::LineStart(TokenKind::Directive, scan::directive),
     // ---------- trivia ----------
     // `///` must precede `//`, and `/** */` must precede `/* */` (equal length on ties).
-    Tokenizer::Regex(TokenKind::LineDocComment, r"///[^\n\r]*"),
-    Tokenizer::Regex(TokenKind::LineComment, r"//[^\n\r]*"),
+    Tokenizer::Custom(TokenKind::LineDocComment, scan::line_doc_comment),
+    Tokenizer::Custom(TokenKind::LineComment, scan::line_comment),
     Tokenizer::Custom(TokenKind::BlockDocComment, scan::block_doc_comment),
     Tokenizer::Custom(TokenKind::BlockComment, scan::block_comment),
-    Tokenizer::Regex(TokenKind::LineFeed, r"\r\n|\n|\r"),
-    Tokenizer::Regex(
-        TokenKind::Whitespace,
-        "[ \t\u{000B}\u{000C}\u{00A0}\u{3000}]+",
-    ),
+    Tokenizer::Custom(TokenKind::LineFeed, scan::line_feed),
+    Tokenizer::Custom(TokenKind::Whitespace, scan::whitespace),
     // ---------- string-like literals ----------
     // Longest match keeps these apart from `@ident` / `$` / `"` punctuation.
     Tokenizer::Custom(
@@ -520,10 +517,7 @@ static TOKENIZERS: &[Tokenizer] = &[
     // ---------- identifier ----------
     // Must come after every keyword: on an exact-length tie the keyword wins,
     // while `interfaces` still lexes as one identifier (longest match).
-    Tokenizer::Regex(
-        TokenKind::Identifier,
-        r"@?[_\p{L}\p{Nl}][_\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Cf}]*",
-    ),
+    Tokenizer::Custom(TokenKind::Identifier, scan::identifier),
 ];
 
 impl TokenKind {
@@ -647,12 +641,64 @@ enum Tokenizer {
     /// Matches an anchored regular expression. Compiled once per process
     /// (see [`compiled_regexes`]): compiling the table again for every file
     /// cost more than lexing the file did.
+    ///
+    /// Only the numeric literals are left as regexes: they are tried at digits
+    /// only, so their cost hardly shows. Everything that is tried at most
+    /// positions (identifiers, whitespace, comments) has a hand written scanner.
     Regex(TokenKind, &'static str),
     /// Matches with a hand written scanner. Returns the accepted byte length, or 0 to reject.
     Custom(TokenKind, fn(&str) -> usize),
     /// Like [`Tokenizer::Custom`], but only when nothing except whitespace precedes the
     /// cursor on its line. C# requires that of preprocessor directives.
     LineStart(TokenKind, fn(&str) -> usize),
+}
+
+/// For every byte that can stand under the cursor, the indices into [`TOKENIZERS`]
+/// of the tokenizers that could possibly match there: slots `0..128` for ASCII, and
+/// slot `128` for any non-ASCII lead byte. Each list keeps table order, so the
+/// longest-match / earliest-on-tie rule is exactly what it would be if every
+/// tokenizer were tried; the table only skips the ones that cannot match.
+///
+/// Trying all ~200 tokenizers at every position was the whole cost of lexing:
+/// a `;` used to pay for 14 regex searches and 170 keyword comparisons.
+fn dispatch_table() -> &'static [Vec<usize>; DISPATCH_SLOTS] {
+    static TABLE: std::sync::OnceLock<[Vec<usize>; DISPATCH_SLOTS]> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table: [Vec<usize>; DISPATCH_SLOTS] = std::array::from_fn(|_| Vec::new());
+        for (index, tokenizer) in TOKENIZERS.iter().enumerate() {
+            let (bytes, non_ascii) = tokenizer.first_bytes();
+            for byte in bytes {
+                table[byte as usize].push(index);
+            }
+            if non_ascii {
+                table[NON_ASCII_SLOT].push(index);
+            }
+        }
+        table
+    })
+}
+
+const NON_ASCII_SLOT: usize = 128;
+const DISPATCH_SLOTS: usize = NON_ASCII_SLOT + 1;
+
+/// The dispatch slot for the byte that starts `input`.
+fn dispatch_slot(input: &str) -> usize {
+    let byte = input.as_bytes()[0];
+    if byte.is_ascii() {
+        byte as usize
+    } else {
+        NON_ASCII_SLOT
+    }
+}
+
+/// The identifier rule of the C# specification, used by [`scan::identifier`] once
+/// it meets a non-ASCII byte: `@?[_\p{L}\p{Nl}][_\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Cf}]*`
+/// without the `@`, which the scanner has already consumed.
+fn identifier_regex() -> &'static Regex {
+    static REGEX: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    REGEX.get_or_init(|| {
+        Regex::new(r"^([_\p{L}\p{Nl}][_\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Cf}]*)").unwrap()
+    })
 }
 
 /// The regular expressions of [`TOKENIZERS`], compiled once for the whole
@@ -674,6 +720,42 @@ fn compiled_regexes() -> &'static [Option<Regex>] {
 }
 
 impl Tokenizer {
+    /// The bytes a match can start with (`0..128`), and whether it can also start
+    /// with a non-ASCII character. This is the [`dispatch_table`] key, so it must
+    /// name every byte the tokenizer accepts first; a byte missing here silently
+    /// disables the tokenizer at that byte (`dispatch_table_agrees_with_the_tokenizers`
+    /// guards against that for the regex and scanner entries).
+    fn first_bytes(&self) -> (Vec<u8>, bool) {
+        match self {
+            Tokenizer::Keyword(_, keyword) => (vec![keyword.as_bytes()[0]], false),
+            Tokenizer::Regex(kind, _)
+            | Tokenizer::Custom(kind, _)
+            | Tokenizer::LineStart(kind, _) => match kind {
+                TokenKind::LineDocComment
+                | TokenKind::LineComment
+                | TokenKind::BlockDocComment
+                | TokenKind::BlockComment => (vec![b'/'], false),
+                TokenKind::LineFeed => (vec![b'\r', b'\n'], false),
+                TokenKind::Whitespace => (vec![b' ', b'\t', 0x0B, 0x0C], true),
+                TokenKind::InterpolatedStringLiteral => (vec![b'$', b'@'], false),
+                TokenKind::RawStringLiteral | TokenKind::StringLiteral => (vec![b'"'], false),
+                TokenKind::VerbatimStringLiteral => (vec![b'@'], false),
+                TokenKind::CharLiteral => (vec![b'\''], false),
+                TokenKind::IntegerLiteral => ((b'0'..=b'9').collect(), false),
+                TokenKind::RealLiteral => ((b'0'..=b'9').chain([b'.']).collect(), false),
+                TokenKind::Identifier => (
+                    (b'a'..=b'z')
+                        .chain(b'A'..=b'Z')
+                        .chain([b'_', b'@'])
+                        .collect(),
+                    true,
+                ),
+                TokenKind::Directive => (vec![b'#'], false),
+                other => unreachable!("no first bytes known for {other:?}"),
+            },
+        }
+    }
+
     fn tokenize(
         &self,
         current_input: &str,
@@ -724,6 +806,81 @@ impl Tokenizer {
 /// Callers can detect this by checking whether the token text ends with its closing
 /// delimiter -- see [`Token::is_terminated`].
 pub(crate) mod scan {
+    /// `//` up to, but not including, the line terminator.
+    pub fn line_comment(input: &str) -> usize {
+        if !input.starts_with("//") {
+            return 0;
+        }
+
+        input.find(['\n', '\r']).unwrap_or(input.len())
+    }
+
+    /// `///` up to, but not including, the line terminator.
+    pub fn line_doc_comment(input: &str) -> usize {
+        if !input.starts_with("///") {
+            return 0;
+        }
+
+        line_comment(input)
+    }
+
+    /// `\r\n`, `\n` or `\r`.
+    pub fn line_feed(input: &str) -> usize {
+        let bytes = input.as_bytes();
+        match bytes.first() {
+            Some(b'\r') if bytes.get(1) == Some(&b'\n') => 2,
+            Some(b'\r' | b'\n') => 1,
+            _ => 0,
+        }
+    }
+
+    /// One or more of ' ', '\t', U+000B, U+000C, U+00A0 and U+3000.
+    pub fn whitespace(input: &str) -> usize {
+        let bytes = input.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            match bytes[index] {
+                b' ' | b'\t' | 0x0B | 0x0C => index += 1,
+                // U+00A0 is C2 A0, U+3000 is E3 80 80
+                0xC2 if bytes.get(index + 1) == Some(&0xA0) => index += 2,
+                0xE3 if bytes.get(index + 1..index + 3) == Some(&[0x80, 0x80]) => index += 3,
+                _ => break,
+            }
+        }
+        index
+    }
+
+    /// `@?[_\p{L}\p{Nl}][_\p{L}\p{Nl}\p{Mn}\p{Mc}\p{Nd}\p{Cf}]*`.
+    ///
+    /// ASCII is scanned by hand. The first non-ASCII byte hands the identifier over
+    /// to the regular expression instead, so the Unicode classes stay exactly the
+    /// specification's without reimplementing them here.
+    pub fn identifier(input: &str) -> usize {
+        let bytes = input.as_bytes();
+        let start = usize::from(bytes.first() == Some(&b'@'));
+        let mut index = start;
+        while let Some(&byte) = bytes.get(index) {
+            let accepted = if index == start {
+                byte == b'_' || byte.is_ascii_alphabetic()
+            } else {
+                byte == b'_' || byte.is_ascii_alphanumeric()
+            };
+
+            if accepted {
+                index += 1;
+            } else if byte.is_ascii() {
+                break;
+            } else {
+                return match super::identifier_regex().find(&input[start..]) {
+                    Some(matched) => start + matched.end(),
+                    None => 0,
+                };
+            }
+        }
+
+        if index == start { 0 } else { index }
+    }
+
     /// Length in bytes of the UTF-8 sequence that starts with `byte`.
     fn utf8_length(byte: u8) -> usize {
         match byte {
@@ -1047,8 +1204,18 @@ pub fn get_kind(&self) -> TokenKind {
 
 pub struct Lexer<'input> {
     source: &'input str,
+    /// Every token of `source`, trivia included, produced in one pass by
+    /// [`tokenize_all`] when the lexer is built.
+    ///
+    /// The parser backtracks freely (`current`, `back_to_anchor`), and lexing on
+    /// demand meant tokenizing the same text again on every retry -- close to three
+    /// times per token over a typical file. Now a retry is an index reset.
+    tokens: Vec<Token<'input>>,
+    /// Index into `tokens` of the next token to hand out.
+    index: usize,
+    /// End of the last token handed out or skipped, in local coordinates
+    /// (see `span_offset`). `source.len()` once the input is exhausted.
     current_byte_position: usize,
-    current_token_cache: Option<Token<'input>>,
     /// Comments already recorded in [`Lexer::comments`], so that re-lexing the same
     /// region (via [`Lexer::current`] or [`Lexer::back_to_anchor`]) does not duplicate them.
     comment_scan_position: usize,
@@ -1094,8 +1261,9 @@ impl<'input> Lexer<'input> {
         Self {
             span_offset,
             source,
+            tokens: tokenize_all(source, span_offset),
+            index: 0,
             current_byte_position: 0,
-            current_token_cache: None,
             comment_scan_position: 0,
             comments: Vec::new(),
             ignore_whitespace: true,
@@ -1109,30 +1277,17 @@ impl<'input> Lexer<'input> {
         }
     }
 
-    /// Whether only whitespace stands between the cursor and the start of its line.
-    fn at_line_start(&self) -> bool {
-        self.source[..self.current_byte_position]
-            .chars()
-            .rev()
-            .find(|char| !matches!(char, ' ' | '\t' | '\u{000B}' | '\u{000C}' | '\u{3000}'))
-            .map(|char| char == '\n' || char == '\r')
-            .unwrap_or(true)
-    }
-
+    /// The next token without consuming it.
     pub fn current(&mut self) -> Option<Token<'input>> {
         let anchor = self.cast_anchor();
-
-        // move to next temporarily
-        self.current_token_cache = self.next();
-
-        // back to anchor position
-        self.current_byte_position = anchor.byte_position;
-
-        self.current_token_cache.clone()
+        let token = self.next();
+        self.back_to_anchor(anchor);
+        token
     }
 
     pub fn cast_anchor(&self) -> Anchor {
         Anchor {
+            index: self.index,
             byte_position: self.current_byte_position,
         }
     }
@@ -1144,8 +1299,8 @@ impl<'input> Lexer<'input> {
     }
 
     pub fn back_to_anchor(&mut self, anchor: Anchor) {
+        self.index = anchor.index;
         self.current_byte_position = anchor.byte_position;
-        self.current_token_cache = None;
     }
 
     pub fn enable_comment_token(mut self) -> Self {
@@ -1175,106 +1330,129 @@ impl<'input> Lexer<'input> {
     }
 }
 
+/// Whether only whitespace stands between `position` and the start of its line.
+fn at_line_start(source: &str, position: usize) -> bool {
+    source[..position]
+        .chars()
+        .rev()
+        .find(|char| !matches!(char, ' ' | '\t' | '\u{000B}' | '\u{000C}' | '\u{3000}'))
+        .map(|char| char == '\n' || char == '\r')
+        .unwrap_or(true)
+}
+
+/// Splits `source` into every token it contains, trivia included, in source order.
+/// Spans are shifted by `span_offset`. Never fails: a byte no tokenizer accepts
+/// becomes a one character [`TokenKind::UnexpectedCharacter`].
+fn tokenize_all(source: &str, span_offset: usize) -> Vec<Token<'_>> {
+    tokenize_all_with(source, span_offset, |input| {
+        &dispatch_table()[dispatch_slot(input)]
+    })
+}
+
+/// [`tokenize_all`] with the choice of which tokenizers to try at each position
+/// left to `candidates`, so tests can compare the dispatch table against trying
+/// every tokenizer.
+fn tokenize_all_with<'input>(
+    source: &'input str,
+    span_offset: usize,
+    candidates: impl Fn(&str) -> &'static [usize],
+) -> Vec<Token<'input>> {
+    // about one token per four bytes of C#
+    let mut tokens = Vec::with_capacity(source.len() / 4 + 1);
+    let regexes = compiled_regexes();
+    let mut position = 0;
+
+    while position < source.len() {
+        let current_input = &source[position..];
+        // only a directive cares, and `#` is rare, so the backwards scan stays off the hot path
+        let line_start = current_input.starts_with('#') && at_line_start(source, position);
+
+        let mut current_max_length = 0;
+        let mut current_token_kind = TokenKind::UnexpectedCharacter;
+
+        for &index in candidates(current_input) {
+            let (token_kind, byte_length) =
+                TOKENIZERS[index].tokenize(current_input, index, regexes, line_start);
+
+            if byte_length > current_max_length {
+                current_max_length = byte_length;
+                current_token_kind = token_kind;
+            }
+        }
+
+        let length = if current_max_length == 0 {
+            current_input.chars().next().unwrap().len_utf8()
+        } else {
+            current_max_length
+        };
+        let end = position + length;
+
+        tokens.push(Token {
+            kind: current_token_kind,
+            text: &source[position..end],
+            span: span_offset + position..span_offset + end,
+        });
+        position = end;
+    }
+
+    tokens
+}
+
 impl<'input> Iterator for Lexer<'input> {
     type Item = Token<'input>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // take cache
-        if let Some(token) = self.current_token_cache.take() {
+        while let Some(token) = self.tokens.get(self.index) {
+            self.index += 1;
+
+            let kind = token.kind;
             // spans are reported in the file's coordinates; positions are local
-            self.current_byte_position = token.span.end - self.span_offset;
-            return Some(token);
-        }
+            let start_position = token.span.start - self.span_offset;
+            let end_position = token.span.end - self.span_offset;
+            self.current_byte_position = end_position;
 
-        loop {
-            if self.current_byte_position == self.source.len() {
-                return None;
+            if kind == TokenKind::Directive && self.ignore_directive {
+                if start_position >= self.directive_scan_position {
+                    self.directive_scan_position = end_position;
+                    let token = token.clone();
+                    self.directives.push(token);
+                }
+                continue;
             }
 
-            let current_input = &self.source[self.current_byte_position..self.source.len()];
-
-            let mut current_max_length = 0;
-            let mut current_token_kind = TokenKind::UnexpectedCharacter;
-
-            let at_line_start = self.at_line_start();
-
-            for (index, tokenizer) in TOKENIZERS.iter().enumerate() {
-                let (token_kind, byte_length) =
-                    tokenizer.tokenize(current_input, index, compiled_regexes(), at_line_start);
-
-                if byte_length > current_max_length {
-                    current_max_length = byte_length;
-                    current_token_kind = token_kind;
-                }
-            }
-
-            let start_position = self.current_byte_position;
-
-            let token = if current_max_length == 0 {
-                let char_length = self.source[start_position..]
-                    .chars()
-                    .next()
-                    .unwrap()
-                    .len_utf8();
-
-                self.current_byte_position += char_length;
-                let end_position = start_position + char_length;
-
-                Token {
-                    kind: TokenKind::UnexpectedCharacter,
-                    text: &self.source[start_position..end_position],
-                    span: self.span_offset + start_position..self.span_offset + end_position,
-                }
-            } else {
-                self.current_byte_position += current_max_length;
-                let end_position = self.current_byte_position;
-
-                let token = Token {
-                    kind: current_token_kind,
-                    text: &self.source[start_position..end_position],
-                    span: self.span_offset + start_position..self.span_offset + end_position,
+            if kind.is_comment() {
+                let ignore = if kind.is_doc_comment() {
+                    self.ignore_doc_comment
+                } else {
+                    self.ignore_comment
                 };
 
-                if current_token_kind == TokenKind::Directive && self.ignore_directive {
-                    if start_position >= self.directive_scan_position {
-                        self.directive_scan_position = end_position;
-                        self.directives.push(token);
+                if ignore {
+                    if start_position >= self.comment_scan_position {
+                        self.comment_scan_position = end_position;
+                        let token = token.clone();
+                        self.comments.push(token);
                     }
                     continue;
                 }
+            }
 
-                if current_token_kind.is_comment() {
-                    let ignore = if current_token_kind.is_doc_comment() {
-                        self.ignore_doc_comment
-                    } else {
-                        self.ignore_comment
-                    };
+            match kind {
+                TokenKind::Whitespace if self.ignore_whitespace => continue,
+                TokenKind::LineFeed if self.ignore_line_feed => continue,
+                _ => {}
+            }
 
-                    if ignore {
-                        if start_position >= self.comment_scan_position {
-                            self.comment_scan_position = end_position;
-                            self.comments.push(token);
-                        }
-                        continue;
-                    }
-                }
-
-                match current_token_kind {
-                    TokenKind::Whitespace if self.ignore_whitespace => continue,
-                    TokenKind::LineFeed if self.ignore_line_feed => continue,
-                    _ => {}
-                }
-
-                token
-            };
-
-            return Some(token);
+            return Some(token.clone());
         }
+
+        None
     }
 }
 
 #[derive(Debug, Clone, Copy)]
 pub struct Anchor {
+    index: usize,
     byte_position: usize,
 }
 
@@ -1297,6 +1475,73 @@ impl Anchor {
 #[cfg(test)]
 mod tests {
     use super::{Lexer, TokenKind};
+
+    /// Every sample text below, lexed with the dispatch table and lexed by trying
+    /// every tokenizer, must agree token for token. A first byte missing from
+    /// [`super::Tokenizer::first_bytes`] would only show up as a token silently
+    /// lexed differently, which is exactly what this catches.
+    #[test]
+    fn dispatch_table_agrees_with_the_tokenizers() {
+        let every_tokenizer: &'static [usize] = Box::leak(
+            (0..super::TOKENIZERS.len())
+                .collect::<Vec<_>>()
+                .into_boxed_slice(),
+        );
+        let all_keywords: String = super::TOKENIZERS
+            .iter()
+            .filter_map(|tokenizer| match tokenizer {
+                super::Tokenizer::Keyword(_, keyword) => Some(*keyword),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let samples = [
+            all_keywords.as_str(),
+            "interfaces classy _new @class 名前 αβγ x1 _ @ a.b?.c ?? ??= => -> ...",
+            "0 1_000 10L 0xFFu 0b0101 1.5 1e-3 2.0f 3m .5 .5f 1f 0x 1..2 a-1",
+            "\"s\" 's' '\\'' @\"v\"\"\" $\"i{a}\" $@\"{b}\" @$\"{c}\" \"\"\"raw\"\"\" $\"\"\"r{d}\"\"\"",
+            "// c\n/// d\n/* b */ /** doc */ /**/ a\r\nb\rc\n  #if X\n x #else\n#endif\n",
+            " \t\u{000B}\u{000C}\u{00A0}\u{3000}x\u{00A0}#region not at line start\n",
+            "a \\ b ` ¥ \u{200B}x",
+            "",
+            "#",
+            "\u{3000}",
+        ];
+
+        for sample in samples {
+            let by_table = super::tokenize_all(sample, 3);
+            let by_force = super::tokenize_all_with(sample, 3, |_| every_tokenizer);
+            assert_eq!(by_table, by_force, "sample {sample:?}");
+        }
+    }
+
+    #[test]
+    fn hand_written_scanners_match_the_old_regexes() {
+        assert_eq!(super::scan::identifier("名前1 x"), "名前1".len());
+        assert_eq!(super::scan::identifier("@名前"), "@名前".len());
+        assert_eq!(super::scan::identifier("a名前b c"), "a名前b".len());
+        assert_eq!(super::scan::identifier("1abc"), 0);
+        assert_eq!(super::scan::identifier("@1"), 0);
+        assert_eq!(super::scan::identifier("@"), 0);
+        assert_eq!(super::scan::identifier("_"), 1);
+        assert_eq!(super::scan::identifier("x\u{0301}y"), "x\u{0301}y".len()); // combining mark
+        assert_eq!(super::scan::identifier("\u{3000}"), 0);
+        assert_eq!(
+            super::scan::whitespace(" \t\u{000B}\u{000C}\u{00A0}\u{3000}x"),
+            9
+        );
+        assert_eq!(super::scan::whitespace("\u{3001}"), 0);
+        assert_eq!(super::scan::whitespace("\nx"), 0);
+        assert_eq!(super::scan::line_feed("\r\n\n"), 2);
+        assert_eq!(super::scan::line_feed("\n\r"), 1);
+        assert_eq!(super::scan::line_feed("\rx"), 1);
+        assert_eq!(super::scan::line_feed("x"), 0);
+        assert_eq!(super::scan::line_comment("// a\r\nb"), 4);
+        assert_eq!(super::scan::line_comment("// a"), 4);
+        assert_eq!(super::scan::line_comment("/ a"), 0);
+        assert_eq!(super::scan::line_doc_comment("/// a\nb"), 5);
+        assert_eq!(super::scan::line_doc_comment("// a\nb"), 0);
+    }
 
     fn lex(source: &str) -> Vec<(TokenKind, &str)> {
         Lexer::new(source)
