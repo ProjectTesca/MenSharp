@@ -1,0 +1,22 @@
+{
+    "name": "Bench.Editor",
+    "rootNamespace": "",
+    "references": [
+        "ProjectTesca.MenSharp.Editor",
+        "UdonSharp.Editor",
+        "UdonSharp.Runtime",
+        "VRC.Udon",
+        "VRC.Udon.Editor"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

@@ -59,6 +59,7 @@ public class MenSharpIntegrationTests
         "VerifyTarget",
         "VerifyTuple",
         "VerifyUdonSharp",
+        "VerifyUsharpCompat",
         "VerifyWake",
     };
 

@@ -8,7 +8,9 @@ use crate::symbol::{SymbolId, SyntaxRef};
 use crate::types::lookup::TypeSystem;
 use crate::types::{Type, TypeTarget};
 use men_sharp_diagnostics::{Edit, Hint, Message};
-use men_sharp_parser::ast::{EntityID, Expression, LiteralExpression, PrimaryLeft, UnaryOperator};
+use men_sharp_parser::ast::{
+    BinaryOperator, EntityID, Expression, LiteralExpression, PrimaryLeft, UnaryOperator,
+};
 use std::ops::Range;
 
 impl<'a, 'ast> Checker<'a, 'ast> {
@@ -289,8 +291,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
-    /// The constant-expression allowance, without evaluating: an integer literal
-    /// may sit in any integral slot (the C# LSP checks the actual range).
+    /// The constant-expression allowance, without evaluating: an integer
+    /// constant expression may sit in any integral slot (the C# LSP checks the
+    /// actual range).
     fn integer_literal_fits(&self, to: &Type) -> bool {
         self.system()
             .numeric_kind(to)
@@ -298,24 +301,51 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             .unwrap_or(false)
     }
 
+    /// An integer constant expression built from literals alone (§12.23):
+    /// `5`, `-5`, `(3 - 5)`, `1 << 4`, `20 / 3`. These convert implicitly to
+    /// any integral type the value fits, which is what lets `sbyte x = 3 - 5;`
+    /// compile. Named constants are not folded here (yet).
     pub(super) fn is_integer_literal(expression: &Expression) -> bool {
         match expression {
             Expression::Primary(primary) => {
                 primary.chain.is_empty()
-                    && matches!(
-                        primary.left,
-                        PrimaryLeft::Literal(LiteralExpression::Integer(_))
-                    )
+                    && match &primary.left {
+                        PrimaryLeft::Literal(LiteralExpression::Integer(_)) => true,
+                        PrimaryLeft::Parenthesized { expression, .. } => {
+                            Self::is_integer_literal(expression)
+                        }
+                        _ => false,
+                    }
             }
             Expression::Unary(unary) => {
                 matches!(
                     unary.operator.value,
-                    UnaryOperator::Minus | UnaryOperator::Plus
+                    UnaryOperator::Minus | UnaryOperator::Plus | UnaryOperator::BitwiseNot
                 ) && unary
                     .operand
                     .as_ref()
                     .map(|operand| Self::is_integer_literal(operand))
                     .unwrap_or(false)
+            }
+            Expression::Binary(binary) => {
+                matches!(
+                    binary.operator.value,
+                    BinaryOperator::Add
+                        | BinaryOperator::Subtract
+                        | BinaryOperator::Multiply
+                        | BinaryOperator::Divide
+                        | BinaryOperator::Modulo
+                        | BinaryOperator::LeftShift
+                        | BinaryOperator::RightShift
+                        | BinaryOperator::BitwiseAnd
+                        | BinaryOperator::BitwiseOr
+                        | BinaryOperator::BitwiseXor
+                ) && Self::is_integer_literal(&binary.left)
+                    && binary
+                        .right
+                        .as_ref()
+                        .map(|right| Self::is_integer_literal(right))
+                        .unwrap_or(false)
             }
             _ => false,
         }

@@ -148,6 +148,7 @@ public class MenSharpVerifyFixtureTests
                 Extra("UCounter").GetComponent(MenSharpTestScene.FindType("UCounter"))),
         },
         new Fixture { Type = "UnionVerify.VerifyUnion" },
+        new Fixture { Type = "VerifyUsharpCompat" },
         new Fixture { Type = "VerifyWake", Timeout = 3f },
         new Fixture { Type = "JsonVerify.VerifyJson" },
         new Fixture { Type = "VerifyResult" },

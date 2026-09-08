@@ -39,6 +39,38 @@ pub fn locals_and_var_infer_and_convert() {
 }
 
 #[test]
+pub fn integer_constant_expressions_narrow_like_literals() {
+    checked!(
+        check,
+        r#"
+        public class Body
+        {
+            void Run()
+            {
+                sbyte a = 3 - 5;
+                byte b = 20 / 3;
+                short c = -(1 << 4);
+                byte d = (0xFF & 250) | 0;
+                sbyte e = ~0;
+                int n = 3;
+                sbyte wrong = n - 5;
+            }
+        }
+        "#,
+    );
+
+    // only the non-constant one is a mismatch
+    assert_eq!(check.errors.len(), 1);
+    assert_eq!(
+        check.errors[0].kind,
+        SemanticErrorKind::TypeMismatch {
+            expected: "sbyte".to_string(),
+            found: "int".to_string(),
+        }
+    );
+}
+
+#[test]
 pub fn members_inheritance_and_conditions() {
     checked!(
         check,

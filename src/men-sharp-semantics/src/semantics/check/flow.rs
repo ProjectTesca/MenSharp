@@ -454,6 +454,18 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             Type::Array { element, .. } => return (**element).clone(),
             Type::Error | Type::Dynamic => return Type::Error,
             _ if self.system().is_string(collection) => return self.corlib("Char"),
+            // `foreach (Transform child in transform)`: Transform enumerates
+            // its children through the non-generic IEnumerator, whose members
+            // Udon does not expose. It does expose `childCount` and
+            // `GetChild`, so the code generator walks it by index, and the
+            // element is a `Transform` — as the explicit loop variable type
+            // everyone writes there would demand anyway.
+            Type::Named {
+                target: TypeTarget::External(id),
+                ..
+            } if self.resolver.external.display_name(*id) == "UnityEngine.Transform" => {
+                return collection.clone();
+            }
             _ => {}
         }
 

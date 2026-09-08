@@ -32,3 +32,10 @@
 /tests/unity-project/Assets/UdonSharp/UCounter.asset
 /tests/unity-project/Assets/UdonSharp/UCounter.asset.meta
 /tests/unity-project/mono_crash.*
+
+# Staged by tools/prepare-bench.sh (the corpus lives in tests/bench-corpus).
+/tests/unity-project/Assets/Bench/MenSharp/
+/tests/unity-project/Assets/Bench/MenSharp.meta
+/tests/unity-project/Assets/Bench/UdonSharp/
+/tests/unity-project/Assets/Bench/UdonSharp.meta
+/artifacts/bench/

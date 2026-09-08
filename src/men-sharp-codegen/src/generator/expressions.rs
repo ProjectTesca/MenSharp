@@ -355,6 +355,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 rank: 1,
             };
             self.lower_foreach_over_array(ctx, statement, chars, array_type, char_type);
+        } else if self.heap_type(&collection_type) == "UnityEngineTransform" {
+            // a Transform's children, by index: see the checker's
+            // `element_type_of` for why not the enumerator
+            self.check_not_null(ctx, value, span.clone());
+            self.lower_foreach_over_transform(ctx, statement, value, collection_type);
         } else if let Some(enumeration) = self
             .bodies
             .enumerations
@@ -437,6 +442,79 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32",
             &[index, one, index],
             statement.span.clone(),
+        );
+        self.program.code.push(Op::Jump(Target::Label(head)));
+        self.program.code.push(Op::Label(break_label));
+        ctx.locals.pop();
+    }
+
+    /// `for (int i = 0; i < t.childCount; i++) { var child = t.GetChild(i); ... }`
+    /// — what `foreach (Transform child in t)` means in Udon, which has the
+    /// two externs but not the enumerator's.
+    fn lower_foreach_over_transform(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        statement: &'ast men_sharp_parser::ast::ForeachStatement<'ast, 'ast>,
+        transform: DataId,
+        transform_type: Type,
+    ) {
+        let Ok(name) = &statement.name else {
+            return;
+        };
+        let span = statement.span.clone();
+
+        ctx.locals.push(HashMap::default());
+        let count = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "UnityEngineTransform.__get_childCount__SystemInt32",
+            &[transform, count],
+            span.clone(),
+        );
+        let index = self.temp("SystemInt32");
+        let zero = self.int_constant(0);
+        let one = self.int_constant(1);
+        self.copy(zero, index);
+
+        let head = self.fresh_label("foreach_head");
+        let continue_label = self.fresh_label("foreach_continue");
+        let break_label = self.fresh_label("foreach_break");
+        let condition = self.temp("SystemBoolean");
+        self.program.code.push(Op::Label(head));
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_LessThan__SystemInt32_SystemInt32__SystemBoolean",
+            &[index, count, condition],
+            span.clone(),
+        );
+        self.program.code.push(Op::Push(condition));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(break_label)));
+
+        let child = self.temp("UnityEngineTransform");
+        self.call_extern(
+            ctx,
+            "UnityEngineTransform.__GetChild__SystemInt32__UnityEngineTransform",
+            &[transform, index, child],
+            span.clone(),
+        );
+        self.bind_designation(ctx, name, child, &transform_type, &None, span.clone());
+
+        ctx.loop_stack.push(BreakFrame::Loop {
+            continue_target: continue_label,
+            break_target: break_label,
+        });
+        if let Ok(body) = &statement.body {
+            self.lower_statement(ctx, body);
+        }
+        ctx.loop_stack.pop();
+        self.program.code.push(Op::Label(continue_label));
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32",
+            &[index, one, index],
+            span,
         );
         self.program.code.push(Op::Jump(Target::Label(head)));
         self.program.code.push(Op::Label(break_label));

@@ -475,19 +475,35 @@ public static class MenSharpCompiler
         yield return typeof(UdonSharp.UdonSharpBehaviour).Assembly.Location;
         // [NetworkCallable], NetworkEventTarget's users, VRC components
         yield return typeof(VRC.SDK3.UdonNetworkCalling.NetworkCallableAttribute).Assembly.Location;
-        // text in the world: TextMeshPro, uGUI and the engine modules behind
-        // them. Looked up by name — this assembly does not reference them,
-        // and a project without TextMeshPro simply compiles without it.
-        foreach (string name in new[]
-        {
-            "Unity.TextMeshPro",
-            "UnityEngine.UI",
-            "UnityEngine.UIModule",
-            "UnityEngine.TextRenderingModule",
-        })
+        // text in the world: TextMeshPro and uGUI. Looked up by name — this
+        // assembly does not reference them, and a project without
+        // TextMeshPro simply compiles without it.
+        foreach (string name in new[] { "Unity.TextMeshPro", "UnityEngine.UI" })
         {
             string location = LoadedAssemblyLocation(name);
             if (location != null)
+            {
+                yield return location;
+            }
+        }
+        // every engine module the editor has loaded (Animation, Audio,
+        // ParticleSystem, ...): a script may name a type from any of them,
+        // and the Udon whitelist already decides what is callable. Each is a
+        // small assembly, parsed in parallel, so listing them all costs less
+        // than one user asking why HumanBodyBones does not resolve.
+        foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
+        {
+            string name = assembly.GetName().Name;
+            if (assembly.IsDynamic
+                || !name.StartsWith("UnityEngine.", StringComparison.Ordinal)
+                || !name.EndsWith("Module", StringComparison.Ordinal)
+                || name == "UnityEngine.CoreModule"
+                || name == "UnityEngine.PhysicsModule")
+            {
+                continue;
+            }
+            string location = assembly.Location;
+            if (!string.IsNullOrEmpty(location))
             {
                 yield return location;
             }

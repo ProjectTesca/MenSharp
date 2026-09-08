@@ -834,16 +834,21 @@ pub(crate) mod scan {
         }
     }
 
-    /// One or more of ' ', '\t', U+000B, U+000C, U+00A0 and U+3000.
+    /// One or more of ' ', '\t', U+000B, U+000C, U+00A0, U+3000 and U+FEFF.
+    ///
+    /// U+FEFF is the byte order mark: editors on Windows (and Unity's own
+    /// script templates) put one at the start of a file, and Roslyn counts it
+    /// as whitespace wherever it appears. So does this.
     pub fn whitespace(input: &str) -> usize {
         let bytes = input.as_bytes();
         let mut index = 0;
         while index < bytes.len() {
             match bytes[index] {
                 b' ' | b'\t' | 0x0B | 0x0C => index += 1,
-                // U+00A0 is C2 A0, U+3000 is E3 80 80
+                // U+00A0 is C2 A0, U+3000 is E3 80 80, U+FEFF is EF BB BF
                 0xC2 if bytes.get(index + 1) == Some(&0xA0) => index += 2,
                 0xE3 if bytes.get(index + 1..index + 3) == Some(&[0x80, 0x80]) => index += 3,
+                0xEF if bytes.get(index + 1..index + 3) == Some(&[0xBB, 0xBF]) => index += 3,
                 _ => break,
             }
         }
@@ -1506,6 +1511,7 @@ mod tests {
             "",
             "#",
             "\u{3000}",
+            "\u{FEFF}using System;\nclass A { }",
         ];
 
         for sample in samples {
@@ -1513,6 +1519,18 @@ mod tests {
             let by_force = super::tokenize_all_with(sample, 3, |_| every_tokenizer);
             assert_eq!(by_table, by_force, "sample {sample:?}");
         }
+    }
+
+    #[test]
+    fn a_byte_order_mark_is_whitespace() {
+        assert_eq!(
+            lex("\u{FEFF}using System;"),
+            vec![
+                (TokenKind::Using, "using"),
+                (TokenKind::Identifier, "System"),
+                (TokenKind::Semicolon, ";"),
+            ]
+        );
     }
 
     #[test]
@@ -1530,6 +1548,7 @@ mod tests {
             super::scan::whitespace(" \t\u{000B}\u{000C}\u{00A0}\u{3000}x"),
             9
         );
+        assert_eq!(super::scan::whitespace("\u{FEFF}using"), 3);
         assert_eq!(super::scan::whitespace("\u{3001}"), 0);
         assert_eq!(super::scan::whitespace("\nx"), 0);
         assert_eq!(super::scan::line_feed("\r\n\n"), 2);
