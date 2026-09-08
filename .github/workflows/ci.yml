@@ -80,6 +80,17 @@ jobs:
           targets: x86_64-unknown-linux-musl
       - uses: Swatinem/rust-cache@v2
 
+      # the compiler's allocator (mimalloc) is C, so the static musl build
+      # needs a musl-flavoured C compiler; the hosted runner has none, and
+      # cc-rs does not fall back from x86_64-linux-musl-gcc to musl-gcc on
+      # its own, so it is named explicitly
+      - name: Install the musl C toolchain
+        if: vars.MENSHARP_UNITY_RUNNER == ''
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y musl-tools
+          echo "CC_x86_64_unknown_linux_musl=musl-gcc" >> "$GITHUB_ENV"
+
       # the VRChat SDK packages pinned in Packages/vpm-manifest.json — never
       # committed, resolved from VRChat's package repository every run
       - name: Resolve pinned VPM dependencies
