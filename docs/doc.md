@@ -11,6 +11,7 @@
 
  - [はじめに](#はじめに)
  - [インストール方法](#インストール方法)
+   - [VCC(VRChat Creator Companion)の場合](#vccvrchat-creator-companionの場合)
    - [ALCOMの場合](#alcomの場合)
  - [使い方](#使い方)
  - [配布方法](#配布方法)
@@ -24,7 +25,7 @@
 # はじめに
 MenSharpとはUdon Assemblyへのコンパイラです。
 
-世界最速のC#コンパイラであり、C#公式のRoslynコンパイラより3倍程度、UdonSharpコンパイラ比では10倍以上高速に動作します。
+世界最速のC#コンパイラであり、C#公式のRoslynコンパイラより最大8倍程度高速にコンパイルできます。
 
 使用できるC#機能は**ほぼ全て**で、現時点でサポートしていないのはThread, lock, FileIO, VRC SDKを経由しないネットワークアクセス等のごく一部の機能のみです。
 
@@ -37,10 +38,26 @@ MenSharpとはUdon Assemblyへのコンパイラです。
 ## インストール方法
 インストールは非常に簡単です。
 
-### VCC(VRChat Creator Companion)の場合
-まずはMenSharpパッケージのzipをダウンロードして適当なディレクトリに展開します。
+> VPM: `https://vpm.tesca.io/vpm.json`
 
-その後、VCCの設定のパッケージタブからユーザーパッケージとして追加します。
+### VCC(VRChat Creator Companion)の場合
+パッケージの追加方法は二通りあります
+
+#### Zipの場合
+ダウンロードしたZipを展開して適当な場所に展開します
+
+次に、設定のパッケージタブから先ほど展開したフォルダを選択します
+
+![](./assets/vcczip.png)
+
+次に、プロジェクトを新規作成するか既存のプロジェクトの管理画面を開いてMenSharpを追加します。
+
+![](./assets/vcc1.png)
+
+追加できたら、次の[使い方](#使い方)セクションに進んでください。
+
+#### VPMリポジトリの場合
+まずは`https://vpm.tesca.io/vpm.json`をVPMリポジトリとして追加します
 
 ![](./assets/vcc0.png)
 
@@ -53,9 +70,24 @@ MenSharpとはUdon Assemblyへのコンパイラです。
 <div style="page-break-before:always"></div>
 
 ### ALCOMの場合
-まずはMenSharpパッケージのzipをダウンロードして適当なディレクトリに展開します。
+パッケージの追加方法は二通りあります
 
-その後、ALCOMのパッケージのタブから先ほど展開したパッケージを登録します。
+#### Zipの場合
+ダウンロードしたZipを展開して適当な場所に展開します
+
+次に、設定のユーザーパッケージタブから先ほど展開したフォルダを選択します
+
+![](./assets/alcomzip.png)
+
+次に、プロジェクトを新規作成するか既存のプロジェクトの管理画面を開きます。開いたら先ほど登録したパッケージをプロジェクトにインストールします。
+
+![](./assets/alcom1.png)
+
+追加できたら、次の[使い方](#使い方)セクションに進んでください。
+
+#### VPMリポジトリの場合
+
+まずは`https://vpm.tesca.io/vpm.json`をVPMリポジトリとして追加します
 
 ![](./assets/alcom0.png)
 
@@ -655,10 +687,6 @@ public class Ex7Behaviour : MenSharpBehaviour
 <div style="page-break-before:always"></div>
 
 ## Q&A
-
-> **Q. OSSとして公開する予定はありますか？**
-> 
-> A. もちろんです！一通りのクローズドテストが終われば公開されます！
 
 > **Q. サポートされているプラットフォームは？**
 >

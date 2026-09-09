@@ -79,7 +79,16 @@ public static class MenSharpCompiler
         MenSharpSources.SourceSet set = MenSharpSources.Collect();
         if (set.MenSharp.Count == 0)
         {
-            Debug.LogError($"MenSharp: no .cs files under {SourceRoot} (or in an assembly referencing {MenSharpSources.RuntimeAssembly}).");
+            // An empty source set is normal just after installing the package:
+            // creating Assets/MenSharp triggers another asset-postprocessor pass.
+            // Keep that automatic pass quiet; an explicit menu command still
+            // deserves feedback, but this is not a compilation failure.
+            if (!onlyIfChanged)
+            {
+                Debug.LogWarning(
+                    $"MenSharp: no .cs files under {SourceRoot} (or in an assembly "
+                    + $"referencing {MenSharpSources.RuntimeAssembly}).");
+            }
             return;
         }
 
