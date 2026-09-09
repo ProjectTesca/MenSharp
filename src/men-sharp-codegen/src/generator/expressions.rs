@@ -2402,7 +2402,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 {
                     return place;
                 }
-                let Some(owner) = self.extern_type_name(&declaring) else {
+                // the owner is whichever class up the chain the whitelist
+                // has the accessor on (see exposed_owner); a getter, a
+                // property setter or a struct field setter all count
+                let accessors: Vec<String> = match self.extern_type_name(&member_type) {
+                    Some(value) => vec![
+                        format!("__get_{}__{value}", external.name),
+                        format!("__set_{}__{value}__SystemVoid", external.name),
+                        format!("__set_{}__{value}", external.name),
+                    ],
+                    None => Vec::new(),
+                };
+                let Some(owner) = self.exposed_owner(&declaring, &accessors) else {
                     self.error(
                         ctx,
                         Message::key("codegen.this_type_is_not_available_on_udon"),
@@ -4745,14 +4756,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         let name = member.name.replace('.', "");
         let declaring = self.substitute(&call.declaring_type, &ctx.key.bindings);
-        let Some(owner) = self.extern_type_name(&declaring) else {
+        if self.extern_type_name(&declaring).is_none() {
             self.error(
                 ctx,
                 Message::key("codegen.this_indexer_s_declaring_type_cannot_be"),
                 span,
             );
             return Place::Error;
-        };
+        }
         let signature = self.substitute_signature(&call.signature, &ctx.key.bindings);
         let mut indices: Vec<(DataId, Type)> = Vec::new();
         for (position, argument) in arguments.iter().enumerate() {
@@ -4778,12 +4789,34 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             };
             indices.push((value, target));
         }
+        let ty = self.substitute(&signature.return_type, &ctx.key.bindings);
+        // the owner is whichever class up the chain the whitelist has the
+        // accessor on (see exposed_owner)
+        // (an index type without a spelling is reported when the place is
+        // read or written, not here)
+        let index_names: Option<Vec<String>> = indices
+            .iter()
+            .map(|(_, index_type)| self.extern_type_name(index_type))
+            .collect();
+        let accessors: Vec<String> = match (self.extern_type_name(&ty), index_names) {
+            (Some(value), Some(parts)) => {
+                let parts = parts.join("_");
+                vec![
+                    format!("__get_{name}__{parts}__{value}"),
+                    format!("__set_{name}__{parts}_{value}__SystemVoid"),
+                ]
+            }
+            _ => Vec::new(),
+        };
+        let Some(owner) = self.exposed_owner(&declaring, &accessors) else {
+            return Place::Error;
+        };
         Place::ExternalIndexer {
             receiver,
             owner,
             name,
             indices,
-            ty: self.substitute(&signature.return_type, &ctx.key.bindings),
+            ty,
         }
     }
 

@@ -1866,14 +1866,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         };
         let declaring = self.substitute(&call.declaring_type, &ctx.key.bindings);
-        let Some(owner) = self.extern_type_name(&declaring) else {
+        if self.extern_type_name(&declaring).is_none() {
             self.error(
                 ctx,
                 Message::key("codegen.this_call_s_declaring_type_cannot_be"),
                 span.clone(),
             );
             return None;
-        };
+        }
         let name = member.name.replace('.', "");
         let signature = self.substitute_signature(&call.signature, &ctx.key.bindings);
         let mut parts: Vec<String> = Vec::new();
@@ -1919,10 +1919,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // Udon has no generics: a generic method is one extern named `…__T`
         // that takes its type argument as an ordinary `System.Type` value.
         // The caller supplies that value; see emit_call.
-        if !call.type_arguments.is_empty() {
-            return Some(format!("{owner}.__{name}{middle}__T"));
-        }
-        Some(format!("{owner}.__{name}{middle}__{return_part}"))
+        let suffix = if call.type_arguments.is_empty() {
+            format!("__{name}{middle}__{return_part}")
+        } else {
+            format!("__{name}{middle}__T")
+        };
+        let owner = self.exposed_owner(&declaring, std::slice::from_ref(&suffix))?;
+        Some(format!("{owner}.{suffix}"))
     }
 
     pub(super) fn substitute_signature(

@@ -2217,6 +2217,30 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         names
     }
 
+    /// The type an external member's extern is named after: the declaring
+    /// type itself when the whitelist has the member there, else the nearest
+    /// base class that does, else the declaring type (so the error names the
+    /// obvious signature). `suffixes` are the member's spellings after the
+    /// `Type.` part (`__LoadURL__VRCSDKBaseVRCUrl__SystemVoid`; a getter and
+    /// a setter for a property).
+    ///
+    /// The SDK registers a virtual member once, on the class that introduces
+    /// it: `LoadURL` is `BaseVRCVideoPlayer`'s extern, and the
+    /// `VRCAVProVideoPlayer` override a call resolves to has none of its
+    /// own. Udon takes the derived instance for the base's extern.
+    pub(super) fn exposed_owner(&self, declaring: &Type, suffixes: &[String]) -> Option<String> {
+        let chain = self.external_chain(declaring);
+        chain
+            .iter()
+            .find(|owner| {
+                suffixes
+                    .iter()
+                    .any(|suffix| self.nodes.has_signature(&format!("{owner}.{suffix}")))
+            })
+            .cloned()
+            .or_else(|| chain.into_iter().next())
+    }
+
     /// Does a value of this type live behind a reference? Structs and enums do
     /// not, and comparing two boxed copies of one by identity would be wrong.
     pub(super) fn is_reference_type(&self, ty: &Type) -> bool {
