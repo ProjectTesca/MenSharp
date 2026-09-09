@@ -58,3 +58,7 @@ public class Test : MenSharpBehaviour
     }
 }
 ```
+
+## Documentation
+
+(docs/doc.md)[./docs/doc.md]
