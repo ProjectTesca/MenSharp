@@ -27,7 +27,7 @@ MenSharpとはUdon Assemblyへのコンパイラです。
 
 世界最速のC#コンパイラであり、C#公式のRoslynコンパイラより最大8倍程度高速にコンパイルできます。
 
-使用できるC#機能は**ほぼ全て**で、現時点でサポートしていないのはThread, lock, FileIO, VRC SDKを経由しないネットワークアクセス等のごく一部の機能のみです。
+使用できるC#機能は**ほぼ全て**で、現時点でサポートしていないのはThread, lock, FileIO, VRChat SDKを経由しないネットワークアクセス等のごく一部の機能のみです。
 
 原則として、非対応機能を使ったコードがコンパイルされるときには明示的なエラーが発生してコンパイルが停止します。実行時エラーにはなりません。
 
@@ -690,7 +690,7 @@ public class Ex7Behaviour : MenSharpBehaviour
 
 > **Q. サポートされているプラットフォームは？**
 >
-> A. UdonAssemblyにコンパイルされるのでVRCの対応プラットフォールと同じです。ただし、コンパイラ本体はWindows, MacOS(Apple Silicon), Linuxのみサポートされます。
+> A. UdonAssemblyにコンパイルされるのでVRChatの対応プラットフォームと同じです。ただし、コンパイラ本体はWindows, MacOS(Apple Silicon), Linuxのみサポートされます。
 
 > **Q. ライセンスは？**
 > 
