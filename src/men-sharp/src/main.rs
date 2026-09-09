@@ -21,6 +21,7 @@ use men_sharp_compiler::{Compiler, CompilerSettings, ParsedFile, ReferenceSet, S
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+mod crash;
 mod report;
 
 use men_sharp_diagnostics::{Format, Reporter};
@@ -35,6 +36,7 @@ const USAGE: &str = "usage: men-sharp [--threads N] [--reference lib.dll]... \
 [--lang auto|en|ja] [--error-format rich|short|unity] <file.cs>...";
 
 fn main() -> ExitCode {
+    crash::install();
     // `--profile-dir` is read ahead of everything so that every phase,
     // including reading the inputs, is on the profile
     let profile_dir = profile_dir_argument();
@@ -63,6 +65,11 @@ fn profile_dir_argument() -> Option<String> {
 
 fn run() -> ExitCode {
     timescope::scope!("men-sharp");
+    // a crash to order, for checking the report end to end (the console
+    // entry the Unity package makes of it, above all) without a real bug
+    if let Ok(reason) = std::env::var("MENSHARP_SIMULATE_CRASH") {
+        panic!("simulated crash: {reason}");
+    }
     let mut thread_count = None;
     let mut paths = Vec::new();
     let mut foreign_paths = Vec::new();

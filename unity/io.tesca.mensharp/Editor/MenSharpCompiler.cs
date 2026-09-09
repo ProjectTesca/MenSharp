@@ -371,12 +371,59 @@ public static class MenSharpCompiler
         string stderr = stderrTask.Result;
         process.WaitForExit();
 
-        LogDiagnostics(stderr);
-        if (process.ExitCode != 0 && stderr.Trim().Length == 0)
+        // a crash report, when there is one, is the tail of stderr from the
+        // marker line on; whatever came before it is ordinary diagnostics
+        int crash = stderr.IndexOf(CrashMarker, StringComparison.Ordinal);
+        LogDiagnostics(crash < 0 ? stderr : stderr.Substring(0, crash));
+        if (crash >= 0)
+        {
+            LogCrash(process.ExitCode, stderr.Substring(crash + CrashMarker.Length).Trim(), stdout);
+        }
+        else if (process.ExitCode != 0 && process.ExitCode != 1)
+        {
+            // 1 is the compiler declining the sources (the diagnostics say
+            // why); anything else is a death it could not report itself — a
+            // stack overflow, a signal, a missing runtime library
+            LogCrash(process.ExitCode, stderr.Trim(), stdout);
+        }
+        else if (process.ExitCode != 0 && stderr.Trim().Length == 0)
         {
             Debug.LogError($"[MenSharp] compiler exited with {process.ExitCode}\n{stdout}");
         }
         return process.ExitCode == 0;
+    }
+
+    /// The first line of the compiler's crash report starts with this; keep
+    /// it in sync with `src/men-sharp/src/crash.rs`.
+    private const string CrashMarker = "[mensharp crash]";
+
+    private const string IssuesUrl = "https://github.com/ProjectTesca/MenSharp/issues";
+
+    /// One console entry for a compiler crash: an apology, where to report
+    /// it, and the report itself (or, when the compiler died without one,
+    /// the exit code and whatever it did print).
+    private static void LogCrash(int exitCode, string report, string stdout)
+    {
+        var text = new System.Text.StringBuilder();
+        text.Append("[MenSharp] OH NO! The MenSharp compiler has crashed! Sorry!\n");
+        text.Append("This is a bug in MenSharp, not in your code. Please report it at ")
+            .Append(IssuesUrl)
+            .Append(" with the log below.\n\n");
+        if (report.Length > 0)
+        {
+            text.Append(report).Append('\n');
+        }
+        else
+        {
+            text.Append("The compiler exited without a report, so the cause could not be recorded ")
+                .Append("(a stack overflow or an out-of-memory condition, most likely).\n");
+        }
+        text.Append("exit code ").Append(exitCode).Append('\n');
+        if (stdout.Trim().Length > 0)
+        {
+            text.Append("\nstandard output:\n").Append(stdout.Trim()).Append('\n');
+        }
+        Debug.LogError(text.ToString());
     }
 
     /// One console entry per diagnostic. The compiler's short format is a
