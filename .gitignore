@@ -39,3 +39,6 @@
 /tests/unity-project/Assets/Bench/UdonSharp/
 /tests/unity-project/Assets/Bench/UdonSharp.meta
 /artifacts/bench/
+
+# Written by tools/bench-roslyn.sh (the figure keeps its own copy of the numbers).
+/artifacts/bench-roslyn/

@@ -14,7 +14,7 @@
 
 M# is a compiler from C# to Udon Assembly, and at the same time it is currently (2026/09/09 13:00) the fastest C# compiler.
 
-It runs up to 8 times faster than Roslyn, the official C# compiler. Note that it does not have a .NET backend at the moment.
+It runs up to 11 times faster than Roslyn, the official C# compiler. Note that it does not have a .NET backend at the moment.
 
 This project makes use of AI, but it is **NOT vibe coding**.
 
@@ -62,3 +62,9 @@ public class Test : MenSharpBehaviour
 ## Documentation
 
 [./docs/doc.md](docs/doc.md)
+
+## How fast is it?
+
+Roughly 2 to 11 times faster than Roslyn.
+
+![](./docs/bench/roslyn-1.png)
