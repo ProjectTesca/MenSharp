@@ -1,7 +1,7 @@
 {
   "name": "io.tesca.mensharp",
   "displayName": "MenSharp",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "unity": "2022.3",
   "description": "MenSharp (M#): a UdonSharp-compatible C# compiler for Udon, written in Rust. Supports classes, generics, List<T> and more. Compile with the MenSharp menu or on save.",
   "author": {
