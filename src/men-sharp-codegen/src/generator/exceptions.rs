@@ -447,7 +447,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             bindings: Vec::new(),
         };
         let arguments: Vec<DataId> = message.into_iter().collect();
+        // a path that never comes back to the expression it sits in: what
+        // the constructor does cannot reach an operand read before it (see
+        // `guard`), so the call is not counted
+        let effects = self.effects;
         self.call_function(ctx, &key, Some(object), &arguments, &[], span.clone());
+        self.effects = effects;
         self.emit_throw(ctx, object, span, true);
     }
 

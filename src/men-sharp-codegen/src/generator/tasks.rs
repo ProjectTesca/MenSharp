@@ -224,6 +224,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.error(ctx, "internal: `await` outside an async body", span);
             return None;
         }
+        // while the function is suspended anything may run and write a
+        // field: an operand read before the `await` needs its copy (see
+        // `guard`)
+        self.effects.calls += 1;
         let awaitable = self.lower_expression(ctx, value)?;
         let awaitable_type = self.type_of(ctx, value);
 

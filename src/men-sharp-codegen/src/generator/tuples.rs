@@ -71,7 +71,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> Option<DataId> {
         let elements = Self::tuple_elements(ty).map(<[TupleElement]>::to_vec);
-        let mut values = Vec::with_capacity(written.len());
+        // each element is read before the next runs: `(x, Next())` holds
+        // the `x` of before `Next`, whatever it writes
+        let mut guards = Vec::with_capacity(written.len());
         for (index, element) in written.iter().enumerate() {
             let value = match elements.as_ref().and_then(|elements| elements.get(index)) {
                 Some(element_type) => {
@@ -80,8 +82,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 None => self.owned_value(ctx, &element.value)?,
             };
-            values.push(value);
+            guards.push(self.guard(ctx, value));
         }
+        let values = self.settle_all(guards);
         Some(self.new_tuple(ctx, &values, ty, span))
     }
 

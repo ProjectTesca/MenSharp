@@ -7,6 +7,33 @@ use men_sharp_parser::ast::{Pattern, RelationalOperator, VariableDesignation};
 use super::*;
 
 impl<'a, 'ast> Generator<'a, 'ast> {
+    /// Whether testing `pattern` can run code of the program: a property
+    /// pattern reads properties, a positional one calls `Deconstruct`, a
+    /// list one indexers and `Length`. A constant, a type, a designation
+    /// only compare what they are given.
+    pub(super) fn pattern_runs_code(pattern: &Pattern<'ast, 'ast>) -> bool {
+        match pattern {
+            Pattern::Discard(_)
+            | Pattern::Declaration { .. }
+            | Pattern::Var { .. }
+            | Pattern::Constant(_)
+            | Pattern::Relational { .. } => false,
+            Pattern::Not { pattern, .. } | Pattern::Parenthesized { pattern, .. } => pattern
+                .as_ref()
+                .is_ok_and(|inner| Self::pattern_runs_code(inner)),
+            Pattern::And { left, right, .. } | Pattern::Or { left, right, .. } => {
+                Self::pattern_runs_code(left)
+                    || right
+                        .as_ref()
+                        .is_ok_and(|inner| Self::pattern_runs_code(inner))
+            }
+            Pattern::Positional { .. }
+            | Pattern::List { .. }
+            | Pattern::Slice { .. }
+            | Pattern::Property { .. } => true,
+        }
+    }
+
     /// `value is pattern`, as a bool slot.
     pub(super) fn lower_pattern(
         &mut self,

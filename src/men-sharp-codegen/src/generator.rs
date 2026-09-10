@@ -116,6 +116,7 @@ pub fn generate(
         call_edges: HashMap::default(),
         temp_counter: 0,
         temp_live: Vec::new(),
+        effects: Effects::default(),
         temp_pool: HashMap::default(),
         entry_class: None,
         entry_chain: Vec::new(),
@@ -274,6 +275,40 @@ struct FrameState {
     key: Option<FunctionKey>,
     live: Vec<(DataId, String)>,
     pool: HashMap<String, Vec<DataId>>,
+    effects: Effects,
+}
+
+/// What the code emitted so far may have done to the slot an operand was
+/// read from: counted as it is emitted, so that once the operands after
+/// one have been lowered, [`Generator::settle`] can tell whether anything
+/// in between could have changed it. See [`Generator::guard`].
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+struct Effects {
+    /// Writes straight into a variable's slot: an assignment, `++`/`--`, a
+    /// `ref`/`out` result copied home.
+    writes: u64,
+    /// Transfers of control that can run other code of the program — a call
+    /// into source, an extern that may come back into the program or write
+    /// a variable of it, an `await` — which can write any field.
+    calls: u64,
+}
+
+/// An operand already read into a slot while the operands after it are
+/// still to run: what [`Generator::guard`] hands out and
+/// [`Generator::settle`] resolves.
+struct Guard {
+    /// The slot the operand lowered to.
+    source: DataId,
+    /// Whether anything can write that slot at all: a temp of the expression
+    /// or a constant cannot change, and never needs a copy.
+    mutable: bool,
+    /// Where in the code the operand ended: the copy, if needed, goes here.
+    at: usize,
+    /// Whether the slot belongs to this frame (a local, a parameter): only a
+    /// direct write can change it — a call cannot, and does not cost a copy.
+    private: bool,
+    /// The counters when the operand was read.
+    effects: Effects,
 }
 
 /// Layout of one instantiated class: `object[]` size and field slot indices.
@@ -433,6 +468,8 @@ struct Generator<'a, 'ast> {
     temp_live: Vec<(DataId, String)>,
     /// Released temps of the function being compiled, by Udon type.
     temp_pool: HashMap<String, Vec<DataId>>,
+    /// See [`Effects`].
+    effects: Effects,
     /// Set when the entry class is a `MenSharpBehaviour` subclass: its
     /// instance fields live in named heap slots and its instance methods have
     /// no `this` — the behaviour is the program.
@@ -2313,6 +2350,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.temp_live.push((slot, udon_type.to_string()));
             return slot;
         }
+        self.fresh_temp(udon_type)
+    }
+
+    /// A temp that is a new slot, never a released one: for a value that
+    /// has to survive code already emitted (see `settle`), which may have
+    /// written and released any slot the pool holds.
+    fn fresh_temp(&mut self, udon_type: &str) -> DataId {
         self.temp_counter += 1;
         let name = format!("__t{}", self.temp_counter);
         let slot = self.program.add_data(DataSymbol {
@@ -2343,6 +2387,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             key: std::mem::replace(&mut self.current_frame, key),
             live: std::mem::take(&mut self.temp_live),
             pool: std::mem::take(&mut self.temp_pool),
+            effects: std::mem::take(&mut self.effects),
         }
     }
 
@@ -2350,6 +2395,162 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.current_frame = saved.key;
         self.temp_live = saved.live;
         self.temp_pool = saved.pool;
+        self.effects = saved.effects;
+    }
+
+    // ------------------------------------------------- evaluation order
+
+    /// Whether `slot` is a temp of the expression being lowered — one
+    /// allocated for an intermediate value, not the slot a local or a
+    /// `catch` clause's exception lives in — which nothing but the code that
+    /// produced it writes.
+    fn is_intermediate(&self, ctx: &Ctx<'ast>, slot: DataId) -> bool {
+        self.temp_live.iter().any(|(live, _)| *live == slot)
+            && !ctx.caught.contains(&slot)
+            && !ctx
+                .locals
+                .iter()
+                .any(|scope| scope.values().any(|local| local.slot == slot))
+    }
+
+    /// Marks an operand whose value is consumed only after the operands
+    /// after it have run: the left side of `a + f()`, the arguments before
+    /// the last in `g(a, f())`, the array and index of `a[i] = f()`. C#
+    /// reads `a` first, and the operator must see what was read even when
+    /// `f` then writes `a`'s slot. [`Self::settle`], called once the later
+    /// operands are lowered, says which slot holds that value: `a`'s own when
+    /// nothing in between could have written it — the common case, which
+    /// costs no code and no slot — or a copy, inserted where the operand
+    /// ended.
+    ///
+    /// Several operands are guarded in order and settled last first, so the
+    /// copies inserted leave the earlier positions where they were.
+    fn guard(&mut self, ctx: &Ctx<'ast>, source: DataId) -> Guard {
+        let at = self.program.code.len();
+        let effects = self.effects;
+        let symbol = &self.program.data[source.0];
+        if symbol.name.starts_with("__const_") || self.is_intermediate(ctx, source) {
+            return Guard {
+                source,
+                mutable: false,
+                at,
+                private: true,
+                effects,
+            };
+        }
+        let private = self.temp_live.iter().any(|(live, _)| *live == source)
+            || self
+                .current_frame
+                .as_ref()
+                .and_then(|key| self.functions.get(key))
+                .is_some_and(|function| function.parameters.contains(&source));
+        Guard {
+            source,
+            mutable: true,
+            at,
+            private,
+            effects,
+        }
+    }
+
+    /// The slot holding a guarded operand's value now that the operands
+    /// after it are lowered; see [`Self::guard`].
+    fn settle(&mut self, guard: Guard) -> DataId {
+        if !guard.mutable {
+            return guard.source;
+        }
+        let changed = self.effects.writes != guard.effects.writes
+            || (!guard.private && self.effects.calls != guard.effects.calls);
+        if !changed {
+            return guard.source;
+        }
+        // a new slot: the code since the operand may have used and released
+        // any slot the pool holds, and the copy goes in ahead of that code
+        let udon_type = self.program.data[guard.source.0].udon_type.clone();
+        let temp = self.fresh_temp(&udon_type);
+        self.program.code.splice(
+            guard.at..guard.at,
+            [Op::Push(guard.source), Op::Push(temp), Op::Copy],
+        );
+        temp
+    }
+
+    /// [`Self::settle`] for operands guarded in order.
+    fn settle_all(&mut self, guards: Vec<Guard>) -> Vec<DataId> {
+        let mut slots: Vec<DataId> = guards
+            .into_iter()
+            .rev()
+            .map(|guard| self.settle(guard))
+            .collect();
+        slots.reverse();
+        slots
+    }
+
+    /// The slots a place is reached through — a receiver, an array, the
+    /// indices — in one fixed order, for [`Self::guard_place`] and
+    /// [`Self::settle_place`]. Not the slot a variable place *is*: that is
+    /// what gets written.
+    fn for_each_place_slot(place: &mut Place, mut f: impl FnMut(&mut DataId)) {
+        match place {
+            Place::Slot(..)
+            | Place::SelfReference { .. }
+            | Place::ReadOnly { .. }
+            | Place::Error => {}
+            Place::Field { object, .. } => f(object),
+            Place::Element { array, index, .. } => {
+                f(array);
+                f(index);
+            }
+            Place::Accessor {
+                receiver, indices, ..
+            } => {
+                receiver.iter_mut().for_each(&mut f);
+                indices.iter_mut().for_each(f);
+            }
+            Place::ProgramVariable { receiver, .. } | Place::ProgramAccessor { receiver, .. } => {
+                f(receiver)
+            }
+            Place::ExternalProperty { receiver, .. } => receiver.iter_mut().for_each(f),
+            Place::ExternalIndexer {
+                receiver, indices, ..
+            } => {
+                f(receiver);
+                indices.iter_mut().for_each(|(slot, _)| f(slot));
+            }
+        }
+    }
+
+    /// Guards the slots a place was found through, which C# fixes before
+    /// the value written to it is evaluated: `a[i] = f()` writes the element
+    /// `i` named first, whatever `f` does to `i`. [`Self::settle_place`]
+    /// puts the slots to use back into the place.
+    fn guard_place(&mut self, ctx: &Ctx<'ast>, place: &mut Place) -> Vec<Guard> {
+        let mut guards = Vec::new();
+        Self::for_each_place_slot(place, |slot| guards.push(self.guard(ctx, *slot)));
+        guards
+    }
+
+    fn settle_place(&mut self, place: &mut Place, guards: Vec<Guard>) {
+        let mut slots = self.settle_all(guards).into_iter();
+        Self::for_each_place_slot(place, |slot| {
+            if let Some(settled) = slots.next() {
+                *slot = settled;
+            }
+        });
+    }
+
+    /// A copy of `slot`, unless nothing can write it: for a value read again
+    /// after code of the program may have run — the value a `switch` tests
+    /// label after label, with `when` clauses in between.
+    fn snapshot(&mut self, ctx: &Ctx<'ast>, slot: DataId) -> DataId {
+        let symbol = &self.program.data[slot.0];
+        if symbol.name.starts_with("__const_") || self.is_intermediate(ctx, slot) {
+            return slot;
+        }
+        let udon_type = symbol.udon_type.clone();
+        let copy = self.temp(&udon_type);
+        self.copy(slot, copy);
+        copy
     }
 
     /// Hands back the temps a statement or expression allocated and no
@@ -2397,6 +2598,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         arguments: &[DataId],
         span: Range<usize>,
     ) {
+        // an extern that may run code of the program, or write a variable of
+        // it: an operand read before it can no longer count on its slot
+        // (see `guard`)
+        if !extern_is_pure(signature) {
+            self.effects.calls += 1;
+        }
         // a call into another program can synchronously come back into this
         // one — remember who makes them, so their ancestors get re-entry
         // guards (see resolve_frame_markers)
@@ -3547,3 +3754,86 @@ mod runtime;
 mod structs;
 mod tasks;
 mod tuples;
+
+/// Whether an extern can neither run code of this program nor write a
+/// variable of it, so a slot read before the call still holds what was
+/// read. Only what is known to be harmless counts: an operator, a getter,
+/// an array or string operation, the maths and conversion helpers, a value
+/// type's own methods. Anything else — a `SendCustomEvent`, a
+/// `SetProgramVariable`, a `SetActive` that fires `OnEnable` — is taken to
+/// be a call into the program. Conservative on both sides: a by-reference
+/// parameter (`TryParse(s, out v)`) writes a slot outright.
+fn extern_is_pure(signature: &str) -> bool {
+    let Some((owner, rest)) = signature.split_once(".__") else {
+        return false;
+    };
+    let Some((name, parameters)) = rest.split_once("__") else {
+        return false;
+    };
+    if parameters.contains("Ref_") || parameters.ends_with("Ref") {
+        return false;
+    }
+    if name.starts_with("op_")
+        || name.starts_with("get_")
+        || matches!(
+            name,
+            "ctor"
+                | "Get"
+                | "Set"
+                | "ToString"
+                | "Equals"
+                | "ReferenceEquals"
+                | "GetHashCode"
+                | "CompareTo"
+                | "GetType"
+                | "Clone"
+        )
+    {
+        return true;
+    }
+    owner.ends_with("Array")
+        || matches!(
+            owner,
+            "SystemObject"
+                | "SystemString"
+                | "SystemChar"
+                | "SystemBoolean"
+                | "SystemByte"
+                | "SystemSByte"
+                | "SystemInt16"
+                | "SystemUInt16"
+                | "SystemInt32"
+                | "SystemUInt32"
+                | "SystemInt64"
+                | "SystemUInt64"
+                | "SystemSingle"
+                | "SystemDouble"
+                | "SystemDecimal"
+                | "SystemMath"
+                | "SystemMathF"
+                | "SystemConvert"
+                | "SystemBitConverter"
+                | "SystemDateTime"
+                | "SystemTimeSpan"
+                | "SystemGuid"
+                | "SystemType"
+                | "SystemTextStringBuilder"
+                | "UnityEngineMathf"
+                | "UnityEngineVector2"
+                | "UnityEngineVector3"
+                | "UnityEngineVector4"
+                | "UnityEngineVector2Int"
+                | "UnityEngineVector3Int"
+                | "UnityEngineQuaternion"
+                | "UnityEngineColor"
+                | "UnityEngineColor32"
+                | "UnityEngineMatrix4x4"
+                | "UnityEngineRect"
+                | "UnityEngineBounds"
+                | "UnityEngineRay"
+                | "UnityEnginePlane"
+                | "UnityEngineTime"
+                | "UnityEngineRandom"
+                | "UnityEngineDebug"
+        )
+}

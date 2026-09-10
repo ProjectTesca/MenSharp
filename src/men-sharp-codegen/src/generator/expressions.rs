@@ -689,6 +689,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Ok(sections) = statement.sections else {
             return;
         };
+        // the value is read once (§13.8.3), then tested label after label:
+        // when a `when` clause or a pattern in between can run code of the
+        // program, the labels test a copy, so a write to the variable
+        // switched on does not change what the later labels see
+        let runs_code = sections
+            .iter()
+            .flat_map(|section| section.labels.iter())
+            .any(|label| match label {
+                SwitchLabel::Case { pattern, guard, .. } => {
+                    guard.is_some() || pattern.as_ref().is_ok_and(Self::pattern_runs_code)
+                }
+                SwitchLabel::Default { .. } => false,
+            });
+        let value = if runs_code {
+            self.snapshot(ctx, value)
+        } else {
+            value
+        };
 
         let end = self.fresh_label("switch_end");
         let no_match = self.fresh_label("switch_no_match");
@@ -771,6 +789,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let result = self.temp_for(&result_type);
         let end = self.fresh_label("switch_expression_end");
         let arms = switch.arms.ok()?;
+        // as for a `switch` statement: the value tested is read once
+        let runs_code = arms
+            .iter()
+            .any(|arm| arm.guard.is_some() || Self::pattern_runs_code(&arm.pattern));
+        let value = if runs_code {
+            self.snapshot(ctx, value)
+        } else {
+            value
+        };
 
         for arm in arms {
             let next = self.fresh_label("arm_next");
@@ -1262,9 +1289,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         let left_type = self.type_of(ctx, &binary.left);
         let left = self.lower_expression(ctx, &binary.left)?;
+        // the left operand is read first (§12.4.1): `x + Next()` adds the
+        // `x` of before `Next` ran, even when `Next` writes `x`
+        let guard = self.guard(ctx, left);
         let right_expression = binary.right.as_ref().ok()?;
         let right_type = self.type_of(ctx, right_expression);
         let right = self.lower_expression(ctx, right_expression)?;
+        let left = self.settle(guard);
         let result_type = self.type_of(ctx, whole);
 
         self.emit_binary_operator(
@@ -1996,11 +2027,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if assignment.operator.value == AssignmentOperator::Assign {
             // the target first (its index expressions run before the value,
             // as in C#), then the value converted to the target's type
-            let place = self.lower_place(ctx, &assignment.target);
+            let mut place = self.lower_place(ctx, &assignment.target);
+            let guards = self.guard_place(ctx, &mut place);
             let value = match place_type(&place) {
                 Some(target) => self.owned_value_as(ctx, value_expression, &target)?,
                 None => self.owned_value(ctx, value_expression)?,
             };
+            self.settle_place(&mut place, guards);
             self.write_place(ctx, place, value, assignment.span.clone());
             return Some(value);
         }
@@ -2032,11 +2065,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // any index expression run once; read what it holds *now*, into a
         // slot of our own, since evaluating the right side may write to the
         // place itself; then the right side; then combine and store back.
-        let place = self.lower_place(ctx, &assignment.target);
+        let mut place = self.lower_place(ctx, &assignment.target);
         let (current, target_type) =
             self.read_place(ctx, place.clone(), assignment.span.clone())?;
         let previous = self.temp_for(&target_type);
         self.copy(current, previous);
+        let guards = self.guard_place(ctx, &mut place);
 
         let value = self.owned_value(ctx, value_expression)?;
         let value_type = self.type_of(ctx, value_expression);
@@ -2050,6 +2084,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Some(EntityID::from(assignment)),
         )?;
 
+        self.settle_place(&mut place, guards);
         self.write_place(ctx, place, final_value, assignment.span.clone());
         Some(final_value)
     }
@@ -2063,11 +2098,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Option<DataId> {
         let value_expression = assignment.value.as_ref().ok()?;
         let span = assignment.span.clone();
-        let place = self.lower_place(ctx, &assignment.target);
+        let mut place = self.lower_place(ctx, &assignment.target);
         let target_type = place_type(&place)?;
         let (current, _) = self.read_place(ctx, place.clone(), span.clone())?;
         let result = self.temp_for(&target_type);
         self.copy(current, result);
+        let guards = self.guard_place(ctx, &mut place);
 
         let assign = self.fresh_label("coalesce_assign");
         let end = self.fresh_label("coalesce_assign_end");
@@ -2075,7 +2111,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.jump_if(is_null, assign);
         self.program.code.push(Op::Jump(Target::Label(end)));
         self.program.code.push(Op::Label(assign));
-        if let Some(value) = self.owned_value_as(ctx, value_expression, &target_type) {
+        let value = self.owned_value_as(ctx, value_expression, &target_type);
+        self.settle_place(&mut place, guards);
+        if let Some(value) = value {
             self.write_place(ctx, place, value, span);
             self.copy(value, result);
         }
@@ -2463,12 +2501,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return Place::Error;
         }
+        // the receiver was read before its index expressions run: `a[Next()]`
+        // is an element of the `a` of before `Next`
+        let receiver_guard = self.guard(ctx, slot);
         if let Type::Array { element, rank: 1 } = &ty {
             let index = Self::single_index_expression(arguments)
                 .and_then(|expression| self.index_value(ctx, slot, &ty, expression, span.clone()));
             return match index {
                 Some(index) => Place::Element {
-                    array: slot,
+                    array: self.settle(receiver_guard),
                     index,
                     element: self.substitute(element, &ctx.key.bindings),
                     array_type: ty.clone(),
@@ -2496,19 +2537,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let MemberOrigin::Source(symbol) = call.origin else {
                     return self.external_indexer_place(ctx, &call, slot, arguments, span);
                 };
-                let mut indices = Vec::new();
+                // each index is read before the next runs — see `emit_call`
+                let mut guards = Vec::new();
                 for argument in arguments {
                     if let ArgumentValue::Expression(expression) = &argument.value
                         && let Some(value) = self.lower_expression(ctx, expression)
                     {
-                        indices.push(value);
+                        guards.push(self.guard(ctx, value));
                     }
                 }
+                let indices = self.settle_all(guards);
+                let receiver = self.settle(receiver_guard);
                 let bindings =
                     self.bindings_for(ctx, symbol, &call.declaring_type, &call.type_arguments);
                 let ty = self.substitute(&call.signature.return_type, &ctx.key.bindings);
                 Place::Accessor {
-                    receiver: Some(slot),
+                    receiver: Some(receiver),
                     symbol,
                     bindings,
                     indices,
@@ -2651,7 +2695,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) {
         match place {
-            Place::Slot(slot, _) => self.copy(value, slot),
+            Place::Slot(slot, _) => {
+                // a variable written outright: what was read from it before
+                // is no longer in it (see `guard`)
+                self.effects.writes += 1;
+                self.copy(value, slot);
+            }
             Place::SelfReference { name, .. } => self.error(
                 ctx,
                 Message::key("codegen.name_is_read_only_it_is_what").arg("name", name),
@@ -3528,6 +3577,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         span.clone(),
                         Some(EntityID::from(right)),
                     ) {
+                        self.effects.writes += 1;
                         self.copy(updated, slot);
                     }
                     Piece::Value(old, ty)
@@ -3560,6 +3610,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let name = member.name.clone();
             return self.rectangular_call(ctx, slot, &ty, &name, arguments, span);
         }
+        // the receiver and each by-value argument are read in order, before
+        // the arguments after them run (§12.6.2): `g(x, Next())` passes the
+        // `x` of before `Next`, whatever it writes. A `ref`/`out` argument
+        // is the variable itself and is not read here.
+        let receiver_guard = receiver.as_ref().map(|(slot, _)| self.guard(ctx, *slot));
+        let mut guards: Vec<(usize, Guard)> = Vec::new();
         // `ref`/`out` slots standing in for a field, element or property: the
         // extern writes the slot, and afterwards the slot is written home
         let mut write_backs: Vec<(Place, DataId)> = Vec::new();
@@ -3652,7 +3708,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             None => self.owned_value(ctx, expression),
                         };
                         match lowered {
-                            Some(value) => ordered[slot] = Some(value),
+                            Some(value) => {
+                                guards.push((slot, self.guard(ctx, value)));
+                                ordered[slot] = Some(value);
+                            }
                             None => {
                                 self.ensure_error_reported(
                                     ctx,
@@ -3675,6 +3734,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 },
             }
         }
+        // every argument has run: the ones a later argument could have
+        // changed come from the copies made before it (last first, so the
+        // copies inserted leave the earlier positions where they were)
+        for (slot, guard) in guards.into_iter().rev() {
+            ordered[slot] = Some(self.settle(guard));
+        }
+        let receiver = match (receiver, receiver_guard) {
+            (Some((_, ty)), Some(guard)) => Some((self.settle(guard), ty)),
+            (receiver, _) => receiver,
+        };
         // the expanded form of `params`: the trailing arguments become one array
         if !self.pack_params_arguments(ctx, call, &mut ordered, parameter_offset, &span) {
             return Piece::Error;
@@ -3712,6 +3781,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         arguments: &'ast [Argument<'ast, 'ast>],
     ) -> Option<Vec<DataId>> {
         let mut ordered: Vec<Option<DataId>> = vec![None; call.signature.parameters.len()];
+        // each argument is read before the next runs — see `emit_call`
+        let mut guards: Vec<(usize, Guard)> = Vec::new();
         for (index, argument) in arguments.iter().enumerate() {
             let ArgumentValue::Expression(expression) = &argument.value else {
                 continue;
@@ -3738,8 +3809,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 None => self.owned_value(ctx, expression)?,
             };
             if slot < ordered.len() {
+                guards.push((slot, self.guard(ctx, value)));
                 ordered[slot] = Some(value);
             }
+        }
+        for (slot, guard) in guards.into_iter().rev() {
+            ordered[slot] = Some(self.settle(guard));
         }
         let span = arguments
             .first()
@@ -4942,13 +5017,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         }
                         CollectionElement::Nested(Initializer::Object { .. }) => continue,
                     };
-                    let mut values = Vec::with_capacity(expressions.len());
+                    // `{ k, Next() }` adds the `k` of before `Next` ran
+                    let mut guards = Vec::with_capacity(expressions.len());
                     for expression in expressions {
                         match self.owned_value(ctx, expression) {
-                            Some(value) => values.push(value),
+                            Some(value) => guards.push(self.guard(ctx, value)),
                             None => return,
                         }
                     }
+                    let values = self.settle_all(guards);
                     self.dispatch_call(
                         ctx,
                         &add,

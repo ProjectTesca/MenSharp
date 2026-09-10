@@ -802,6 +802,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .entry(ctx.key.clone())
             .or_default()
             .insert(key.clone());
+        // the callee runs code of the program, which may write any field: an
+        // operand read before the call can no longer count on its slot (see
+        // `guard`). A type test or an enum's `ToString` is the compiler's
+        // own, and only reads.
+        if !matches!(key.role, Role::TypeTest | Role::EnumToString) {
+            self.effects.calls += 1;
+        }
 
         let function = &self.functions[key];
         let label = function.label;

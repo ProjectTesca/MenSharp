@@ -11280,3 +11280,209 @@ fn the_std_result_and_option_types_work_end_to_end() {
         "ok 42;err nan x;84;-1;got 42;failed nan x;Ok(43);Err(5);7;9;True,True;case ok 42;Some(3);None;5;Err(neg);Some(20)"
     );
 }
+
+// ------------------------------------------------------- evaluation order
+// (issue #1: an operand read into a variable's own slot must keep the value
+// read when a later operand writes the variable)
+
+/// Runs `body` inside `Main` of a program with static `x`, `i`, `result` and
+/// the helpers the evaluation-order tests share.
+fn run_order(body: &str) -> Option<Emulator> {
+    run(
+        &format!(
+            r#"
+            using System;
+            namespace Game
+            {{
+                public class Pair
+                {{
+                    public int a;
+                    public int b;
+                    public Pair(int a, int b) {{ this.a = a; this.b = b; }}
+                }}
+                public class Program
+                {{
+                    public static int x;
+                    public static int i;
+                    public static int result;
+                    public static int[] array;
+                    static int Mutate() {{ x = 9; return 1; }}
+                    static int MoveIndex() {{ i = 9; return 7; }}
+                    static int Pure() {{ return 1; }}
+                    static int Add(int a, int b) {{ return a * 10 + b; }}
+                    static int AddRef(ref int a, int b) {{ return a * 10 + b; }}
+                    public static void Main()
+                    {{
+                        x = 3;
+                        i = 3;
+                        array = new int[10];
+                        {body}
+                    }}
+                }}
+            }}
+            "#
+        ),
+        "Main",
+    )
+}
+
+#[test]
+fn a_binary_operand_keeps_its_value_across_a_later_call_that_writes_it() {
+    let Some(emulator) = run_order("result = x + Mutate();") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 4);
+    assert_eq!(int_of(&emulator, "x"), 9);
+}
+
+#[test]
+fn a_binary_operand_keeps_its_value_across_a_later_assignment_to_it() {
+    let Some(emulator) = run_order("result = x + (x = 9);") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 12);
+}
+
+#[test]
+fn a_binary_operand_keeps_its_value_across_a_later_increment_of_it() {
+    // `x + x++`: 3 + 3, and x ends at 4
+    let Some(emulator) = run_order("result = x + x++;") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 6);
+    assert_eq!(int_of(&emulator, "x"), 4);
+}
+
+#[test]
+fn a_local_operand_keeps_its_value_across_a_later_assignment_to_it() {
+    let Some(emulator) = run_order("int y = 3; result = y + (y = 9);") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 12);
+}
+
+#[test]
+fn the_right_operand_of_a_binary_sees_the_write() {
+    // `Mutate() + x` reads x after the call, as C# does
+    let Some(emulator) = run_order("result = Mutate() + x;") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 10);
+}
+
+#[test]
+fn a_pure_right_operand_leaves_the_left_where_it_is() {
+    let Some(emulator) = run_order("result = x + Pure();") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 4);
+}
+
+#[test]
+fn an_argument_keeps_its_value_across_a_later_argument_that_writes_it() {
+    let Some(emulator) = run_order("result = Add(x, Mutate());") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 31);
+}
+
+#[test]
+fn a_ref_argument_is_the_variable_and_sees_a_later_write() {
+    let Some(emulator) = run_order("result = AddRef(ref x, Mutate());") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 91);
+}
+
+#[test]
+fn a_constructor_argument_keeps_its_value_across_a_later_argument() {
+    let Some(emulator) = run_order("var p = new Pair(x, Mutate()); result = p.a * 10 + p.b;")
+    else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 31);
+}
+
+#[test]
+fn a_tuple_element_keeps_its_value_across_a_later_element() {
+    // `(x, x++)` is (3, 3), and x ends at 4
+    let Some(emulator) = run_order("var t = (x, x++); result = t.Item1 * 10 + t.Item2;") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 33);
+    assert_eq!(int_of(&emulator, "x"), 4);
+}
+
+#[test]
+fn an_element_assignment_uses_the_index_read_before_the_value_runs() {
+    // `array[i] = MoveIndex()` writes element 3, not element 9
+    let Some(emulator) = run_order("array[i] = MoveIndex(); result = array[3] * 10 + array[9];")
+    else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 70);
+}
+
+#[test]
+fn a_compound_element_assignment_uses_the_index_read_before_the_value_runs() {
+    let Some(emulator) =
+        run_order("array[3] = 1; array[i] += MoveIndex(); result = array[3] * 10 + array[9];")
+    else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 80);
+}
+
+#[test]
+fn a_compound_assignment_adds_to_the_value_read_before_the_right_side() {
+    let Some(emulator) = run_order("x += Mutate(); result = x;") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 4);
+}
+
+#[test]
+fn a_switch_tests_the_value_read_once_across_a_when_clause_that_writes_it() {
+    // the `when` fails after writing x = 9; the next label still sees 3
+    let Some(emulator) = run_order(
+        "switch (x) { case 3 when Mutate() > 5: result = 1; break; case 3: result = 2; break; default: result = 4; break; }",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 2);
+}
+
+#[test]
+fn a_switch_expression_tests_the_value_read_once_across_a_when_clause() {
+    let Some(emulator) =
+        run_order("result = x switch { 3 when Mutate() > 5 => 1, 3 => 2, _ => 4 };")
+    else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 2);
+}
+
+#[test]
+fn a_binary_operand_keeps_its_value_across_a_delegate_call_that_writes_it() {
+    let Some(emulator) = run_order("Func<int> f = () => { x = 9; return 1; }; result = x + f();")
+    else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 4);
+}
