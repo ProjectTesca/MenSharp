@@ -12390,3 +12390,84 @@ fn a_private_field_initializer_still_runs() {
     assert_eq!(int_of(&emulator, "length"), 3);
     assert_eq!(int_of(&emulator, "first"), 4);
 }
+
+fn compile_behaviour_with_corlib(
+    source: &str,
+    class_path: &str,
+) -> Option<men_sharp_compiler::UdonBehaviourProgram> {
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    compile_behaviour(sources, class_path)
+}
+
+#[test]
+fn a_field_initializer_udon_cannot_run_is_left_to_the_proxy() {
+    // `new CultureInfo("en")` has no constructor extern (Udon exposes the
+    // type but not its ctor), so Udon cannot build it. Rather than an error,
+    // the field is recorded for the Unity importer to fill from a
+    // constructed proxy — real C#, where the initializer runs — like
+    // UdonSharp. The emitted code and the error are both rolled back.
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using MenSharp;
+        using System.Globalization;
+        public class Thing : MenSharpBehaviour
+        {
+            private CultureInfo culture = new CultureInfo("en-US");
+            public bool hasCulture;
+            public void Interact() { hasCulture = culture != null; }
+        }
+        "#,
+        "Thing",
+    ) else {
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let uasm = program.output.program.to_uasm().unwrap();
+    assert!(!uasm.contains("CultureInfo.__ctor"), "{uasm}");
+    let proxy = &program.output.program.proxy_initialized;
+    assert_eq!(proxy.len(), 1, "{proxy:?}");
+    assert_eq!(proxy[0].field, "culture");
+    assert!(proxy[0].symbol.contains("culture"), "{}", proxy[0].symbol);
+}
+
+#[test]
+fn an_initializer_udon_can_run_is_not_handed_to_the_proxy() {
+    // the flip side: an external-typed field whose initializer Udon *can*
+    // build (StringBuilder's `(string)` constructor is an extern) still
+    // emits as code, not handed to the proxy
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using MenSharp;
+        using System.Text;
+        public class Thing : MenSharpBehaviour
+        {
+            private StringBuilder builder = new StringBuilder("start");
+            public int length;
+            public void Interact() { length = builder.Length; }
+        }
+        "#,
+        "Thing",
+    ) else {
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    assert!(
+        program.output.program.proxy_initialized.is_empty(),
+        "{:?}",
+        program.output.program.proxy_initialized
+    );
+    let uasm = program.output.program.to_uasm().unwrap();
+    assert!(
+        uasm.contains("SystemTextStringBuilder.__ctor__SystemString"),
+        "{uasm}"
+    );
+}

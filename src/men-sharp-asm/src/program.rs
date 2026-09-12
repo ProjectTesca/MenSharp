@@ -233,6 +233,20 @@ pub struct Program {
     /// The `[NetworkCallable]` events: what the runtime needs to carry
     /// their arguments over the network (see `generator::network`).
     pub network_callables: Vec<NetworkCallable>,
+    /// Fields whose initializer Udon cannot run (`new VRCUrl("...")` — a
+    /// constructor with no extern): the Unity importer constructs the proxy,
+    /// which runs the initializer in real C#, and bakes the field's value
+    /// into the heap default. See `generator`'s proxy-baking.
+    pub proxy_initialized: Vec<ProxyInit>,
+}
+
+/// One field the Unity importer fills from a constructed proxy instance.
+#[derive(Debug, Clone)]
+pub struct ProxyInit {
+    /// The heap symbol to write (`static_UrlPriv_url`).
+    pub symbol: String,
+    /// The C# field on the proxy to read (`url`).
+    pub field: String,
 }
 
 /// One network-callable event: the variables its arguments arrive in, by
@@ -703,6 +717,20 @@ impl Program {
                     out.push('}');
                 }
                 out.push_str(" ]}");
+            }
+            out.push_str("\n  ]");
+        }
+        if !self.proxy_initialized.is_empty() {
+            out.push_str(",\n  \"proxyInitialized\": [");
+            for (index, entry) in self.proxy_initialized.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                out.push_str("\n    {\"symbol\": ");
+                write_json_string(&mut out, &entry.symbol);
+                out.push_str(", \"field\": ");
+                write_json_string(&mut out, &entry.field);
+                out.push('}');
             }
             out.push_str("\n  ]");
         }

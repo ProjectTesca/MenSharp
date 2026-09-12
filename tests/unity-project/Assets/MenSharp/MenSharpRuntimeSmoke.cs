@@ -71,6 +71,12 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     public void CountItems() { itemsLength = items.Length; }
     public void ScaleOne() { oneProduct = one * 0.92f; }
 
+    // a private field Udon cannot construct: the importer runs the C#
+    // initializer on the proxy and bakes the VRCUrl into the heap default
+    private VRC.SDKBase.VRCUrl url = new VRC.SDKBase.VRCUrl("https://example.com/baked");
+    public string urlText;
+    public void ReadUrl() { urlText = url.Get(); }
+
     const string greeting = "Hello";
     public string greeted;
     public void Greet()

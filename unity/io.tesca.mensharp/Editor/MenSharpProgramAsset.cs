@@ -402,8 +402,116 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             current.Heap.SetHeapVariable(address, value, declared ?? value.GetType());
         }
 
+        ApplyProxyInitializers(current, meta, name);
+
         // the caller (RefreshProgram) stores the patched heap so the runtime
         // loads the same state
+    }
+
+    /// Fills the fields whose initializer Udon cannot run. Like UdonSharp:
+    /// construct the proxy behaviour (its C# field initializers run — this is
+    /// where `new VRCUrl("...")` happens), read the field by reflection, and
+    /// write the value into the heap default. Runs in the editor, on the
+    /// world author's own code; the built world ships only the baked value.
+    private static void ApplyProxyInitializers(IUdonProgram current, MenSharpMeta meta, string classPath)
+    {
+        if (meta.proxyInitialized == null || meta.proxyInitialized.Length == 0)
+        {
+            return;
+        }
+        Type proxyType = FindProxyType(classPath);
+        if (proxyType == null)
+        {
+            Debug.LogWarning(
+                "MenSharp: could not find the C# behaviour to read field initializers from; "
+                + "some fields will keep their default value.");
+            return;
+        }
+        // AddComponent on a throwaway GameObject runs the field initializers
+        // the way Unity allows — `new`ing a MonoBehaviour would run them too,
+        // but logs a native "not allowed" warning the managed log handler
+        // cannot intercept. Hidden and not saved, destroyed straight after.
+        var probe = new GameObject("__MenSharpProxyProbe") { hideFlags = HideFlags.HideAndDontSave };
+        try
+        {
+            Component instance;
+            try
+            {
+                instance = probe.AddComponent(proxyType);
+            }
+            catch (Exception error)
+            {
+                Debug.LogWarning(
+                    $"MenSharp: could not construct {proxyType.Name} to read its field "
+                    + $"initializers ({error.Message}); those fields keep their default value.");
+                return;
+            }
+            foreach (MenSharpProxyInit init in meta.proxyInitialized)
+            {
+                if (!current.SymbolTable.HasAddressForSymbol(init.symbol))
+                {
+                    continue;
+                }
+                FieldInfo field = FindField(proxyType, init.field);
+                if (field == null)
+                {
+                    continue;
+                }
+                object value = field.GetValue(instance);
+                if (value == null)
+                {
+                    continue;
+                }
+                uint address = current.SymbolTable.GetAddressFromSymbol(init.symbol);
+                Type declared = current.Heap.GetHeapVariableType(address);
+                current.Heap.SetHeapVariable(address, value, declared ?? field.FieldType);
+            }
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(probe);
+        }
+    }
+
+    /// The behaviour type this program was compiled from, by its class path
+    /// — the full name the compiler names the asset after (reflection spells
+    /// nesting with '+', the asset with '.').
+    private static Type FindProxyType(string classPath)
+    {
+        foreach (Type type in
+            UnityEditor.TypeCache.GetTypesDerivedFrom<MenSharp.MenSharpBehaviour>())
+        {
+            if (type.IsAbstract || type.IsGenericTypeDefinition)
+            {
+                continue;
+            }
+            string fullName = (type.FullName ?? type.Name).Replace('+', '.');
+            if (fullName == classPath || type.Name == classPath)
+            {
+                return type;
+            }
+        }
+        return null;
+    }
+
+    /// A field by name, private ones on base classes included (GetField does
+    /// not return a base class's private fields).
+    private static FieldInfo FindField(Type type, string name)
+    {
+        for (Type current = type;
+            current != null && current != typeof(MenSharp.MenSharpBehaviour);
+            current = current.BaseType)
+        {
+            FieldInfo field = current.GetField(
+                name,
+                BindingFlags.Public | BindingFlags.NonPublic
+                    | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+            if (field != null)
+            {
+                return field;
+            }
+        }
+        return null;
     }
 
     private static object Decode(MenSharpHeapEntry entry)
@@ -518,6 +626,19 @@ public class MenSharpMeta
     /// arguments over the network — the variable each argument arrives in
     /// and its type. Handed to the SDK when the program is stored.
     public MenSharpNetworkCallable[] networkCallable;
+    /// Fields whose C# initializer Udon cannot run (`new VRCUrl("...")`): the
+    /// importer constructs the proxy, whose initializer runs in real C#, and
+    /// bakes the field's value into the heap. Same idea as UdonSharp.
+    public MenSharpProxyInit[] proxyInitialized;
+}
+
+[Serializable]
+public class MenSharpProxyInit
+{
+    /// The heap symbol to write.
+    public string symbol;
+    /// The C# field on the proxy behaviour to read.
+    public string field;
 }
 
 [Serializable]

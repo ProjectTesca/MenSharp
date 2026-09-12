@@ -143,6 +143,11 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("Scale");
         Assert.AreEqual(1f, smoke.GetProgramVariable("scaled"));
 
+        // a private field whose initializer Udon cannot run (new VRCUrl):
+        // the importer baked the value from the constructed proxy
+        smoke.RunProgram("ReadUrl");
+        Assert.AreEqual("https://example.com/baked", smoke.GetProgramVariable("urlText"));
+
         // a public array initializer must not overwrite the inspector value
         smoke.RunProgram("CountItems");
         Assert.AreEqual(1, smoke.GetProgramVariable("itemsLength"));

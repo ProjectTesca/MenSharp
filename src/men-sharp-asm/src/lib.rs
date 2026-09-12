@@ -13,7 +13,8 @@ pub mod world;
 pub use emulator::{Alone, DelayedEvent, Due, Emulator, EmulatorError, Peers, Value};
 pub use program::{
     AssembleError, Assembled, DataId, DataSymbol, EntryPoint, HALT_ADDRESS, HeapInit, LabelId,
-    Layout, NetworkCallable, Op, Program, Resolved, SourceMark, SourceMarkKind, Target, UdonType,
+    Layout, NetworkCallable, Op, Program, ProxyInit, Resolved, SourceMark, SourceMarkKind, Target,
+    UdonType,
 };
 pub use world::World;
 

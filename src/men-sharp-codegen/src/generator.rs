@@ -1543,6 +1543,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         let span = declarator.span.clone();
         let shared = self.static_storage(field) == StaticStorage::Shared;
+        // owned, so the `symbol` borrow of `self.declarations` does not
+        // outlive the `&mut self` emission below
+        let field_name = symbol.name.to_string();
+        let field_is_static = symbol.is_static;
 
         let mut ctx = Ctx {
             key: FunctionKey {
@@ -1563,6 +1567,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             iterator_state: None,
         };
         // a shared field is initialized by the program that made the array
+        // an instance field of an external type whose initializer Udon cannot
+        // run (`new VRCUrl("...")`: no constructor extern) is filled by the
+        // Unity importer instead, which constructs the proxy — real C#, where
+        // the initializer runs — and bakes the field's value. So the emission
+        // is speculative: if it reports an error and the field can be baked
+        // from the proxy, the emitted code and the error are both rolled back
+        // and the field is recorded for proxy-baking. (Not for statics, whose
+        // value has no proxy field, nor user types, whose heap form is M#'s
+        // own object[] the proxy's C# object would not match.)
+        let bakeable = !field_is_static
+            && !shared
+            && self.is_entry_member(field)
+            && self.is_proxy_bakeable_type(&ty);
+        let checkpoint = bakeable.then_some((self.errors.len(), self.program.code.len()));
+
         let guard = shared.then(|| self.begin_owner_guard());
         let place = if shared {
             self.static_place(&ctx, field, false, ty.clone(), span.clone())
@@ -1584,6 +1603,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         if let Some(skip) = guard {
             self.end_owner_guard(skip);
+        }
+        if let Some((errors, code)) = checkpoint
+            && self.errors.len() > errors
+        {
+            // roll the failed emission back and hand the field to the proxy
+            self.errors.truncate(errors);
+            self.program.code.truncate(code);
+            let slot = self.statics[&field];
+            self.program
+                .proxy_initialized
+                .push(men_sharp_asm::ProxyInit {
+                    symbol: self.program.data[slot.0].name.clone(),
+                    field: field_name,
+                });
         }
     }
 
@@ -3789,6 +3822,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         self.declarations.table.symbol(member).accessibility == Accessibility::Public
             || self.has_attribute(member, "SerializeField")
+    }
+
+    /// A field whose value the Unity importer can read from a proxy instance
+    /// and write straight into the Udon heap: an external type (VRCUrl, a
+    /// primitive, a string, an engine struct) or an array of one. Not a user
+    /// type — its heap form is M#'s own `object[]`, which the proxy's plain
+    /// C# object would not match — and not a jagged or multi-dimensional
+    /// array, which Unity does not serialize as one value either.
+    fn is_proxy_bakeable_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Array { element, rank } => {
+                *rank == 1
+                    && !matches!(**element, Type::Array { .. })
+                    && self.is_proxy_bakeable_type(element)
+            }
+            Type::Named {
+                target: TypeTarget::External(_),
+                ..
+            } => true,
+            _ => false,
+        }
     }
 
     /// Is an attribute of this name (with or without the `Attribute` suffix)
