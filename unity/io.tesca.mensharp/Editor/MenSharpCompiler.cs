@@ -350,10 +350,20 @@ public static class MenSharpCompiler
         arguments.Add("unity");
         arguments.AddRange(sources);
 
+        // the arguments go through a response file, not the command line: a
+        // Windows command line holds 32,767 characters, and the reference
+        // dlls plus the UdonSharp sources of an ordinary world project run
+        // past that (the compiler then fails to start with a Win32Exception,
+        // see issue #2). The compiler reads `@file` as one argument per
+        // line, so nothing is quoted
+        string responseFile = Path.Combine(outputDirectory, "compiler.rsp");
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllLines(responseFile, arguments, new UTF8Encoding(false));
+
         var info = new ProcessStartInfo
         {
             FileName = binary,
-            Arguments = QuoteArguments(arguments),
+            Arguments = QuoteArguments(new List<string> { "@" + responseFile }),
             UseShellExecute = false,
             RedirectStandardOutput = true,
             RedirectStandardError = true,

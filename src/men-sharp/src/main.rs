@@ -33,7 +33,9 @@ use report::Files;
 const USAGE: &str = "usage: men-sharp [--threads N] [--reference lib.dll]... \
 [--udonsharp other.cs]... [--define NAME]... [--profile-dir dir] \
 [--emit-udon Namespace.EntryClass --out name | --emit-udon-all --out-dir dir] \
-[--lang auto|en|ja] [--error-format rich|short|unity] <file.cs>...";
+[--lang auto|en|ja] [--error-format rich|short|unity] [@arguments.rsp]... <file.cs>...
+  @file reads more arguments from a response file, one per line \
+(a project's worth of paths outgrows a Windows command line)";
 
 fn main() -> ExitCode {
     crash::install();
@@ -54,13 +56,53 @@ fn main() -> ExitCode {
 
 /// The directory `--profile-dir` names, when it is given.
 fn profile_dir_argument() -> Option<String> {
-    let mut arguments = std::env::args().skip(1);
+    let mut arguments = arguments().ok()?.into_iter();
     while let Some(argument) = arguments.next() {
         if argument == "--profile-dir" {
             return arguments.next();
         }
     }
     None
+}
+
+/// The command line, with every `@file` argument replaced by the arguments
+/// the file holds. See [`expand_response_files`].
+fn arguments() -> Result<Vec<String>, String> {
+    expand_response_files(std::env::args().skip(1), |path| {
+        std::fs::read_to_string(path).map_err(|error| error.to_string())
+    })
+}
+
+/// Replaces each `@file` in `arguments` with the lines of that file, one
+/// argument per line — a *response file*, as `csc` reads. A Windows command
+/// line holds 32,767 characters, and the reference dlls and UdonSharp
+/// sources of an ordinary world project are more than that; the Unity
+/// package writes them to a file and passes its name instead.
+///
+/// Lines are taken as they are, whatever they start with: nothing is quoted
+/// or escaped (a path may hold spaces), a response file cannot name another,
+/// and a blank line is no argument. A UTF-8 byte-order mark at the start is
+/// skipped — an editor on Windows may well have put one there.
+fn expand_response_files(
+    arguments: impl IntoIterator<Item = String>,
+    read: impl Fn(&str) -> Result<String, String>,
+) -> Result<Vec<String>, String> {
+    let mut expanded = Vec::new();
+    for argument in arguments {
+        let Some(path) = argument.strip_prefix('@') else {
+            expanded.push(argument);
+            continue;
+        };
+        let text = read(path).map_err(|error| format!("{path}: {error}"))?;
+        let text = text.strip_prefix('\u{feff}').unwrap_or(&text);
+        expanded.extend(
+            text.lines()
+                .map(|line| line.trim_end_matches('\r'))
+                .filter(|line| !line.is_empty())
+                .map(str::to_string),
+        );
+    }
+    Ok(expanded)
 }
 
 fn run() -> ExitCode {
@@ -82,7 +124,14 @@ fn run() -> ExitCode {
     let mut language: Option<String> = None;
     let mut format = report::format_from_environment();
 
-    let mut arguments = std::env::args().skip(1);
+    let arguments = match arguments() {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            eprintln!("{error}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let mut arguments = arguments.into_iter();
     while let Some(argument) = arguments.next() {
         match argument.as_str() {
             "--threads" => {
@@ -537,5 +586,51 @@ impl Printer<'_> {
             Type::Infer => "var".to_string(),
             Type::Error => "<error>".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::expand_response_files;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_response_file_supplies_one_argument_per_line() {
+        let expanded = expand_response_files(
+            args(&["--threads", "4", "@list.rsp", "last.cs"]),
+            |path| {
+                assert_eq!(path, "list.rsp");
+                Ok("\u{feff}--reference\r\nC:\\Program Files\\Unity\\lib.dll\r\n\r\n--udonsharp\nother.cs\n".into())
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            expanded,
+            args(&[
+                "--threads",
+                "4",
+                "--reference",
+                "C:\\Program Files\\Unity\\lib.dll",
+                "--udonsharp",
+                "other.cs",
+                "last.cs",
+            ])
+        );
+    }
+
+    #[test]
+    fn a_line_in_a_response_file_is_never_expanded_again() {
+        let expanded = expand_response_files(args(&["@a.rsp"]), |_| Ok("@b.rsp\n".into())).unwrap();
+        assert_eq!(expanded, args(&["@b.rsp"]));
+    }
+
+    #[test]
+    fn a_missing_response_file_names_itself() {
+        let error = expand_response_files(args(&["@none.rsp"]), |_| Err("no such file".into()))
+            .unwrap_err();
+        assert_eq!(error, "none.rsp: no such file");
     }
 }

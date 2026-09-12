@@ -115,7 +115,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 
 [[package]]
 name = "men-sharp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "men-sharp-codegen",
  "men-sharp-compiler",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "men-sharp-asm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rustc-hash",
  "timescope",
@@ -137,7 +137,7 @@ dependencies = [
 
 [[package]]
 name = "men-sharp-codegen"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "men-sharp-asm",
  "men-sharp-diagnostics",
@@ -149,7 +149,7 @@ dependencies = [
 
 [[package]]
 name = "men-sharp-compiler"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "men-sharp-asm",
  "men-sharp-codegen",
@@ -163,14 +163,14 @@ dependencies = [
 
 [[package]]
 name = "men-sharp-diagnostics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rustc-hash",
 ]
 
 [[package]]
 name = "men-sharp-dotnet"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "rayon",
  "rustc-hash",
@@ -178,7 +178,7 @@ dependencies = [
 
 [[package]]
 name = "men-sharp-parser"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "allocator-api2",
  "bumpalo",
@@ -191,7 +191,7 @@ dependencies = [
 
 [[package]]
 name = "men-sharp-semantics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "men-sharp-diagnostics",
  "men-sharp-parser",
