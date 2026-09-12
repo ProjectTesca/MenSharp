@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using MenSharp;
@@ -22,6 +23,22 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     {
         shared++;
         mine = shared;
+    }
+
+    // a delegate of one instance, invoked by another: the invoker hands it
+    // back to the program that made it
+    public static event Action<int> OnPublished;
+    public int toPublish;
+    public int heard;
+
+    public void Subscribe()
+    {
+        OnPublished += value => { heard = value * 10; };
+    }
+
+    public void Publish()
+    {
+        OnPublished?.Invoke(toPublish);
     }
 
     public void RunSync()

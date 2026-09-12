@@ -136,6 +136,8 @@ pub fn generate(
         thunk_queue: VecDeque::new(),
         multicast_thunks: HashMap::default(),
         thunk_addresses: HashMap::default(),
+        remote_entries: HashMap::default(),
+        remote_invoke_slots: None,
         current_frame: None,
         frame_markers: Vec::new(),
         external_callers: HashSet::default(),
@@ -195,6 +197,9 @@ enum Role {
     /// whose body the lambda is written in; the id is the lambda node's.
     /// See `delegates`.
     Lambda(EntityID),
+    /// The function the `__mensharpInvoke` event calls: runs a delegate of
+    /// this program on another program's behalf (see `delegates`).
+    DelegateRemote,
     /// The function a local function compiles to. `symbol` is the member
     /// whose body it is written in; the id is its declaration node's. It
     /// takes the boxes of what it captures before its own parameters —
@@ -523,6 +528,10 @@ struct Generator<'a, 'ast> {
     /// The `SystemUInt32` constant holding each thunk's code address: what
     /// a delegate carries in element 0.
     thunk_addresses: HashMap<LabelId, DataId>,
+    /// Each delegate shape's remote entry, once made (see `delegates`).
+    remote_entries: HashMap<u32, LabelId>,
+    /// The slots the remote invoke protocol goes through, once made.
+    remote_invoke_slots: Option<(DataId, DataId, DataId)>,
     /// The function whose body is being compiled right now; every temp
     /// allocated while set joins that function's frame.
     current_frame: Option<FunctionKey>,
@@ -991,6 +1000,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.scheduler_key("__Drain");
             self.scheduler_key("__OnResume");
             self.compile_fixpoint(&mut entries, &mut claimed);
+        }
+
+        // a program that makes delegates can be asked by another to run one
+        // of them: the event that does (see `delegates`)
+        if self.has_delegates() {
+            let key = self.remote_dispatch_key();
+            self.ensure_function(&key);
+            self.compile_fixpoint(&mut entries, &mut claimed);
+            entries.push(EventEntry {
+                name: delegates::REMOTE_INVOKE_EVENT.to_string(),
+                key,
+                arguments: Vec::new(),
+                returns_value: false,
+                result_slot: None,
+            });
         }
 
         // entry stubs: initialize statics once, call the method, halt
@@ -1608,11 +1632,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.declarations.is_foreign(site.file) || self.is_corlib_file(site.file) {
             return StaticStorage::Local;
         }
-        if symbol.kind == SymbolKind::Event {
-            return StaticStorage::Delegate;
-        }
         let modifiers: &[men_sharp_parser::ast::Spanned<Modifier>] = match &site.syntax {
             SyntaxRef::Field { field, .. } => field.modifiers,
+            SyntaxRef::Event { event, .. } => event.modifiers,
             _ => &[],
         };
         let has = |modifier: Modifier| modifiers.iter().any(|written| written.value == modifier);
@@ -1620,14 +1642,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return StaticStorage::Local;
         }
         let ty = match self.signatures.members.get(&field) {
-            Some(MemberSignature::Field(ty)) => ty.clone(),
+            Some(MemberSignature::Field(ty)) | Some(MemberSignature::Event(ty)) => ty.clone(),
             _ => return StaticStorage::Local,
         };
         if has(Modifier::Readonly) && self.is_immutable_value(&ty) {
             return StaticStorage::Local;
-        }
-        if self.is_delegate_type(&ty) {
-            return StaticStorage::Delegate;
         }
         if self.sync_mode_of(field).is_some() {
             return StaticStorage::Synced;
@@ -1681,7 +1700,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .declarations
                 .table
                 .iter()
-                .filter(|(_, entry)| entry.is_static && entry.kind == SymbolKind::Field)
+                .filter(|(_, entry)| {
+                    entry.is_static && matches!(entry.kind, SymbolKind::Field | SymbolKind::Event)
+                })
                 .map(|(id, _)| id)
                 .collect();
             let mut fields: Vec<(String, SymbolId)> = Vec::new();
@@ -1698,7 +1719,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             for (position, (path, field)) in fields.iter().enumerate() {
                 index_of.insert(*field, position + 1);
                 let ty = match self.signatures.members.get(field) {
-                    Some(MemberSignature::Field(ty)) => ty.clone(),
+                    Some(MemberSignature::Field(ty)) | Some(MemberSignature::Event(ty)) => {
+                        ty.clone()
+                    }
                     _ => Type::Error,
                 };
                 let udon_type = self.heap_type(&ty);
@@ -1760,13 +1783,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             storage => {
                 if storage != StaticStorage::Local && self.shared_reported.insert(field) {
                     let name = self.display_path(field);
-                    let key = match storage {
-                        StaticStorage::Delegate => {
-                            "codegen.a_static_field_of_a_delegate_type_is_not"
-                        }
-                        _ => "codegen.a_static_field_cannot_be_udonsynced",
-                    };
-                    self.error(ctx, Message::key(key).arg("name", name), span);
+                    self.error(
+                        ctx,
+                        Message::key("codegen.a_static_field_cannot_be_udonsynced")
+                            .arg("name", name),
+                        span,
+                    );
                 }
                 Place::Slot(self.ensure_static(field, export), ty)
             }
@@ -4315,9 +4337,6 @@ enum StaticStorage {
     Local,
     /// An element of the array every behaviour of the compilation shares.
     Shared,
-    /// Shared by the rules, but of a delegate type — code addresses of one
-    /// program, which no other can jump to: reported, then a slot.
-    Delegate,
     /// Shared by the rules, but `[UdonSynced]`, and a synced variable
     /// belongs to one behaviour: reported, then a slot.
     Synced,

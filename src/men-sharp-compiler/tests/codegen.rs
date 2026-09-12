@@ -11759,7 +11759,9 @@ fn a_behaviour_without_a_holder_keeps_statics_of_its_own() {
 }
 
 #[test]
-fn a_static_field_of_a_delegate_type_is_reported() {
+fn a_static_event_reaches_every_behaviour_that_subscribed() {
+    // a delegate is one program's code: another program that invokes it
+    // hands it back to its owner (see `delegates`)
     let source = r#"
         using System;
         using MenSharp;
@@ -11767,41 +11769,172 @@ fn a_static_field_of_a_delegate_type_is_reported() {
         {
             public static class Bus
             {
-                public static Action OnPing;
-                public static event Action Pinged;
-                public static void Ping() { OnPing?.Invoke(); Pinged?.Invoke(); }
+                public static event Action<int> OnPing;
+                public static void Ping(int value) { OnPing?.Invoke(value); }
+            }
+            public class Node : MenSharpBehaviour
+            {
+                public int seen;
+                public int calls;
+                public void Subscribe() { Bus.OnPing += value => { seen = value; calls++; }; }
+            }
+            public class Button : MenSharpBehaviour
+            {
+                public int value;
+                public void Interact() { Bus.Ping(value); }
+            }
+        }
+        "#;
+    let Some(mut world) = statics_world(
+        source,
+        &[
+            ("a", "Game.Node"),
+            ("b", "Game.Node"),
+            ("button", "Game.Button"),
+        ],
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let (a, b, button) = (
+        world.index_of("a").unwrap(),
+        world.index_of("b").unwrap(),
+        world.index_of("button").unwrap(),
+    );
+    world.raise(a, "Subscribe").unwrap();
+    world.raise(b, "Subscribe").unwrap();
+    world
+        .program_mut(button)
+        .set_value("value", Value::Int32(7));
+    world.raise(button, "_interact").unwrap();
+    assert_eq!(world_int(&world, "a", "seen"), 7);
+    assert_eq!(world_int(&world, "b", "seen"), 7);
+    world
+        .program_mut(button)
+        .set_value("value", Value::Int32(9));
+    world.raise(button, "_interact").unwrap();
+    assert_eq!(world_int(&world, "a", "seen"), 9);
+    assert_eq!(world_int(&world, "a", "calls"), 2);
+    assert_eq!(world_int(&world, "b", "calls"), 2);
+}
+
+#[test]
+fn a_delegate_of_another_behaviour_returns_its_result() {
+    let source = r#"
+        using System;
+        using MenSharp;
+        namespace Game
+        {
+            public static class Bus
+            {
+                public static Func<int, int> Scale;
+            }
+            public class Scaler : MenSharpBehaviour
+            {
+                public int factor = 3;
+                public void Interact() { Bus.Scale = value => value * factor; }
+            }
+            public class User : MenSharpBehaviour
+            {
+                public int result;
+                public void Interact() { result = Bus.Scale(5) + 1; }
+            }
+        }
+        "#;
+    let Some(mut world) = statics_world(source, &[("s", "Game.Scaler"), ("u", "Game.User")]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let (s, u) = (world.index_of("s").unwrap(), world.index_of("u").unwrap());
+    world.raise(s, "_interact").unwrap();
+    world.raise(u, "_interact").unwrap();
+    assert_eq!(world_int(&world, "u", "result"), 16);
+}
+
+#[test]
+fn a_delegate_reached_through_a_shared_object_runs_in_its_owner() {
+    // the hole a static object with an event field would have been
+    let source = r#"
+        using System;
+        using MenSharp;
+        namespace Game
+        {
+            public class Hub
+            {
+                public event Action<string> Said;
+                public void Say(string text) { Said?.Invoke(text); }
+            }
+            public static class World { public static Hub hub = new Hub(); }
+            public class Listener : MenSharpBehaviour
+            {
+                public string heard = "";
+                public void Subscribe() { World.hub.Said += text => { heard = heard + text; }; }
+            }
+            public class Speaker : MenSharpBehaviour
+            {
+                public void Interact() { World.hub.Say("hi"); World.hub.Say("!"); }
+            }
+        }
+        "#;
+    let Some(mut world) = statics_world(source, &[("l", "Game.Listener"), ("s", "Game.Speaker")])
+    else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let (l, s) = (world.index_of("l").unwrap(), world.index_of("s").unwrap());
+    world.raise(l, "Subscribe").unwrap();
+    world.raise(s, "_interact").unwrap();
+    assert_eq!(string_of(world.program(l), "heard"), "hi!");
+}
+
+#[test]
+fn a_subscriber_can_remove_its_handler_from_a_static_event() {
+    let source = r#"
+        using System;
+        using MenSharp;
+        namespace Game
+        {
+            public static class Bus
+            {
+                public static event Action OnPing;
+                public static void Ping() { OnPing?.Invoke(); }
             }
             public class Node : MenSharpBehaviour
             {
                 public int hits;
-                public void Interact() { Bus.OnPing += () => { hits++; }; Bus.Pinged += () => { hits++; }; Bus.Ping(); }
+                private Action handler;
+                public void Subscribe() { handler = () => { hits++; }; Bus.OnPing += handler; }
+                public void Unsubscribe() { Bus.OnPing -= handler; }
+            }
+            public class Button : MenSharpBehaviour
+            {
+                public void Interact() { Bus.Ping(); }
             }
         }
         "#;
-    let mut sources = vec![SourceCode::new("test.cs", source)];
-    sources.extend(Compiler::corlib_sources());
-    let Some(program) = compile_behaviour(sources, "Game.Node") else {
+    let Some(mut world) = statics_world(
+        source,
+        &[
+            ("a", "Game.Node"),
+            ("b", "Game.Node"),
+            ("button", "Game.Button"),
+        ],
+    ) else {
         eprintln!("skipped: no .NET runtime");
         return;
     };
-    let messages: Vec<String> = program
-        .output
-        .errors
-        .iter()
-        .map(|error| error.message.to_string())
-        .collect();
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("Game.Bus.OnPing") && m.contains("delegate type")),
-        "{messages:?}"
+    let (a, b, button) = (
+        world.index_of("a").unwrap(),
+        world.index_of("b").unwrap(),
+        world.index_of("button").unwrap(),
     );
-    assert!(
-        messages
-            .iter()
-            .any(|m| m.contains("Game.Bus.Pinged") && m.contains("delegate type")),
-        "{messages:?}"
-    );
+    world.raise(a, "Subscribe").unwrap();
+    world.raise(b, "Subscribe").unwrap();
+    world.raise(button, "_interact").unwrap();
+    world.raise(a, "Unsubscribe").unwrap();
+    world.raise(button, "_interact").unwrap();
+    assert_eq!(world_int(&world, "a", "hits"), 1);
+    assert_eq!(world_int(&world, "b", "hits"), 2);
 }
 
 #[test]

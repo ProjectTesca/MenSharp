@@ -13,6 +13,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Role::Lambda(_) => return self.lambda_shape(key),
             Role::LocalFunction(_) => return self.local_function_shape(key),
             Role::DelegateInvoker(index) => return self.invoker_shape(index),
+            Role::DelegateRemote => return (Vec::new(), Type::Void),
             _ => {}
         }
         let member = self.signatures.members.get(&key.symbol);
@@ -114,7 +115,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .get(key)
                     .is_some_and(|info| info.has_this);
             }
-            Role::DelegateInvoker(_) => return false,
+            Role::DelegateInvoker(_) | Role::DelegateRemote => return false,
             _ => {}
         }
         // the behaviour entry class has exactly one instance — the program
@@ -158,6 +159,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 name.push_str(&format!("_local_{local}"));
             }
             Role::DelegateInvoker(index) => name = format!("fn_delegate_invoke_{index}"),
+            Role::DelegateRemote => name = "fn_delegate_remote".to_string(),
             Role::GetterDispatcher => name.push_str("_get_dispatch"),
             Role::SetterDispatcher => name.push_str("_set_dispatch"),
             Role::TypeTest => name.push_str("_is"),
@@ -328,6 +330,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             (Role::Lambda(_), _) => self.emit_lambda_body(&mut ctx, key),
             (Role::LocalFunction(_), _) => self.emit_local_function_body(&mut ctx, key),
             (Role::DelegateInvoker(_), _) => self.emit_invoker_body(&mut ctx),
+            (Role::DelegateRemote, _) => self.emit_remote_dispatch_body(&mut ctx),
             (Role::DefaultConstructor, _) => {
                 // the implicit constructor: field initializers, then `base()`
                 self.emit_field_initializers(&mut ctx);

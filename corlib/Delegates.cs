@@ -12,8 +12,14 @@ namespace MenSharp.Internal
 {
     public static class Delegates
     {
+        // A delegate is an object[]: [0] the code address of its thunk, [1]
+        // the UdonBehaviour whose program made it, [2] the address of its
+        // shape's remote entry in that program, [3..] its payload — for a
+        // multicast delegate, [3] the list of delegates. Kept in step with
+        // the compiler's `delegates` module.
+
         /// `Delegate.Combine`: the invocation list of `a` followed by `b`'s.
-        public static object[] Combine(object[] a, object[] b, object multicast)
+        public static object[] Combine(object[] a, object[] b, object multicast, object owner, object remote)
         {
             if (a == null)
             {
@@ -34,12 +40,12 @@ namespace MenSharp.Internal
             {
                 list[first.Length + i] = second[i];
             }
-            return new object[] { multicast, list };
+            return new object[] { multicast, owner, remote, list };
         }
 
         /// `Delegate.Remove`: `a` without the last occurrence of `b`'s
         /// invocation list; `a` itself when it holds none.
-        public static object[] Remove(object[] a, object[] b, object multicast)
+        public static object[] Remove(object[] a, object[] b, object multicast, object owner, object remote)
         {
             if (a == null || b == null)
             {
@@ -92,7 +98,7 @@ namespace MenSharp.Internal
             {
                 return (object[])list[0];
             }
-            return new object[] { multicast, list };
+            return new object[] { multicast, owner, remote, list };
         }
 
         /// `Delegate.Equals`: the same target and the same payload — for a
@@ -111,10 +117,15 @@ namespace MenSharp.Internal
             {
                 return false;
             }
+            // the same program's, of the same shape
+            if (!object.ReferenceEquals(a[1], b[1]) || (uint)a[2] != (uint)b[2])
+            {
+                return false;
+            }
             if ((uint)a[0] == (uint)multicast)
             {
-                object[] first = (object[])a[1];
-                object[] second = (object[])b[1];
+                object[] first = (object[])a[3];
+                object[] second = (object[])b[3];
                 if (first.Length != second.Length)
                 {
                     return false;
@@ -128,7 +139,7 @@ namespace MenSharp.Internal
                 }
                 return true;
             }
-            for (int i = 1; i < a.Length; i++)
+            for (int i = 3; i < a.Length; i++)
             {
                 if (!object.ReferenceEquals(a[i], b[i]))
                 {
@@ -144,7 +155,7 @@ namespace MenSharp.Internal
         {
             if ((uint)d[0] == (uint)multicast)
             {
-                return (object[])d[1];
+                return (object[])d[3];
             }
             return new object[] { d };
         }

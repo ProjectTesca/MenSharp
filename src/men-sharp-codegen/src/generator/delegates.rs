@@ -20,6 +20,20 @@
 //! marker like any call site — recursion through a delegate is saved like
 //! any other recursion.
 //!
+//! Element 1 of every delegate is its **owner**: the UdonBehaviour whose
+//! program made it, and so whose code the address in element 0 is. A
+//! delegate can travel to another behaviour's program — through a static
+//! field, or a field of an object a static field reaches — and that
+//! program cannot jump to a foreign address. So the invoker checks the
+//! owner first: its own, and it jumps; another's, and it hands the call
+//! over the only way there is between programs — the delegate and the
+//! (boxed) arguments through `SetProgramVariable`, then the owner's
+//! `__mensharpInvoke` event, then the result back through
+//! `GetProgramVariable`. On the owner's side that event jumps to the
+//! address in element 2, the **remote entry** of the delegate's shape,
+//! which unboxes the arguments into the invoker's parameters and calls it
+//! as any local call would. Element 3 on is the payload.
+//!
 //! A lambda is a function of its own (`Role::Lambda`), compiled from the
 //! enclosing member's body with that member's generic bindings. What it
 //! captures travels in **boxes**: a local or parameter that some lambda
@@ -76,17 +90,35 @@ pub(super) struct Thunk {
 
 pub(super) enum ThunkKind {
     /// A call of the target: `payload` is how many delegate elements after
-    /// the address feed the target's leading parameters — its `this`, then
+    /// the header feed the target's leading parameters — its `this`, then
     /// a lambda's boxes.
     Call { payload: usize },
     /// The multicast thunk of the shape (`target` is its invoker).
     Multicast,
     /// Resumes a suspended `async` target from its snapshot (see `tasks`).
     Resume,
+    /// The remote entry of the shape (`target` is its invoker): where the
+    /// `__mensharpInvoke` event lands for a delegate of this shape.
+    RemoteEntry,
 }
 
 const GET: &str = "SystemObjectArray.__Get__SystemInt32__SystemObject";
 const NEW_OBJECT_ARRAY: &str = "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray";
+const REFERENCE_EQUALS: &str =
+    "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean";
+
+/// The delegate's header: address, owner, remote entry — the payload
+/// starts after it. Kept in step with `corlib/Delegates.cs`.
+pub(super) const DELEGATE_OWNER: i32 = 1;
+pub(super) const DELEGATE_REMOTE_ENTRY: i32 = 2;
+pub(super) const DELEGATE_PAYLOAD: i32 = 3;
+
+/// The event a program raises on another to run one of that program's
+/// delegates, and the slots it fills first / reads afterwards.
+pub(super) const REMOTE_INVOKE_EVENT: &str = "__mensharpInvoke";
+const REMOTE_INVOKE_DELEGATE: &str = "__invoke_delegate";
+const REMOTE_INVOKE_ARGUMENTS: &str = "__invoke_args";
+const REMOTE_INVOKE_RESULT: &str = "__invoke_result";
 
 impl<'a, 'ast> Generator<'a, 'ast> {
     // ------------------------------------------------------------ types
@@ -209,7 +241,73 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         self.invokers.insert(shape.clone(), key.clone());
         self.ensure_function(&key);
+        // a delegate of any shape may be handed to this program by another
+        // to run: the event's dispatch function, once
+        let remote = self.remote_dispatch_key();
+        self.ensure_function(&remote);
         (key, index)
+    }
+
+    /// The function the `__mensharpInvoke` event calls: jumps to the remote
+    /// entry the delegate names, which returns on its behalf.
+    pub(super) fn remote_dispatch_key(&self) -> FunctionKey {
+        FunctionKey {
+            symbol: self.entry.expect("the entry class is known"),
+            role: Role::DelegateRemote,
+            bindings: Vec::new(),
+        }
+    }
+
+    /// Whether any delegate shape was met: the program then exports the
+    /// `__mensharpInvoke` event.
+    pub(super) fn has_delegates(&self) -> bool {
+        !self.delegate_shapes.is_empty()
+    }
+
+    /// The slots the remote protocol goes through, made on first use.
+    fn remote_invoke_slots(&mut self) -> (DataId, DataId, DataId) {
+        if let Some(slots) = self.remote_invoke_slots {
+            return slots;
+        }
+        let slot = |generator: &mut Self, name: &str, udon_type: &str| {
+            generator.program.add_data(DataSymbol {
+                name: name.into(),
+                udon_type: udon_type.into(),
+                init: HeapInit::Null,
+                // written by another program's `SetProgramVariable`, which
+                // reaches any symbol: not a public variable
+                export: false,
+                sync: None,
+            })
+        };
+        let slots = (
+            slot(self, REMOTE_INVOKE_DELEGATE, "SystemObjectArray"),
+            slot(self, REMOTE_INVOKE_ARGUMENTS, "SystemObjectArray"),
+            slot(self, REMOTE_INVOKE_RESULT, "SystemObject"),
+        );
+        self.remote_invoke_slots = Some(slots);
+        slots
+    }
+
+    /// The code address of a shape's remote entry, as the constant every
+    /// delegate of the shape carries in element 2.
+    fn remote_entry_address(&mut self, shape: u32) -> DataId {
+        let label = match self.remote_entries.get(&shape) {
+            Some(label) => *label,
+            None => {
+                let label = self.program.add_label(format!("remote_entry_{shape}"));
+                self.remote_entries.insert(shape, label);
+                let invoker = self.invokers[&self.delegate_shapes[shape as usize]].clone();
+                self.thunk_queue.push_back(Thunk {
+                    label,
+                    target: invoker,
+                    shape,
+                    kind: ThunkKind::RemoteEntry,
+                });
+                label
+            }
+        };
+        self.thunk_address(label)
     }
 
     /// An invoker's parameters: the delegate, then the shape's.
@@ -235,15 +333,155 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         (parameters, info.returns.clone())
     }
 
-    /// The body of an invoker: a null delegate throws; otherwise jump to
-    /// the address in element 0 — the thunk returns on the invoker's behalf.
+    /// The body of an invoker: a null delegate throws; one of this program's
+    /// own jumps to the address in element 0 — the thunk returns on the
+    /// invoker's behalf; another program's is handed to that program (see
+    /// the module note).
     pub(super) fn emit_invoker_body(&mut self, ctx: &mut Ctx<'ast>) {
-        let delegate = self.functions[&ctx.key].parameters[0];
+        let Role::DelegateInvoker(index) = ctx.key.role else {
+            unreachable!("an invoker has the invoker role");
+        };
+        let shape = self.delegate_shapes[index as usize].clone();
+        let (parameters, result, return_slot) = {
+            let function = &self.functions[&ctx.key];
+            (
+                function.parameters.clone(),
+                function.result,
+                function.return_slot,
+            )
+        };
+        let delegate = parameters[0];
         self.check_not_null(ctx, delegate, 0..0);
+
+        let owner = self.temp(BEHAVIOUR_HEAP_TYPE);
+        let owner_index = self.int_constant(DELEGATE_OWNER);
+        self.call_extern(ctx, GET, &[delegate, owner_index, owner], 0..0);
+        let own = self.self_behaviour_slot();
+        let mine = self.temp("SystemBoolean");
+        self.call_extern(ctx, REFERENCE_EQUALS, &[owner, own, mine], 0..0);
+        let remote = self.fresh_label("delegate_remote");
+        self.program.code.push(Op::Push(mine));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(remote)));
         let address = self.temp("SystemUInt32");
         let zero = self.int_constant(0);
         self.call_extern(ctx, GET, &[delegate, zero, address], 0..0);
         self.program.code.push(Op::JumpIndirect(address));
+
+        // another program's delegate: the arguments boxed into an array,
+        // the delegate and the array written to the owner, its event
+        // raised, the result read back
+        self.program.code.push(Op::Label(remote));
+        if shape.parameters.iter().any(|(_, by_ref)| *by_ref) {
+            let message = self.string_constant(
+                "a delegate of another behaviour cannot be invoked with a `ref` or `out` \
+                 argument",
+            );
+            self.throw_new(
+                ctx,
+                &["System", "NotSupportedException"],
+                Some(message),
+                0..0,
+            );
+            self.program.code.push(Op::JumpIndirect(return_slot));
+            return;
+        }
+        let count = self.int_constant(shape.parameters.len() as i32);
+        let arguments = self.temp("SystemObjectArray");
+        self.call_extern(ctx, NEW_OBJECT_ARRAY, &[count, arguments], 0..0);
+        for position in 0..shape.parameters.len() {
+            let at = self.int_constant(position as i32);
+            self.set_element(ctx, arguments, at, parameters[1 + position], 0..0);
+        }
+        self.set_program_variable(ctx, owner, REMOTE_INVOKE_DELEGATE, delegate, 0..0);
+        self.set_program_variable(ctx, owner, REMOTE_INVOKE_ARGUMENTS, arguments, 0..0);
+        let event = self.string_constant(REMOTE_INVOKE_EVENT);
+        self.call_extern(
+            ctx,
+            &format!("{BEHAVIOUR_EXTERN_TYPE}.__SendCustomEvent__SystemString__SystemVoid"),
+            &[owner, event],
+            0..0,
+        );
+        if let Some(result) = result {
+            let returns = shape.returns.clone();
+            let value = self.get_program_variable(ctx, owner, REMOTE_INVOKE_RESULT, &returns, 0..0);
+            self.copy(value, result);
+        }
+        self.program.code.push(Op::JumpIndirect(return_slot));
+    }
+
+    /// The body of the remote dispatch function: jump to the remote entry
+    /// the delegate handed over names; the entry returns on its behalf.
+    pub(super) fn emit_remote_dispatch_body(&mut self, ctx: &mut Ctx<'ast>) {
+        let (delegate, _, _) = self.remote_invoke_slots();
+        self.check_not_null(ctx, delegate, 0..0);
+        let entry = self.temp("SystemUInt32");
+        let at = self.int_constant(DELEGATE_REMOTE_ENTRY);
+        self.call_extern(ctx, GET, &[delegate, at, entry], 0..0);
+        self.program.code.push(Op::JumpIndirect(entry));
+    }
+
+    /// A shape's remote entry: the delegate and the boxed arguments another
+    /// program wrote into the invoker's parameters, the invoker called, its
+    /// result put where that program reads it, and the dispatch function
+    /// returned from.
+    fn emit_remote_entry(&mut self, label: LabelId, shape_index: u32) {
+        let shape = self.delegate_shapes[shape_index as usize].clone();
+        let invoker = self.invokers[&shape].clone();
+        let dispatch = self.remote_dispatch_key();
+        let saved_frame = self.enter_frame(Some(dispatch.clone()));
+        let ctx = self.dispatcher_ctx(&dispatch);
+        let (invoker_label, invoker_parameters, invoker_result, invoker_return) = {
+            let function = &self.functions[&invoker];
+            (
+                function.label,
+                function.parameters.clone(),
+                function.result,
+                function.return_slot,
+            )
+        };
+        let dispatch_return = self.functions[&dispatch].return_slot;
+        let (delegate, arguments, result) = self.remote_invoke_slots();
+
+        self.program.code.push(Op::Label(label));
+        // the dispatch → invoker edge, saved around like any call site
+        let marker = self.frame_markers.len() as u32;
+        self.frame_markers.push((dispatch.clone(), invoker.clone()));
+        self.call_edges
+            .entry(dispatch.clone())
+            .or_default()
+            .insert(invoker.clone());
+        self.program.code.push(Op::SaveFrame(marker));
+        self.copy(delegate, invoker_parameters[0]);
+        for position in 0..shape.parameters.len() {
+            let at = self.int_constant(position as i32);
+            self.call_extern(
+                &ctx,
+                GET,
+                &[arguments, at, invoker_parameters[1 + position]],
+                0..0,
+            );
+        }
+        let continuation = self
+            .program
+            .add_label(format!("remote_ret_{}", self.temp_counter));
+        self.temp_counter += 1;
+        let back = self.code_address_constant(
+            format!("__remoteaddr_{}", self.temp_counter),
+            Some(continuation),
+        );
+        self.copy(back, invoker_return);
+        self.program
+            .code
+            .push(Op::Jump(Target::Label(invoker_label)));
+        self.program.code.push(Op::Label(continuation));
+        self.program.code.push(Op::RestoreFrame(marker));
+        if let Some(invoker_result) = invoker_result {
+            self.copy(invoker_result, result);
+        }
+        self.program.code.push(Op::JumpIndirect(dispatch_return));
+        self.leave_frame(saved_frame);
     }
 
     // ------------------------------------------------------------ thunks
@@ -274,6 +512,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ThunkKind::Call { payload } => self.emit_thunk(thunk, payload),
                 ThunkKind::Multicast => self.emit_multicast_thunk(thunk.label, thunk.shape),
                 ThunkKind::Resume => self.emit_resume_thunk(thunk.label, &thunk.target),
+                ThunkKind::RemoteEntry => self.emit_remote_entry(thunk.label, thunk.shape),
             }
         }
     }
@@ -335,7 +574,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // target's leading parameters
         let delegate = invoker_parameters[0];
         for (index, &slot) in target_parameters.iter().enumerate().take(payload) {
-            let element = self.int_constant(index as i32 + 1);
+            let element = self.int_constant(index as i32 + DELEGATE_PAYLOAD);
             self.call_extern(&ctx, GET, &[delegate, element, slot], 0..0);
         }
         // the arguments the invoker received
@@ -377,22 +616,30 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::JumpIndirect(invoker_return));
     }
 
-    /// A fresh delegate object: the thunk's address, then the payload.
+    /// A fresh delegate object: the thunk's address, this program as its
+    /// owner, the shape's remote entry, then the payload.
     pub(super) fn make_delegate(
         &mut self,
         ctx: &mut Ctx<'ast>,
         thunk: LabelId,
+        shape: u32,
         payload: &[DataId],
         span: Range<usize>,
     ) -> DataId {
-        let size = self.int_constant(payload.len() as i32 + 1);
+        let size = self.int_constant(payload.len() as i32 + DELEGATE_PAYLOAD);
         let delegate = self.temp("SystemObjectArray");
         self.call_extern(ctx, NEW_OBJECT_ARRAY, &[size, delegate], span.clone());
         let address = self.thunk_address(thunk);
         let zero = self.int_constant(0);
         self.set_element(ctx, delegate, zero, address, span.clone());
+        let owner = self.self_behaviour_slot();
+        let owner_index = self.int_constant(DELEGATE_OWNER);
+        self.set_element(ctx, delegate, owner_index, owner, span.clone());
+        let remote = self.remote_entry_address(shape);
+        let remote_index = self.int_constant(DELEGATE_REMOTE_ENTRY);
+        self.set_element(ctx, delegate, remote_index, remote, span.clone());
         for (index, value) in payload.iter().enumerate() {
-            let element = self.int_constant(index as i32 + 1);
+            let element = self.int_constant(index as i32 + DELEGATE_PAYLOAD);
             self.set_element(ctx, delegate, element, *value, span.clone());
         }
         delegate
@@ -476,7 +723,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.ensure_function(&key);
         let (_, index) = self.ensure_invoker(&shape);
         let thunk = self.ensure_thunk(&key, index, payload.len());
-        Some(self.make_delegate(ctx, thunk, &payload, span))
+        Some(self.make_delegate(ctx, thunk, index, &payload, span))
     }
 
     /// The body of a lambda function: bind the boxes and the parameters,
@@ -764,7 +1011,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.ensure_function(&key);
             let (_, index) = self.ensure_invoker(&shape);
             let thunk = self.ensure_thunk(&key, index, payload.len());
-            return Some(self.make_delegate(ctx, thunk, &payload, span));
+            return Some(self.make_delegate(ctx, thunk, index, &payload, span));
         }
         let MemberOrigin::Source(symbol) = call.origin else {
             self.error(
@@ -799,7 +1046,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let payload: Vec<DataId> = this.into_iter().collect();
         let (_, index) = self.ensure_invoker(&shape);
         let thunk = self.ensure_thunk(&key, index, payload.len());
-        Some(self.make_delegate(ctx, thunk, &payload, span))
+        Some(self.make_delegate(ctx, thunk, index, &payload, span))
     }
 
     // ------------------------------------------------------------- calls
@@ -979,8 +1226,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
         };
         let multicast = self.multicast_address(&shape);
-        let result =
-            self.call_delegates_helper(ctx, helper, &[left.0, right.0, multicast], span.clone())?;
+        let arguments: Vec<DataId> = if helper == "AreEqual" {
+            vec![left.0, right.0, multicast]
+        } else {
+            // a multicast delegate made here is this program's, of the
+            // shape's remote entry, like any delegate made here
+            let (_, index) = self.ensure_invoker(&shape);
+            let owner = self.self_behaviour_slot();
+            let remote = self.remote_entry_address(index);
+            vec![left.0, right.0, multicast, owner, remote]
+        };
+        let result = self.call_delegates_helper(ctx, helper, &arguments, span.clone())?;
         if operator == BinaryOperator::NotEqual {
             let negated = self.temp("SystemBoolean");
             self.call_extern(ctx, NOT, &[result, negated], span);
@@ -1079,8 +1335,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::Label(label));
         let delegate = invoker_parameters[0];
         let list = self.temp("SystemObjectArray");
+        let list_index = self.int_constant(DELEGATE_PAYLOAD);
+        self.call_extern(&ctx, GET, &[delegate, list_index, list], 0..0);
         let one = self.int_constant(1);
-        self.call_extern(&ctx, GET, &[delegate, one, list], 0..0);
         let count = self.temp("SystemInt32");
         self.call_extern(&ctx, LENGTH, &[list, count], 0..0);
         let index = self.temp("SystemInt32");

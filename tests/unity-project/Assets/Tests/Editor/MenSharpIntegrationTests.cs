@@ -153,6 +153,14 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(3, smoke.GetProgramVariable("mine"));
         Assert.AreEqual(2, second.GetProgramVariable("mine"));
 
+        // a static event: subscribed in one instance, raised from another —
+        // the handler runs in the instance that made it
+        smoke.RunProgram("Subscribe");
+        second.SetProgramVariable("toPublish", 4);
+        second.RunProgram("Publish");
+        Assert.AreEqual(40, smoke.GetProgramVariable("heard"));
+        Assert.AreEqual(0, second.GetProgramVariable("heard"));
+
         yield return new ExitPlayMode();
         AssetDatabase.DeleteAsset(GeneratedScene);
     }

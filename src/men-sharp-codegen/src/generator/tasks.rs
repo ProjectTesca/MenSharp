@@ -297,7 +297,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.code_address_constant(format!("__resume_{}", self.temp_counter), Some(resume));
         self.temp_counter += 1;
         let thunk = self.resume_thunk(&ctx.key);
-        self.make_delegate(ctx, thunk, &[snapshot, address], span)
+        let (_, shape) = self.ensure_invoker(&Self::action_shape());
+        self.make_delegate(ctx, thunk, shape, &[snapshot, address], span)
     }
 
     // ---------------------------------------------------------- iterators
@@ -711,12 +712,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::SaveFrame(marker));
 
         let delegate = invoker_parameters[0];
-        let one = self.int_constant(1);
-        let two = self.int_constant(2);
+        let first = self.int_constant(super::delegates::DELEGATE_PAYLOAD);
+        let second = self.int_constant(super::delegates::DELEGATE_PAYLOAD + 1);
         let snapshot = self.temp("SystemObjectArray");
-        self.call_extern(&ctx, GET, &[delegate, one, snapshot], 0..0);
+        self.call_extern(&ctx, GET, &[delegate, first, snapshot], 0..0);
         let address = self.temp("SystemUInt32");
-        self.call_extern(&ctx, GET, &[delegate, two, address], 0..0);
+        self.call_extern(&ctx, GET, &[delegate, second, address], 0..0);
         let restore = self.async_snapshots.len() as u32;
         self.async_snapshots.push((target.clone(), snapshot));
         self.program.code.push(Op::RestoreSnapshot(restore));

@@ -205,7 +205,6 @@ operator_name_is_not_available_on_udon = "operator `{name}` is not available on 
 format_udon_has_no_tostring_string_for = "`{{...:{format}}}`: Udon has no `ToString(string)` for `{a0}`, so this format has nothing to apply it. Format a number and build the text yourself (`\"{{\" + value.ToString(\"{format}\") + \"}}\"` works where the type has one)"
 the_alignment_of_an_interpolated_hole_must = "the alignment of an interpolated hole must be a whole number written out, as in `{value,-8}`: a named constant or an expression is not accepted here yet"
 unary_is_not_available_on_udon_for = "unary `-` is not available on Udon for this operand type"
-a_static_field_of_a_delegate_type_is_not = "`{name}` is a static field of a delegate type, which MenSharp does not support yet: a static field is shared by every behaviour, and a delegate is code of one behaviour's own program"
 a_static_field_cannot_be_udonsynced = "`{name}` cannot be both static and [UdonSynced]: a static field is shared by every behaviour, and a synced variable belongs to one"
 this_compound_assignment_is_not_supported_by = "this compound assignment is not supported by the Udon backend yet"
 this_expression_cannot_be_assigned_to = "this expression cannot be assigned to"
