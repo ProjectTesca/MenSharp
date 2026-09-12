@@ -413,6 +413,46 @@ fn interpolating_a_null_string_alone_gives_an_empty_string() {
 }
 
 #[test]
+fn an_external_indexer_keeps_the_name_its_metadata_gave_it() {
+    // StringBuilder's indexer is `Chars`, not `Item` (`[IndexerName]`), and
+    // Udon exposes it as `__get_Chars`/`__set_Chars`
+    let Some((program, _)) = build(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using System.Text;
+        namespace Game
+        {
+            public class Program
+            {
+                public static StringBuilder builder;
+                public static char read;
+                public static char ReadChar(StringBuilder builder, int index)
+                    => builder[index];
+                public static void WriteChar(StringBuilder builder, int index, char value)
+                    => builder[index] = value;
+                public static void Main()
+                {
+                    read = ReadChar(builder, 0);
+                    WriteChar(builder, 0, 'x');
+                }
+            }
+        }
+        "#,
+    )]) else {
+        return;
+    };
+    let uasm = program.to_uasm().unwrap();
+    assert!(
+        uasm.contains("SystemTextStringBuilder.__get_Chars__SystemInt32__SystemChar"),
+        "{uasm}"
+    );
+    assert!(
+        uasm.contains("SystemTextStringBuilder.__set_Chars__SystemInt32_SystemChar__SystemVoid"),
+        "{uasm}"
+    );
+}
+
+#[test]
 fn recursion_just_works() {
     // static frames plus a save/restore stack woven in around the calls that
     // can come back — no attribute, no configuration, like C#

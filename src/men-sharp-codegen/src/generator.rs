@@ -2749,9 +2749,30 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// The SDK registers a virtual member once, on the class that introduces
     /// it: `LoadURL` is `BaseVRCVideoPlayer`'s extern, and the
     /// `VRCAVProVideoPlayer` override a call resolves to has none of its
-    /// own. Udon takes the derived instance for the base's extern.
-    pub(super) fn exposed_owner(&self, declaring: &Type, suffixes: &[String]) -> Option<String> {
-        let chain = self.external_chain(declaring);
+    /// own. Udon takes the derived instance for the base's extern. The
+    /// other way round happens too: `ReleaseGrabs` is declared on
+    /// `VRCPhysBoneBase`, and the whitelist has it on `VRCPhysBone` alone —
+    /// so when the declaring type and its bases have nothing, the search
+    /// goes on down the receiver's own side, from the declaring type's
+    /// nearest subclass to the receiver's static type itself.
+    pub(super) fn exposed_owner(
+        &self,
+        declaring: &Type,
+        receiver: Option<&Type>,
+        suffixes: &[String],
+    ) -> Option<String> {
+        let declaring_chain = self.external_chain(declaring);
+        let mut chain = declaring_chain.clone();
+        if let Some(receiver) = receiver
+            && let Some(first) = declaring_chain.first()
+        {
+            // a receiver that is not a subclass of the declaring type (a type
+            // parameter, an interface) says nothing about the owner
+            let receiver_chain = self.external_chain(receiver);
+            if let Some(position) = receiver_chain.iter().position(|name| name == first) {
+                chain.extend(receiver_chain[..position].iter().rev().cloned());
+            }
+        }
         chain
             .iter()
             .find(|owner| {
@@ -2760,7 +2781,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .any(|suffix| self.nodes.has_signature(&format!("{owner}.{suffix}")))
             })
             .cloned()
-            .or_else(|| chain.into_iter().next())
+            .or_else(|| declaring_chain.into_iter().next())
     }
 
     /// Does a value of this type live behind a reference? Structs and enums do

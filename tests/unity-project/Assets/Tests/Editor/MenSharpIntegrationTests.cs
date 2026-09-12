@@ -50,6 +50,7 @@ public class MenSharpIntegrationTests
         "VerifyNullable",
         "VerifyRange",
         "VerifyRectangular",
+        "VerifyReferences",
         "VerifyRemoteAwait",
         "VerifyRemoteDoor",
         "VerifyResult",

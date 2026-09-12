@@ -6,6 +6,7 @@ use super::{
 use crate::error::SemanticErrorKind;
 use crate::semantics::resolve::apply_suffixes;
 use crate::symbol::SymbolKind;
+use crate::types::external::INDEXER_LOOKUP_NAME;
 use crate::types::infer::best_common_type;
 use crate::types::lookup::MemberCandidate;
 use crate::types::{MemberSignature, Type, TypeTarget};
@@ -651,9 +652,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 Meaning::Value(self.corlib("Char"))
             }
             _ => {
-                // indexers: `this[]` from source, `Item` from metadata
-                let mut candidates = self.system().members_named(&receiver, "this[]");
-                candidates.extend(self.system().members_named(&receiver, "Item"));
+                // indexers: `this[]` from source, and the provider answers
+                // the same name with metadata's parameterised properties —
+                // by whatever name `[IndexerName]` gave them
+                let candidates = self.system().members_named(&receiver, INDEXER_LOOKUP_NAME);
                 let indexers: Vec<MemberCandidate> = candidates
                     .into_iter()
                     .filter(|candidate| {

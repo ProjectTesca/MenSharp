@@ -1865,11 +1865,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         out
     }
 
-    /// The extern signature for a resolved external call.
+    /// The extern signature for a resolved external call. `receiver` is the
+    /// static type the call was made on, when it was made on a value: the
+    /// whitelist may have the member there rather than on the declaring
+    /// type (see exposed_owner).
     pub(super) fn external_signature(
         &mut self,
         ctx: &Ctx,
         call: &ResolvedCall,
+        receiver: Option<&Type>,
         span: &Range<usize>,
     ) -> Option<String> {
         let MemberOrigin::External { member, .. } = &call.origin else {
@@ -1934,7 +1938,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         } else {
             format!("__{name}{middle}__T")
         };
-        let owner = self.exposed_owner(&declaring, std::slice::from_ref(&suffix))?;
+        let receiver = receiver.map(|ty| self.substitute(ty, &ctx.key.bindings));
+        let owner =
+            self.exposed_owner(&declaring, receiver.as_ref(), std::slice::from_ref(&suffix))?;
         Some(format!("{owner}.{suffix}"))
     }
 

@@ -18,6 +18,11 @@ use crate::{
     types::{ExternalTypeId, MemberSignature, Type, TypeVariance},
 };
 
+/// The member name under which a type's indexers are looked up — the name
+/// source indexers are collected under, and what a provider answers with
+/// every parameterised property for.
+pub const INDEXER_LOOKUP_NAME: &str = "this[]";
+
 /// What kind of thing an external type is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalTypeKind {
@@ -114,7 +119,10 @@ pub trait ExternalTypes: Sync {
     /// Implemented (or, for an interface, extended) interfaces.
     fn interfaces(&self, id: ExternalTypeId) -> Vec<Type>;
 
-    /// All members with the given metadata name, overloads included.
+    /// All members with the given metadata name, overloads included. The
+    /// name [`INDEXER_LOOKUP_NAME`] (`this[]`) asks for the type's indexers
+    /// instead: properties with parameters, whatever `[IndexerName]` called
+    /// them (`Item` almost everywhere, `Chars` on `StringBuilder`).
     fn members_named(&self, id: ExternalTypeId, name: &str) -> Vec<ExternalMember>;
 
     /// A human-readable name (`UnityEngine.Debug`) for diagnostics.

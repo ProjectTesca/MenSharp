@@ -2449,7 +2449,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     ],
                     None => Vec::new(),
                 };
-                let Some(owner) = self.exposed_owner(&declaring, &accessors) else {
+                let receiver_type = receiver.as_ref().map(|(_, ty)| ty);
+                let Some(owner) = self.exposed_owner(&declaring, receiver_type, &accessors) else {
                     self.error(
                         ctx,
                         Message::key("codegen.this_type_is_not_available_on_udon"),
@@ -2533,7 +2534,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Some(ResolvedTarget::Call(call)) => {
                 let call = call.clone();
                 let MemberOrigin::Source(symbol) = call.origin else {
-                    return self.external_indexer_place(ctx, &call, slot, arguments, span);
+                    return self.external_indexer_place(ctx, &call, (slot, &ty), arguments, span);
                 };
                 // each index is read before the next runs — see `emit_call`
                 let mut guards = Vec::new();
@@ -4192,7 +4193,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 {
                     return piece;
                 }
-                let Some(signature) = self.external_signature(ctx, call, &span) else {
+                let receiver_type = receiver.as_ref().map(|(_, ty)| ty);
+                let Some(signature) = self.external_signature(ctx, call, receiver_type, &span)
+                else {
                     return Piece::Error;
                 };
                 let mut pushed = Vec::new();
@@ -4815,7 +4818,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         &mut self,
         ctx: &mut Ctx<'ast>,
         call: &ResolvedCall,
-        receiver: DataId,
+        (receiver, receiver_type): (DataId, &Type),
         arguments: &'ast [Argument<'ast, 'ast>],
         span: Range<usize>,
     ) -> Place {
@@ -4881,7 +4884,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             _ => Vec::new(),
         };
-        let Some(owner) = self.exposed_owner(&declaring, &accessors) else {
+        let receiver_type = self.substitute(receiver_type, &ctx.key.bindings);
+        let Some(owner) = self.exposed_owner(&declaring, Some(&receiver_type), &accessors) else {
             return Place::Error;
         };
         Place::ExternalIndexer {

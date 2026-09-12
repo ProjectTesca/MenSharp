@@ -380,6 +380,10 @@ fn accessibility_from(access_bits: u16) -> Accessibility {
     }
 }
 
+/// What the checker asks [`ExternalTypes::members_named`] for to get a
+/// type's indexers, whichever name the metadata gives them.
+const INDEXER_NAME: &str = men_sharp_semantics::INDEXER_LOOKUP_NAME;
+
 impl ExternalTypes for ReferenceSet<'_> {
     fn find_type(&self, namespace: &[&str], name: &str, arity: u32) -> Option<ExternalTypeId> {
         let joined = namespace.join(".");
@@ -494,7 +498,14 @@ impl ExternalTypes for ReferenceSet<'_> {
         }
 
         for property in &definition.properties {
-            if property.name != name {
+            // `this[]` asks for the indexers, whatever `[IndexerName]` called
+            // them: `Item` almost everywhere, `Chars` on StringBuilder. Not
+            // the explicit interface implementations (`IList.Item`, named
+            // with their interface): those are reached through the
+            // interface, as in C#, and would only make `list[0]` ambiguous
+            let is_indexer =
+                !property.signature.parameters.is_empty() && !property.name.contains('.');
+            if property.name != name && !(name == INDEXER_NAME && is_indexer) {
                 continue;
             }
             // static-ness and accessibility live on the accessor methods

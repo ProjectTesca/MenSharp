@@ -543,9 +543,64 @@ public static class MenSharpCompiler
         return builder.ToString();
     }
 
-    /// The reference dlls, taken from the very assemblies this editor session
-    /// has loaded — no path guessing.
+    /// The reference dlls: what the C# compiler itself sees from the
+    /// assemblies MenSharp sources live in — every precompiled dll
+    /// (mscorlib, System, the engine modules, the SDK's) and every script
+    /// assembly they reference (Cinemachine, the SDK's Dynamics packages,
+    /// ...). A type the user's C# can name, M# can name; whether it is
+    /// callable is the Udon whitelist's decision, reported per call. Read
+    /// from the compilation pipeline's player assemblies, so editor-only
+    /// assemblies stay out. The essentials go first: on a name declared in
+    /// two assemblies the compiler keeps the first.
     private static IEnumerable<string> ReferenceAssemblies()
+    {
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string essential in EssentialReferenceAssemblies())
+        {
+            if (seen.Add(essential))
+            {
+                yield return essential;
+            }
+        }
+        foreach (UnityEditor.Compilation.Assembly assembly in
+            UnityEditor.Compilation.CompilationPipeline.GetAssemblies(
+                UnityEditor.Compilation.AssembliesType.Player))
+        {
+            bool carriesSources = MenSharpSources.IsMenSharpAssembly(assembly)
+                || assembly.name.StartsWith("Assembly-CSharp", StringComparison.Ordinal);
+            if (!carriesSources)
+            {
+                continue;
+            }
+            foreach (string reference in assembly.compiledAssemblyReferences)
+            {
+                if (File.Exists(reference) && seen.Add(reference))
+                {
+                    yield return reference;
+                }
+            }
+            foreach (UnityEditor.Compilation.Assembly referenced in assembly.assemblyReferences)
+            {
+                // the runtime's MenSharpBehaviour is a source the compiler
+                // ships; the built dll must not shadow it
+                if (referenced.name == MenSharpSources.RuntimeAssembly
+                    || referenced.name.StartsWith("Assembly-CSharp", StringComparison.Ordinal))
+                {
+                    continue;
+                }
+                string path = referenced.outputPath;
+                if (!string.IsNullOrEmpty(path) && File.Exists(path) && seen.Add(path))
+                {
+                    yield return path;
+                }
+            }
+        }
+    }
+
+    /// The references a compile cannot do without, from the very assemblies
+    /// this editor session has loaded — no path guessing, and no dependence
+    /// on the pipeline having the project's assemblies on file yet.
+    private static IEnumerable<string> EssentialReferenceAssemblies()
     {
         yield return typeof(object).Assembly.Location; // mscorlib
         yield return typeof(UnityEngine.Debug).Assembly.Location; // CoreModule
@@ -572,9 +627,7 @@ public static class MenSharpCompiler
         }
         // every engine module the editor has loaded (Animation, Audio,
         // ParticleSystem, ...): a script may name a type from any of them,
-        // and the Udon whitelist already decides what is callable. Each is a
-        // small assembly, parsed in parallel, so listing them all costs less
-        // than one user asking why HumanBodyBones does not resolve.
+        // and the Udon whitelist already decides what is callable
         foreach (System.Reflection.Assembly assembly in AppDomain.CurrentDomain.GetAssemblies())
         {
             string name = assembly.GetName().Name;

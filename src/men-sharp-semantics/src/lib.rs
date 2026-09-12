@@ -60,7 +60,7 @@ pub use symbol::{
 pub use types::conversions::{ConversionOperator, NumericKind};
 pub use types::external::{
     ExternalConstant, ExternalMember, ExternalMemberKind, ExternalTypeInfo, ExternalTypeKind,
-    ExternalTypes, NoExternalTypes,
+    ExternalTypes, INDEXER_LOOKUP_NAME, NoExternalTypes,
 };
 pub use types::lookup::{MemberCandidate, MemberOrigin, TypeSystem};
 pub use types::{
