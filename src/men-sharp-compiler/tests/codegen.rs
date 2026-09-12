@@ -12331,3 +12331,62 @@ fn an_integer_initializer_is_stored_as_the_field_type() {
     assert!(matches!(emulator.value_of("value"), Some(Value::Single(v)) if *v == 0.0));
     assert!(matches!(emulator.value_of("wide"), Some(Value::Double(v)) if *v == 2.0));
 }
+
+#[test]
+fn an_exported_field_initializer_does_not_overwrite_the_transferred_value() {
+    // `public int[] a = { }` is the inspector's array once set, applied by
+    // the Unity proxy after the heap loads. A startup initializer would wipe
+    // it back to empty on the first event (issue: Length came out 0 for an
+    // inspector-set array), so an exported field runs no initializer — its
+    // value is whatever was transferred.
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Thing : MenSharpBehaviour
+        {
+            public int[] items = { };
+            public int length;
+            public void Start() { length = items.Length; }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, "Thing").unwrap();
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let assembled = program.output.program.assemble().unwrap();
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    // what the proxy transfers for an inspector array of length 1
+    let transferred = std::rc::Rc::new(std::cell::RefCell::new(vec![Value::Int32(42)]));
+    assert!(emulator.set_value("items", Value::Array(transferred)));
+    emulator.run(&assembled, "_start").unwrap();
+    assert_eq!(int_of(&emulator, "length"), 1);
+}
+
+#[test]
+fn a_private_field_initializer_still_runs() {
+    // the flip side: a non-exported field has no proxy value, so its
+    // initializer must run — including one that is not a bakeable literal
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public class Thing : MenSharpBehaviour
+        {
+            private int[] items = { 4, 5, 6 };
+            public int length;
+            public int first;
+            public void Start() { length = items.Length; first = items[0]; }
+        }
+        "#,
+        "Thing",
+        "_start",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "length"), 3);
+    assert_eq!(int_of(&emulator, "first"), 4);
+}

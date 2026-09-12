@@ -60,6 +60,17 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         scaled = scale * 0.92f + 1f;
     }
 
+    // a public array field with an initializer, set in the inspector: the
+    // transferred value must survive, not be wiped by `= { }` at startup
+    // (issue: intArray.Length came out 0). And `private float = 1` on a
+    // field the proxy does not transfer must reach the VM as a Single.
+    public int[] items = { };
+    public int itemsLength;
+    private float one = 1;
+    public float oneProduct;
+    public void CountItems() { itemsLength = items.Length; }
+    public void ScaleOne() { oneProduct = one * 0.92f; }
+
     const string greeting = "Hello";
     public string greeted;
     public void Greet()

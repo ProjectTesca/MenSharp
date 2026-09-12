@@ -3958,14 +3958,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // public-variable values are applied *after* the heap loads, so a
         // baked default lets them win — runtime initializer code would
         // overwrite them on the first event
-        // `= { 1, 2 }` builds an array, so it always runs at startup
         let baked = match initializer {
             Some(InitializerValue::Expression(expression)) => {
                 literal_heap_init(expression, &udon_type)
             }
             _ => None,
         };
-        let runs_at_startup = initializer.is_some() && baked.is_none();
+        // an exported field is a public variable: its value is whatever the
+        // Unity proxy transfers — the inspector value, or the C# field
+        // initializer when untouched — applied to the heap after it loads.
+        // Startup initializer code would overwrite that on the first event
+        // (`int[] a = { }` wiped the inspector's array back to empty), so an
+        // exported field never runs one. A non-exported field (a private
+        // field, a static) has no proxy value, so it must.
+        let runs_at_startup = initializer.is_some() && baked.is_none() && !export;
 
         let sync = self.sync_mode_of(field);
         let slot = self.program.add_data(DataSymbol {

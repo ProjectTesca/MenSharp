@@ -143,6 +143,14 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("Scale");
         Assert.AreEqual(1f, smoke.GetProgramVariable("scaled"));
 
+        // a public array initializer must not overwrite the inspector value
+        smoke.RunProgram("CountItems");
+        Assert.AreEqual(1, smoke.GetProgramVariable("itemsLength"));
+
+        // `private float = 1` reaches the VM as a Single
+        smoke.RunProgram("ScaleOne");
+        Assert.AreEqual(0.92f, smoke.GetProgramVariable("oneProduct"));
+
         smoke.RunProgram("EnumOps");
         Assert.AreEqual(2, smoke.GetProgramVariable("splitCount"));
         Assert.AreEqual(1, smoke.GetProgramVariable("flagsValue"));
@@ -207,6 +215,10 @@ public class MenSharpIntegrationTests
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
         GameObject smokeObject = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke", "MenSharpRuntimeSmoke", Vector3.zero);
+        MenSharpTestScene.Assign(
+            MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke"),
+            "items",
+            new int[] { 42 });
         GameObject secondSmoke = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke2", "MenSharpRuntimeSmoke", Vector3.up * 4);
         GameObject targetObject = MenSharpTestScene.AddProxy("MenSharpRuntimeTarget", "MenSharpRuntimeTarget", Vector3.right * 4);
         GameObject callerObject = MenSharpTestScene.AddProxy("MenSharpRuntimeCaller", "MenSharpRuntimeCaller", Vector3.right * 8);
