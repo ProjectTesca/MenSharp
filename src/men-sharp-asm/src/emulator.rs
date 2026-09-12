@@ -288,6 +288,9 @@ impl Emulator {
                 // enums run as their underlying integral value here; only
                 // Unity can build the real boxed value
                 HeapInit::EnumValue { value, .. } => Value::Int32(*value as i32),
+                HeapInit::EnumArray { length, .. } => Value::Array(Rc::new(RefCell::new(
+                    (0..*length as i32).map(Value::Int32).collect(),
+                ))),
                 HeapInit::CodeAddress(label) => Value::UInt32(assembled.label_addresses[label.0]),
                 HeapInit::SelfReference => {
                     Value::SelfComponent(Rc::from(symbol.udon_type.as_str()))
@@ -1346,6 +1349,23 @@ impl Emulator {
                 };
                 let elements = vec![default; length.max(0) as usize];
                 self.heap[args[1]] = Value::Array(Rc::new(RefCell::new(elements)));
+                Ok(())
+            }
+            "SystemArray.__GetValue__SystemInt32__SystemObject" => {
+                let args = self.pop_arguments(3)?;
+                let array = self.heap[args[0]].as_array()?;
+                let index = self.heap[args[1]].as_i32()?;
+                let elements = array.borrow();
+                let value = elements
+                    .get(index.max(0) as usize)
+                    .filter(|_| index >= 0)
+                    .cloned()
+                    .ok_or(EmulatorError::IndexOutOfRange {
+                        index,
+                        length: elements.len(),
+                    })?;
+                drop(elements);
+                self.heap[args[2]] = value;
                 Ok(())
             }
             sig if is_array_signature(sig, "__Get__SystemInt32__") => {

@@ -454,6 +454,21 @@ impl ExternalTypes for ReferenceSet<'_> {
             .collect()
     }
 
+    fn enum_values(&self, id: ExternalTypeId) -> Vec<i64> {
+        let definition = self.type_definition(id);
+        definition
+            .fields
+            .iter()
+            .filter(|field| field.is_static())
+            .filter_map(|field| field.constant.as_ref())
+            .filter_map(|constant| match convert_constant(constant)? {
+                ExternalConstant::Int(value) => Some(value),
+                ExternalConstant::UInt(value) => i64::try_from(value).ok(),
+                _ => None,
+            })
+            .collect()
+    }
+
     fn members_named(&self, id: ExternalTypeId, name: &str) -> Vec<ExternalMember> {
         let definition = self.type_definition(id);
         let mut members = Vec::new();

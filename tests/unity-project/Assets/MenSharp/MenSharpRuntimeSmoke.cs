@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using MenSharp;
+using UnityEngine;
 
 // A deliberately small black-box test program. The Unity test runner invokes
 // its exported events through the SDK's real UdonBehaviour and reads these
@@ -18,6 +19,27 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // one count for every instance of this behaviour
     public static int shared;
     public int mine;
+
+    // a `const string` read from an event — came up null once the SDK's
+    // inspector had listed it as a public variable (issue)
+    // a number cast to an engine enum has to arrive at an extern as the
+    // boxed enum, not as the Int32 it was (issue: the Texture2D constructor
+    // halted the behaviour)
+    public int formatValue = 4; // TextureFormat.RGBA32
+    public string formatName;
+    public void MakeTexture()
+    {
+        TextureFormat format = (TextureFormat)formatValue;
+        var texture = new Texture2D(2, 2, format, false);
+        formatName = texture.format.ToString();
+    }
+
+    const string greeting = "Hello";
+    public string greeted;
+    public void Greet()
+    {
+        greeted = $"Start: {greeting}";
+    }
 
     public void RunShared()
     {

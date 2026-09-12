@@ -117,6 +117,16 @@ public class MenSharpIntegrationTests
         AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
         BuildRuntimeScene();
 
+        // what the SDK's UdonBehaviour inspector leaves behind for a symbol
+        // it finds no value for (and what a scene saved by an earlier
+        // compiler carries): a null public variable named after the const
+        {
+            UdonBehaviour udon = FindUdon("MenSharpRuntimeSmoke");
+            udon.publicVariables.RemoveVariable("greeting");
+            Assert.IsTrue(udon.publicVariables.TryAddVariable(
+                new VRC.Udon.Common.UdonVariable<string>("greeting", null)));
+        }
+
         yield return new EnterPlayMode();
         yield return null;
         yield return null;
@@ -124,6 +134,12 @@ public class MenSharpIntegrationTests
 
         UdonBehaviour smoke = FindUdon("MenSharpRuntimeSmoke");
         Assert.IsTrue(smoke.IsInitialized, "the SDK did not initialise the smoke UdonBehaviour");
+        smoke.RunProgram("Greet");
+        Assert.AreEqual("Start: Hello", smoke.GetProgramVariable("greeted"));
+
+        smoke.RunProgram("MakeTexture");
+        Assert.AreEqual("RGBA32", smoke.GetProgramVariable("formatName"));
+
         smoke.RunProgram("RunSync");
         Assert.AreEqual(true, smoke.GetProgramVariable("syncDone"));
         Assert.AreEqual(6, smoke.GetProgramVariable("syncResult"));

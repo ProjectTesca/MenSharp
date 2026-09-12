@@ -420,6 +420,7 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             case "String": return entry.value;
             case "Type": return ResolveType(entry.value);
             case "Enum": return DecodeEnum(entry.value);
+            case "EnumArray": return DecodeEnumArray(entry.value);
             default: return null;
         }
     }
@@ -440,6 +441,29 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             return null;
         }
         return Enum.ToObject(enumType, value);
+    }
+
+    /// `Namespace.EnumType#length` → the boxed values `0..length` of the
+    /// enum, indexed by value: how a program turns a number into an enum,
+    /// Udon having no `Enum.ToObject` of its own.
+    private static object DecodeEnumArray(string encoded)
+    {
+        int separator = encoded.LastIndexOf('#');
+        if (separator < 0)
+        {
+            return null;
+        }
+        Type enumType = ResolveType(encoded.Substring(0, separator));
+        if (enumType == null || !int.TryParse(encoded.Substring(separator + 1), out int length))
+        {
+            return null;
+        }
+        Array values = Array.CreateInstance(enumType, length);
+        for (int index = 0; index < length; index++)
+        {
+            values.SetValue(Enum.ToObject(enumType, index), index);
+        }
+        return values;
     }
 
     /// A `System.Type` by .NET full name. Udon passes a generic method's type

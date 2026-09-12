@@ -206,6 +206,7 @@ format_udon_has_no_tostring_string_for = "`{{...:{format}}}`: Udon has no `ToStr
 the_alignment_of_an_interpolated_hole_must = "the alignment of an interpolated hole must be a whole number written out, as in `{value,-8}`: a named constant or an expression is not accepted here yet"
 unary_is_not_available_on_udon_for = "unary `-` is not available on Udon for this operand type"
 a_static_field_cannot_be_udonsynced = "`{name}` cannot be both static and [UdonSynced]: a static field is shared by every behaviour, and a synced variable belongs to one"
+a_number_cannot_be_turned_into_a_display = "a number cannot be turned into a {display}: its values are not in the range Udon can hold (0 to 4095)"
 this_compound_assignment_is_not_supported_by = "this compound assignment is not supported by the Udon backend yet"
 this_expression_cannot_be_assigned_to = "this expression cannot be assigned to"
 this_member_cannot_be_assigned_to = "this member cannot be assigned to"

@@ -1020,6 +1020,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Some(wrapped) = self.sequence_of_array(ctx, source, from, to, &span) {
             return wrapped;
         }
+        // `(TextureFormat)formatValue`: an external enum is a boxed value of
+        // its own type, and an Int32 copied into its slot throws the moment
+        // an extern unboxes it
+        if let Some(id) = self.external_enum(to)
+            && self.external_enum(from) != Some(id)
+            && (self.numeric_rank(from).is_some() || self.external_enum(from).is_some())
+        {
+            return self.convert_to_external_enum(ctx, source, from, to, id, span);
+        }
         let from_name = self.extern_type_name(from);
         let to_name = self.extern_type_name(to);
         match (from_name, to_name) {
@@ -1119,6 +1128,92 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // reference casts and identity: values are untyped objects
             _ => source,
         }
+    }
+
+    /// A number as a value of an external enum. Udon has no `Enum.ToObject`,
+    /// so the program carries, per enum, an array of the boxed values
+    /// `0..length` (built by the Unity importer, indexed by value — every
+    /// combination of flags included) and reads the element the number
+    /// names. A number outside the array throws: C# would accept it, but
+    /// Udon has no value to give it.
+    fn convert_to_external_enum(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        source: DataId,
+        from: &Type,
+        to: &Type,
+        id: men_sharp_semantics::ExternalTypeId,
+        span: Range<usize>,
+    ) -> DataId {
+        // a negative member (TextureFormat keeps its retired formats as
+        // -127) has no place in the array: a number naming one throws
+        let highest = self.external.enum_values(id).into_iter().max();
+        let length = highest
+            .map(|highest| (highest.max(0) as u64 + 1).next_power_of_two())
+            .filter(|&length| length <= 4096);
+        let display = self.describe_type(to);
+        let Some(length) = length else {
+            self.error(
+                ctx,
+                Message::key("codegen.a_number_cannot_be_turned_into_a_display")
+                    .arg("display", display),
+                span,
+            );
+            return source;
+        };
+        let int32 = self.corlib_type("Int32");
+        let index = self.convert(ctx, source, from, &int32, span.clone());
+        let dotnet_type = self.external_type_display_name(id).to_string();
+        let table = self.constant(
+            "SystemArray",
+            &format!("enum-values:{dotnet_type}"),
+            HeapInit::EnumArray {
+                dotnet_type,
+                length: length as u32,
+            },
+        );
+        let zero = self.int_constant(0);
+        let limit = self.int_constant(length as i32);
+        let below = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_LessThan__SystemInt32_SystemInt32__SystemBoolean",
+            &[index, zero, below],
+            span.clone(),
+        );
+        let beyond = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_GreaterThanOrEqual__SystemInt32_SystemInt32__SystemBoolean",
+            &[index, limit, beyond],
+            span.clone(),
+        );
+        let invalid = self.fresh_label("enum_cast_invalid");
+        let valid = self.fresh_label("enum_cast_valid");
+        self.jump_if(below, invalid);
+        self.jump_if(beyond, invalid);
+        let udon_type = self.heap_type(to);
+        let out = self.temp(&udon_type);
+        self.call_extern(
+            ctx,
+            "SystemArray.__GetValue__SystemInt32__SystemObject",
+            &[table, index, out],
+            span.clone(),
+        );
+        self.program.code.push(Op::Jump(Target::Label(valid)));
+        self.program.code.push(Op::Label(invalid));
+        let message = self.string_constant(&format!(
+            "the number is outside what Udon can hold as a {display} (0 to {})",
+            length - 1
+        ));
+        self.throw_new(
+            ctx,
+            &["System", "InvalidCastException"],
+            Some(message),
+            span,
+        );
+        self.program.code.push(Op::Label(valid));
+        out
     }
 
     /// The `op_Implicit` that turns `from` into `to`, applied — with

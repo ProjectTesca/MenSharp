@@ -708,13 +708,20 @@ public static class MenSharpProxy
     }
 
     /// Copies the proxy's serialized instance fields into the UdonBehaviour's
-    /// public variable table — the values the Udon heap starts from.
+    /// public variable table — the values the Udon heap starts from. Every
+    /// other entry in the table goes: the runtime writes each entry over the
+    /// heap slot of the same name, whether the program exports it or not,
+    /// and the SDK's UdonBehaviour inspector (shown by Reveal) adds a null
+    /// entry for every exported symbol it finds no value for — which is how
+    /// a `const string` on a scene saved by an earlier compiler came up null.
     public static void TransferValues(MenSharpBehaviour proxy, UdonBehaviour udon)
     {
         IUdonVariableTable table = udon.publicVariables;
         var summary = new System.Text.StringBuilder();
+        var transferred = new HashSet<string>(StringComparer.Ordinal);
         foreach (FieldInfo field in SerializedFields(proxy.GetType()))
         {
+            transferred.Add(field.Name);
             object value = field.GetValue(proxy);
             Type valueType = field.FieldType;
             // what you drag in is a proxy component; what the program can talk
@@ -773,6 +780,15 @@ public static class MenSharpProxy
                 summary.Append(", ");
             }
             summary.Append(field.Name).Append('=').Append(value ?? "null");
+        }
+
+        foreach (string stale in new List<string>(table.VariableSymbols))
+        {
+            // the statics reference is wired after the transfer (WireStatics)
+            if (!transferred.Contains(stale) && stale != StaticsReferenceVariable)
+            {
+                table.RemoveVariable(stale);
+            }
         }
 
         // write the table back into its serialized byte form immediately, so

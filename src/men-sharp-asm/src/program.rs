@@ -67,6 +67,16 @@ pub enum HeapInit {
         dotnet_type: String,
         value: i64,
     },
+    /// The boxed values `0..length` of an enum, one per element, indexed by
+    /// value — what turns a number into an enum at run time, since Udon has
+    /// no `Enum.ToObject`. Built by the Unity importer like [`EnumValue`];
+    /// the slot is a `SystemArray`.
+    ///
+    /// [`EnumValue`]: HeapInit::EnumValue
+    EnumArray {
+        dotnet_type: String,
+        length: u32,
+    },
     CodeAddress(LabelId),
     /// The assembler's `this` literal. Udon has no `this` pointer and no
     /// extern that hands a program its own object, so self references are
@@ -630,6 +640,14 @@ impl Program {
                 HeapInit::EnumValue { dotnet_type, value } => {
                     out.push_str("Enum\", \"value\": ");
                     write_json_string(&mut out, &format!("{dotnet_type}#{value}"));
+                }
+                // `.NET full name # length`; the importer builds the array
+                HeapInit::EnumArray {
+                    dotnet_type,
+                    length,
+                } => {
+                    out.push_str("EnumArray\", \"value\": ");
+                    write_json_string(&mut out, &format!("{dotnet_type}#{length}"));
                 }
                 HeapInit::CodeAddress(label) => {
                     let _ = write!(

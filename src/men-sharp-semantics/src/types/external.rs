@@ -125,6 +125,12 @@ pub trait ExternalTypes: Sync {
     /// them (`Item` almost everywhere, `Chars` on `StringBuilder`).
     fn members_named(&self, id: ExternalTypeId, name: &str) -> Vec<ExternalMember>;
 
+    /// The values of an enum's members, in declaration order (empty for
+    /// anything but an enum, or when the provider has no constants).
+    fn enum_values(&self, _: ExternalTypeId) -> Vec<i64> {
+        Vec::new()
+    }
+
     /// A human-readable name (`UnityEngine.Debug`) for diagnostics.
     fn display_name(&self, id: ExternalTypeId) -> String;
 

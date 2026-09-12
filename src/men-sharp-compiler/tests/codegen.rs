@@ -12091,3 +12091,118 @@ fn a_shared_static_initializer_runs_before_the_field_it_needs_is_read() {
         assert_eq!(world_int(&world, instance, "twice"), 20, "{instance}");
     }
 }
+
+#[test]
+fn a_static_of_the_entry_class_is_named_but_not_exported() {
+    // `.export` makes a symbol a public variable, and the SDK's inspector
+    // fills every public variable it finds no value for with null — so a
+    // `const string` lost its "Hello" at load (issue). Statics keep their
+    // plain names, for GetProgramVariable and these tests, without the export.
+    let Some((program, _)) = build(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                const string s = "Hello";
+                public static int counter = 5;
+                public static string text;
+                public static void Main() { text = $"Start: {s} {counter}"; }
+            }
+        }
+        "#,
+    )]) else {
+        return;
+    };
+    let uasm = program.to_uasm().unwrap();
+    assert!(uasm.contains("    s: %SystemString"), "{uasm}");
+    assert!(uasm.contains("    counter: %SystemInt32"), "{uasm}");
+    assert!(!uasm.contains(".export s\n"), "{uasm}");
+    assert!(!uasm.contains(".export counter\n"), "{uasm}");
+    assert!(!uasm.contains(".export text\n"), "{uasm}");
+}
+
+#[test]
+fn a_const_string_field_reads_its_value_from_a_behaviour_event() {
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public class Thing : MenSharpBehaviour
+        {
+            const string s = "Hello";
+            public string plain;
+            public string interpolated;
+            public void Start()
+            {
+                plain = s;
+                interpolated = $"Start: {s}";
+            }
+        }
+        "#,
+        "Thing",
+        "_start",
+    ) else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "plain"), "Hello");
+    assert_eq!(string_of(&emulator, "interpolated"), "Start: Hello");
+}
+
+#[test]
+fn a_number_cast_to_an_external_enum_is_the_boxed_enum_value() {
+    // Udon has no Enum.ToObject: the program carries the enum's values as
+    // an array (built by the importer) and reads the one the number names.
+    // A number outside it throws instead of leaving an Int32 in the slot
+    // (issue: `new Texture2D(16, 16, (TextureFormat)formatValue, false)`
+    // halted the behaviour inside the extern).
+    let sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using System;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int one = 1;
+                public static int seven = 7;
+                public static bool matched;
+                public static string caught = "";
+                public static void Main()
+                {
+                    StringSplitOptions option = (StringSplitOptions)one;
+                    matched = option == StringSplitOptions.RemoveEmptyEntries;
+                    try
+                    {
+                        StringSplitOptions bad = (StringSplitOptions)seven;
+                        caught = bad.ToString();
+                    }
+                    catch (InvalidCastException e)
+                    {
+                        caught = "caught: " + e.Message;
+                    }
+                }
+            }
+        }
+        "#,
+    )];
+    let Some((program, assembled)) = build(sources) else {
+        return;
+    };
+    let meta = program.to_meta_json().unwrap();
+    assert!(
+        meta.contains("\"kind\": \"EnumArray\", \"value\": \"System.StringSplitOptions#4\""),
+        "{meta}"
+    );
+    let mut emulator = Emulator::new(&program, &assembled);
+    emulator.run(&assembled, "Main").unwrap();
+    assert!(
+        matches!(emulator.value_of("matched"), Some(Value::Boolean(true))),
+        "{:?}",
+        emulator.value_of("matched")
+    );
+    assert_eq!(
+        string_of(&emulator, "caught"),
+        "caught: the number is outside what Udon can hold as a System.StringSplitOptions (0 to 3)"
+    );
+}

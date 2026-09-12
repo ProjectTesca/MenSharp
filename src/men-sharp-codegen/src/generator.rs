@@ -814,10 +814,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.entry_file = Some(self.declaration_site(entry).0);
         self.entry = Some(entry);
 
-        // static fields of the entry class become exported, observable slots;
-        // on a behaviour, instance fields (and auto-properties) do too — the
-        // behaviour has exactly one instance, so its fields are the program's
-        // public variables
+        // static fields of the entry class become slots under their own
+        // names, observable from outside (tests, GetProgramVariable); on a
+        // behaviour, instance fields (and auto-properties) become the
+        // program's exported public variables — the behaviour has exactly
+        // one instance, so its fields are the program's
         self.collect_statics(entry, true);
         if self.entry_class.is_some() {
             self.collect_entry_instance_fields(entry);
@@ -3924,7 +3925,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         let udon_type = self.heap_type(&ty);
         let symbol = self.declarations.table.symbol(field);
-        let name = if export {
+        // a static (a `const` included) keeps its own name on the entry
+        // class but is never a public variable: nothing on the proxy
+        // serializes it, and the SDK's inspector fills every exported symbol
+        // it finds no value for with null — which then overwrote the baked
+        // initializer of a `const string` at load
+        let export = export && !symbol.is_static;
+        let on_entry = symbol
+            .parent
+            .is_some_and(|parent| Some(parent) == self.entry || self.entry_chain.contains(&parent));
+        let name = if export || (symbol.is_static && on_entry) {
             symbol.name.to_string()
         } else {
             format!("static_{}", self.symbol_path(field))
