@@ -5269,6 +5269,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             LiteralExpression::InterpolatedString(interpolated) => {
                 let mut current: Option<DataId> = None;
+                // `$"{s}"` with `s` a null string: the hole's text is `s`
+                // itself, and with nothing to concatenate it to, nothing turns
+                // that null into the "" C# gives. Noted here, fixed after the
+                // loop, once it is known to be the only piece.
+                let mut sole_string_hole = false;
                 for part in interpolated.parts {
                     let piece_slot = match part {
                         InterpolationPart::Text(text) => {
@@ -5308,12 +5313,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                                 hole.span.clone(),
                             );
                             // `{x,-8}` — padded to the field width
-                            self.align_to_width(ctx, text, hole)
+                            let padded = self.align_to_width(ctx, text, hole);
+                            sole_string_hole = current.is_none()
+                                && padded == slot
+                                && self.extern_type_name(&ty).as_deref() == Some("SystemString");
+                            padded
                         }
                     };
                     current = Some(match current {
                         None => piece_slot,
                         Some(previous) => {
+                            sole_string_hole = false;
                             let out = self.temp("SystemString");
                             self.call_extern(
                                 ctx,
@@ -5325,9 +5335,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         }
                     });
                 }
-                let slot = current.unwrap_or_else(|| {
-                    self.constant("SystemString", "", HeapInit::Str(String::new()))
-                });
+                let slot = match current {
+                    Some(value) if sole_string_hole => {
+                        // Concat treats a null as "", which is the result C#
+                        // gives for an interpolated null
+                        let empty = self.string_constant("");
+                        let out = self.temp("SystemString");
+                        self.call_extern(
+                            ctx,
+                            "SystemString.__Concat__SystemString_SystemString__SystemString",
+                            &[value, empty, out],
+                            interpolated.span.clone(),
+                        );
+                        out
+                    }
+                    Some(value) => value,
+                    None => self.constant("SystemString", "", HeapInit::Str(String::new())),
+                };
                 Piece::Value(slot, self.corlib_type("String"))
             }
             other => {

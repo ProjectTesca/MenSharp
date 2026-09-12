@@ -373,6 +373,46 @@ fn strings_and_interpolation() {
 }
 
 #[test]
+fn interpolating_a_null_string_alone_gives_an_empty_string() {
+    // `$"{s}"` is `s` with nothing to concatenate it to, and C# still turns
+    // a null into "" (issue: a const string null came out null)
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class Program
+            {
+                public static string fromConst;
+                public static string fromVariable;
+                public static string fromNull;
+                public static string joined;
+                public static string other;
+                public static void Main()
+                {
+                    const string value = null;
+                    string variable = null;
+                    string text = "x";
+                    fromConst = $"{value}";
+                    fromVariable = $"{variable}";
+                    fromNull = $"{null}";
+                    joined = $"{variable}{value}";
+                    other = $"{text}";
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(string_of(&emulator, "fromConst"), "");
+    assert_eq!(string_of(&emulator, "fromVariable"), "");
+    assert_eq!(string_of(&emulator, "fromNull"), "");
+    assert_eq!(string_of(&emulator, "joined"), "");
+    assert_eq!(string_of(&emulator, "other"), "x");
+}
+
+#[test]
 fn recursion_just_works() {
     // static frames plus a save/restore stack woven in around the calls that
     // can come back — no attribute, no configuration, like C#
