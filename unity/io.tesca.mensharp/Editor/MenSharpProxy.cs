@@ -41,11 +41,19 @@ public static class MenSharpProxy
 
     static MenSharpProxy()
     {
+        // Unity is still recording its own "Add <component>" undo step while
+        // this runs, and that step's after-state takes in everything on the
+        // GameObject at the time it closes — the backing UdonBehaviour
+        // included, so one Ctrl+Z removes both and Ctrl+Y brings both back.
+        // Registering an undo step of our own here would nest a second
+        // record inside Unity's: undoing them in turn restored the proxy from
+        // the inner record's before-state as a half-dead object — unpaired,
+        // and with no Remove Component.
         ObjectFactory.componentWasAdded += component =>
         {
             if (component is MenSharpBehaviour proxy)
             {
-                SyncPairs(proxy.gameObject);
+                SyncPairs(proxy.gameObject, quiet: false, undoable: false);
             }
         };
 
@@ -65,11 +73,15 @@ public static class MenSharpProxy
         // hideFlags only persist when the scene is saved, so re-run the sync
         // whenever the editor (re)loads, a scene opens, or the hierarchy
         // changes (which also catches proxies added by drag-and-drop, where
-        // componentWasAdded may not fire) — the pairing is self-repairing
-        EditorApplication.delayCall += SyncAllInOpenScenes;
+        // componentWasAdded may not fire) — the pairing is self-repairing.
+        // Repairs made on load are not undo steps: nothing the user did is
+        // being undone. Those made after a hierarchy change join the step
+        // that changed it (see ScheduleSweep).
+        EditorApplication.delayCall += () => SyncAllInOpenScenes(undoable: false);
         UnityEditor.SceneManagement.EditorSceneManager.sceneOpened +=
-            (_, _) => SyncAllInOpenScenes();
-        EditorApplication.hierarchyChanged += ScheduleSweep;
+            (_, _) => SyncAllInOpenScenes(undoable: false);
+        EditorApplication.hierarchyChanged += () => ScheduleSweep(repair: false);
+        Undo.undoRedoPerformed += () => ScheduleSweep(repair: true);
     }
 
     // ------------------------------------------------------------ visibility
@@ -90,7 +102,7 @@ public static class MenSharpProxy
             }
             EditorPrefs.SetBool(RevealPreference, value);
             Menu.SetChecked(RevealMenu, value);
-            SyncAllInOpenScenes();
+            SyncAllInOpenScenes(undoable: false);
             UnityEditorInternal.InternalEditorUtility.RepaintAllViews();
         }
     }
@@ -108,22 +120,51 @@ public static class MenSharpProxy
     // ----------------------------------------------------------------- sweeps
 
     private static bool sweepPending;
+    private static bool sweepRepairs;
+    private static int sweepGroup;
 
-    private static void ScheduleSweep()
+    /// Runs the sync once the current editor event is over. The backing
+    /// UdonBehaviours are derived from the proxies, so what the sweep does
+    /// must never be an undo step of its own: Ctrl+Z would then remove only
+    /// the UdonBehaviour, the next sweep would put it back, and the user's
+    /// own change could never be undone. So either the sweep's changes are
+    /// collapsed into the undo step that changed the hierarchy (a proxy
+    /// dropped onto a GameObject, a component removed), or — after an undo
+    /// or redo, where the scene is expected to be consistent already and
+    /// anything left to fix is not the user's doing — they are made without
+    /// an undo record at all (`repair`).
+    private static void ScheduleSweep(bool repair)
     {
         if (sweepPending)
         {
+            sweepRepairs |= repair;
             return;
         }
         sweepPending = true;
-        EditorApplication.delayCall += () =>
-        {
-            sweepPending = false;
-            SyncAllInOpenScenes();
-        };
+        sweepRepairs = repair;
+        sweepGroup = Undo.GetCurrentGroup();
+        EditorApplication.delayCall += RunPendingSweep;
     }
 
-    private static void SyncAllInOpenScenes()
+    /// The sweep itself; separate from the scheduling so tests can run it
+    /// without waiting for the editor loop.
+    private static void RunPendingSweep()
+    {
+        if (!sweepPending)
+        {
+            return;
+        }
+        sweepPending = false;
+        if (sweepRepairs)
+        {
+            SyncAllInOpenScenes(undoable: false);
+            return;
+        }
+        SyncAllInOpenScenes(undoable: true);
+        Undo.CollapseUndoOperations(sweepGroup);
+    }
+
+    private static void SyncAllInOpenScenes(bool undoable)
     {
         if (EditorApplication.isPlayingOrWillChangePlaymode)
         {
@@ -131,7 +172,7 @@ public static class MenSharpProxy
         }
         foreach (GameObject target in PairingTargetsInOpenScenes())
         {
-            SyncPairs(target, quiet: true);
+            SyncPairs(target, quiet: true, undoable: undoable);
         }
     }
 
@@ -378,9 +419,11 @@ public static class MenSharpProxy
     /// one behaviour for another, or deleting the component, used to leave the
     /// old UdonBehaviour behind — hidden, and still executing its program.
     ///
-    /// `undoable` is off while a scene is being processed for play or a build:
-    /// that scene is a throwaway copy, and registering undo steps against it
-    /// would outlive the copy itself.
+    /// `undoable` is off while a scene is being processed for play or a build
+    /// (that scene is a throwaway copy, and registering undo steps against it
+    /// would outlive the copy itself), inside Unity's own add-component undo
+    /// step (which already covers what this changes), and for repairs that
+    /// undo nothing the user did — see ScheduleSweep.
     public static List<(MenSharpBehaviour proxy, UdonBehaviour udon)> SyncPairs(
         GameObject target, bool quiet = false, bool undoable = true)
     {
