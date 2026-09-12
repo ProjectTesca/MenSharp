@@ -89,7 +89,7 @@ fn bool_literal(expression: &Expression) -> Option<bool> {
 /// The value of an integer literal, as an enum member initializer is
 /// allowed to be. Anything else is `None`: the member is then a case of
 /// its own, which is right unless it aliases another.
-fn integer_literal_value(expression: &Expression) -> Option<i64> {
+pub(super) fn integer_literal_value(expression: &Expression) -> Option<i64> {
     let Expression::Primary(primary) = expression else {
         return None;
     };

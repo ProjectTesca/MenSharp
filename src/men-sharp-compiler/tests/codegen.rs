@@ -12206,3 +12206,68 @@ fn a_number_cast_to_an_external_enum_is_the_boxed_enum_value() {
         "caught: the number is outside what Udon can hold as a System.StringSplitOptions (0 to 3)"
     );
 }
+
+#[test]
+fn operators_on_an_external_enum_compute_on_the_int_and_box_the_result() {
+    // one rule for every operator with an external enum on a side: the
+    // underlying Int32 does the work, and a result that is the enum goes
+    // back through its value table — `|`, `&`, `~`, `+ 1`, `++`, `- other`,
+    // and the literal 0 C# lets stand for the enum's zero
+    let Some(emulator) = run(
+        r#"
+        using System;
+        namespace Game
+        {
+            public class Program
+            {
+                public static int combined;
+                public static int cleared;
+                public static int next;
+                public static int stepped;
+                public static int difference;
+                public static bool hasTrim;
+                public static bool noneIsZero;
+                public static bool ordered;
+                public static int plainComplement;
+                public static void Main()
+                {
+                    StringSplitOptions both = StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries;
+                    combined = (int)both;
+                    cleared = (int)(both & ~StringSplitOptions.TrimEntries);
+                    next = (int)(StringSplitOptions.None + 1);
+                    StringSplitOptions walker = StringSplitOptions.None;
+                    walker++;
+                    walker += 1;
+                    stepped = (int)walker;
+                    difference = StringSplitOptions.TrimEntries - StringSplitOptions.RemoveEmptyEntries;
+                    hasTrim = (both & StringSplitOptions.TrimEntries) != 0;
+                    noneIsZero = StringSplitOptions.None == 0;
+                    ordered = StringSplitOptions.RemoveEmptyEntries < StringSplitOptions.TrimEntries;
+                    plainComplement = ~5;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "combined"), 3);
+    assert_eq!(int_of(&emulator, "cleared"), 1);
+    assert_eq!(int_of(&emulator, "next"), 1);
+    assert_eq!(int_of(&emulator, "stepped"), 2);
+    assert_eq!(int_of(&emulator, "difference"), 1);
+    assert!(matches!(
+        emulator.value_of("hasTrim"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("noneIsZero"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("ordered"),
+        Some(Value::Boolean(true))
+    ));
+    assert_eq!(int_of(&emulator, "plainComplement"), -6);
+}

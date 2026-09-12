@@ -34,6 +34,23 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         formatName = texture.format.ToString();
     }
 
+    // operators on engine/corlib enums: computed on the int, boxed back —
+    // and the result has to be what an extern accepts
+    public int splitCount;
+    public int flagsValue;
+    public bool hasFlag;
+    public string keyName;
+    public void EnumOps()
+    {
+        StringSplitOptions options = StringSplitOptions.None | StringSplitOptions.RemoveEmptyEntries;
+        splitCount = "a,,b".Split(new[] { ',' }, options).Length;
+        flagsValue = (int)(options & ~StringSplitOptions.None);
+        hasFlag = (options & StringSplitOptions.RemoveEmptyEntries) != 0;
+        KeyCode key = KeyCode.A + 1;
+        Input.GetKey(key);
+        keyName = key.ToString();
+    }
+
     const string greeting = "Hello";
     public string greeted;
     public void Greet()

@@ -84,11 +84,18 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             AssignmentOperator::RightShift => BinaryOperator::RightShift,
                             _ => BinaryOperator::UnsignedRightShift,
                         };
+                        let zero_literal = assignment
+                            .value
+                            .as_ref()
+                            .ok()
+                            .and_then(super::exhaustive::integer_literal_value)
+                            == Some(0);
                         let result = self.binary_type(
                             operator,
                             target.clone(),
                             value_type,
                             literal,
+                            zero_literal,
                             assignment.span.clone(),
                             Some(EntityID::from(*assignment)),
                         );
@@ -158,18 +165,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             Expression::Binary(binary) => {
                 let left = self.check_expression(&binary.left);
-                let (right, literal) = match &binary.right {
+                let (right, literal, zero_literal) = match &binary.right {
                     Ok(right) => (
                         self.check_expression(right),
                         Self::is_integer_literal(right) || Self::is_integer_literal(&binary.left),
+                        super::exhaustive::integer_literal_value(right) == Some(0)
+                            || super::exhaustive::integer_literal_value(&binary.left) == Some(0),
                     ),
-                    Err(()) => (Type::Error, false),
+                    Err(()) => (Type::Error, false, false),
                 };
                 self.binary_type(
                     binary.operator.value,
                     left,
                     right,
                     literal,
+                    zero_literal,
                     binary.span.clone(),
                     Some(EntityID::from(*binary)),
                 )

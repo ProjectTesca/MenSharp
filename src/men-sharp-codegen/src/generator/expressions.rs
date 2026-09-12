@@ -1145,24 +1145,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         id: men_sharp_semantics::ExternalTypeId,
         span: Range<usize>,
     ) -> DataId {
+        let int32 = self.corlib_type("Int32");
+        let index = self.convert(ctx, source, from, &int32, span.clone());
+        self.box_external_enum(ctx, index, to, id, span)
+            .unwrap_or(source)
+    }
+
+    /// The enum's value table (see convert_to_external_enum) and its length,
+    /// or `None` (reported) for an enum the table cannot cover.
+    fn external_enum_table(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        ty: &Type,
+        id: men_sharp_semantics::ExternalTypeId,
+        span: Range<usize>,
+    ) -> Option<(DataId, u64)> {
         // a negative member (TextureFormat keeps its retired formats as
         // -127) has no place in the array: a number naming one throws
         let highest = self.external.enum_values(id).into_iter().max();
         let length = highest
             .map(|highest| (highest.max(0) as u64 + 1).next_power_of_two())
             .filter(|&length| length <= 4096);
-        let display = self.describe_type(to);
         let Some(length) = length else {
+            let display = self.describe_type(ty);
             self.error(
                 ctx,
                 Message::key("codegen.a_number_cannot_be_turned_into_a_display")
                     .arg("display", display),
                 span,
             );
-            return source;
+            return None;
         };
-        let int32 = self.corlib_type("Int32");
-        let index = self.convert(ctx, source, from, &int32, span.clone());
         let dotnet_type = self.external_type_display_name(id).to_string();
         let table = self.constant(
             "SystemArray",
@@ -1172,6 +1185,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 length: length as u32,
             },
         );
+        Some((table, length))
+    }
+
+    /// An Int32 slot as the boxed value of the external enum `ty`, through
+    /// the enum's value table; out of the table's range, an
+    /// InvalidCastException.
+    fn box_external_enum(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        index: DataId,
+        ty: &Type,
+        id: men_sharp_semantics::ExternalTypeId,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        let (table, length) = self.external_enum_table(ctx, ty, id, span.clone())?;
+        let display = self.describe_type(ty);
         let zero = self.int_constant(0);
         let limit = self.int_constant(length as i32);
         let below = self.temp("SystemBoolean");
@@ -1192,7 +1221,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let valid = self.fresh_label("enum_cast_valid");
         self.jump_if(below, invalid);
         self.jump_if(beyond, invalid);
-        let udon_type = self.heap_type(to);
+        let udon_type = self.heap_type(ty);
         let out = self.temp(&udon_type);
         self.call_extern(
             ctx,
@@ -1213,7 +1242,82 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             span,
         );
         self.program.code.push(Op::Label(valid));
-        out
+        Some(out)
+    }
+
+    /// An operand of an operator on an external enum as an Int32: the boxed
+    /// enum unboxed, or a number converted.
+    fn enum_operand_as_int32(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        (slot, ty): (DataId, &Type),
+        span: Range<usize>,
+    ) -> DataId {
+        if self.external_enum(ty).is_some() {
+            let out = self.temp("SystemInt32");
+            self.call_extern(
+                ctx,
+                "SystemConvert.__ToInt32__SystemObject__SystemInt32",
+                &[slot, out],
+                span,
+            );
+            return out;
+        }
+        let int32 = self.corlib_type("Int32");
+        self.convert(ctx, slot, ty, &int32, span)
+    }
+
+    /// `flags | Flag.B`, `format + 1`, `(flags & Flag.B) != 0`, `a - b`: an
+    /// operator with an external enum on a side, computed on the
+    /// underlying Int32 — and, when the result is the enum, boxed back
+    /// through its value table (see convert_to_external_enum). One rule
+    /// for every operator, so no operation can leave an Int32 in an
+    /// enum-typed slot.
+    #[allow(clippy::too_many_arguments)]
+    fn external_enum_operator(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        operator: BinaryOperator,
+        name: &str,
+        left: (DataId, &Type),
+        right: (DataId, &Type),
+        result_type: &Type,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        use BinaryOperator::*;
+        let operands = [
+            self.enum_operand_as_int32(ctx, left, span.clone()),
+            self.enum_operand_as_int32(ctx, right, span.clone()),
+        ];
+        let comparison = matches!(
+            operator,
+            Equal | NotEqual | LessThan | GreaterThan | LessThanEqual | GreaterThanEqual
+        );
+        let extern_result = if comparison {
+            "SystemBoolean"
+        } else {
+            "SystemInt32"
+        };
+        let signature = format!("SystemInt32.__{name}__SystemInt32_SystemInt32__{extern_result}");
+        if !self.nodes.has_signature(&signature) {
+            self.error(
+                ctx,
+                Message::key("codegen.operator_name_is_not_available_on_udon").arg("name", name),
+                span,
+            );
+            return None;
+        }
+        let out = self.temp(extern_result);
+        self.call_extern(
+            ctx,
+            &signature,
+            &[operands[0], operands[1], out],
+            span.clone(),
+        );
+        if let Some(id) = self.external_enum(result_type) {
+            return self.box_external_enum(ctx, out, result_type, id, span);
+        }
+        Some(out)
     }
 
     /// The `op_Implicit` that turns `from` into `to`, applied — with
@@ -1565,6 +1669,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         } else {
             result_type.clone()
         };
+
+        // an external enum under an arithmetic or bitwise operator, or
+        // against a number: on the underlying Int32, boxed back when the
+        // result is the enum
+        let left_enum = self.external_enum(left.1);
+        let right_enum = self.external_enum(right.1);
+        let same_enum_comparison = left_enum.is_some()
+            && left_enum == right_enum
+            && matches!(
+                operator,
+                Equal | NotEqual | LessThan | GreaterThan | LessThanEqual | GreaterThanEqual
+            );
+        if (left_enum.is_some() || right_enum.is_some()) && !same_enum_comparison {
+            return self.external_enum_operator(
+                ctx,
+                operator,
+                name,
+                left,
+                right,
+                result_type,
+                span,
+            );
+        }
 
         // an external enum is a boxed value: `==`/`!=` go through
         // Object.Equals (value equality for same-type enums, where
@@ -2002,6 +2129,56 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 Some(out)
             }
             UnaryOperator::Plus => Some(operand),
+            // `~x`: Udon has no complement extern, but xor with all ones is
+            // the same thing. On an external enum the result is boxed back
+            // through its value table, so the complement is taken within
+            // the bits the table covers — which is all `flags & ~Flag.A`
+            // ever looks at
+            UnaryOperator::BitwiseNot => {
+                if let Some(id) = self.external_enum(operand_type) {
+                    let (_, length) =
+                        self.external_enum_table(ctx, operand_type, id, span.clone())?;
+                    let value =
+                        self.enum_operand_as_int32(ctx, (operand, operand_type), span.clone());
+                    let mask = self.int_constant(length as i32 - 1);
+                    let flipped = self.temp("SystemInt32");
+                    self.call_extern(
+                        ctx,
+                        "SystemInt32.__op_LogicalXor__SystemInt32_SystemInt32__SystemInt32",
+                        &[value, mask, flipped],
+                        span.clone(),
+                    );
+                    return self.box_external_enum(ctx, flipped, operand_type, id, span);
+                }
+                let name = if self.source_enum(result_type).is_some() {
+                    "SystemInt32".to_string()
+                } else {
+                    self.extern_type_name(result_type)?
+                };
+                let ones = match name.as_str() {
+                    "SystemInt32" => self.int_constant(-1),
+                    "SystemInt64" => self.constant("SystemInt64", "-1", HeapInit::Int64(-1)),
+                    "SystemUInt32" => {
+                        self.constant("SystemUInt32", "4294967295", HeapInit::UInt32(u32::MAX))
+                    }
+                    _ => {
+                        self.error(
+                            ctx,
+                            Message::key("codegen.this_operator_is_not_supported_by_the"),
+                            span,
+                        );
+                        return None;
+                    }
+                };
+                let out = self.temp(&name);
+                self.call_extern(
+                    ctx,
+                    &format!("{name}.__op_LogicalXor__{name}_{name}__{name}"),
+                    &[operand, ones, out],
+                    span,
+                );
+                Some(out)
+            }
             _ => {
                 self.error(
                     ctx,
@@ -2036,7 +2213,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
         }
         match unary.operator.value {
-            UnaryOperator::Not | UnaryOperator::Minus | UnaryOperator::Plus => {
+            UnaryOperator::Not
+            | UnaryOperator::Minus
+            | UnaryOperator::Plus
+            | UnaryOperator::BitwiseNot => {
                 let operand = self.lower_expression(ctx, operand_expression)?;
                 let operand_type = self.type_of(ctx, operand_expression);
                 let result_type = self.type_of(ctx, whole);

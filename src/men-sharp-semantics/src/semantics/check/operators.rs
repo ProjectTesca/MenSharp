@@ -116,12 +116,16 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
+    /// `literal`: one operand is an integer literal; `zero_literal`: one is
+    /// the literal `0`, which converts implicitly to any enum (§10.2.4).
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn binary_type(
         &mut self,
         operator: BinaryOperator,
         left: Type,
         right: Type,
         literal: bool,
+        zero_literal: bool,
         span: Range<usize>,
         node: Option<EntityID>,
     ) -> Type {
@@ -152,8 +156,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 {
                     return self.corlib("Boolean");
                 }
-                let underlying =
-                    self.binary_type(operator, inner_left, inner_right, literal, span, node);
+                let underlying = self.binary_type(
+                    operator,
+                    inner_left,
+                    inner_right,
+                    literal,
+                    zero_literal,
+                    span,
+                    node,
+                );
                 return match (operator, underlying) {
                     (_, Type::Error) => Type::Error,
                     (
@@ -254,13 +265,25 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         // enums
         if system.is_enum_type(&left) || system.is_enum_type(&right) {
+            // `(flags & Flag.A) != 0`, `flags == 0`: the literal 0 stands
+            // for the enum's zero on the other side
+            let against_zero = zero_literal
+                && (system.is_enum_type(&left) != system.is_enum_type(&right))
+                && (system.numeric_kind(&left).is_some() || system.numeric_kind(&right).is_some());
+            let enum_side = if system.is_enum_type(&left) {
+                left.clone()
+            } else {
+                right.clone()
+            };
             match operator {
+                Equal | NotEqual if against_zero => return self.corlib("Boolean"),
                 LessThan | GreaterThan | LessThanEqual | GreaterThanEqual => {
-                    if left == right {
+                    if left == right || against_zero {
                         return self.corlib("Boolean");
                     }
                 }
                 BitwiseAnd | BitwiseOr | BitwiseXor if left == right => return left,
+                BitwiseAnd | BitwiseOr | BitwiseXor if against_zero => return enum_side,
                 Add | Subtract => {
                     if system.is_enum_type(&left) && system.numeric_kind(&right).is_some() {
                         return left;
