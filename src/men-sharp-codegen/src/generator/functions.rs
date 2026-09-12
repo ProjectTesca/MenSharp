@@ -722,7 +722,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 continue;
             };
-            if let Some(value) = self.owned_value(ctx, initializer) {
+            // converted to the field's type: `float inner = 4;` stores a
+            // Single, not the Int32 the literal is
+            let field_type = match self.signatures.members.get(&member) {
+                Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => {
+                    self.substitute(ty, &ctx.key.bindings)
+                }
+                _ => continue,
+            };
+            if let Some(value) = self.owned_value_as(ctx, initializer, &field_type) {
                 let index = self.int_constant(slot_index as i32);
                 self.set_element(ctx, object, index, value, 0..0);
             }

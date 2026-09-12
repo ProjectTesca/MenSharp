@@ -12271,3 +12271,63 @@ fn operators_on_an_external_enum_compute_on_the_int_and_box_the_result() {
     ));
     assert_eq!(int_of(&emulator, "plainComplement"), -6);
 }
+
+#[test]
+fn an_integer_initializer_is_stored_as_the_field_type() {
+    // `float value = 0;` — the literal is an Int32, the field a Single; the
+    // slot has to hold a Single, or the first `value * 0.92f` halts the VM
+    // (issue). Instance, static, plain-class and local fields alike.
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public class Holder { public float inner = 4; }
+        public class Thing : MenSharpBehaviour
+        {
+            public float value = 0;
+            public float negative = -3;
+            public double wide = 2;
+            public long big = 5;
+            static float shared = 1;
+            public float product;
+            public float negativeProduct;
+            public double wideProduct;
+            public long bigProduct;
+            public float sharedProduct;
+            public float innerProduct;
+            public float localProduct;
+            public void Start()
+            {
+                float local = 7;
+                product = value * 0.92f;
+                negativeProduct = negative * 0.5f;
+                wideProduct = wide * 1.5;
+                bigProduct = big * 2L;
+                sharedProduct = shared * 0.5f;
+                innerProduct = new Holder().inner * 0.5f;
+                localProduct = local * 0.5f;
+            }
+        }
+        "#,
+        "Thing",
+        "_start",
+    ) else {
+        return;
+    };
+    let single = |name: &str| match emulator.value_of(name) {
+        Some(Value::Single(value)) => *value,
+        other => panic!("{name} = {other:?}"),
+    };
+    assert_eq!(single("product"), 0.0);
+    assert_eq!(single("negativeProduct"), -1.5);
+    assert!(matches!(emulator.value_of("wideProduct"), Some(Value::Double(v)) if *v == 3.0));
+    assert!(matches!(
+        emulator.value_of("bigProduct"),
+        Some(Value::Int64(10))
+    ));
+    assert_eq!(single("sharedProduct"), 0.5);
+    assert_eq!(single("innerProduct"), 2.0);
+    assert_eq!(single("localProduct"), 3.5);
+    // the literal defaults are baked as the field's own type
+    assert!(matches!(emulator.value_of("value"), Some(Value::Single(v)) if *v == 0.0));
+    assert!(matches!(emulator.value_of("wide"), Some(Value::Double(v)) if *v == 2.0));
+}

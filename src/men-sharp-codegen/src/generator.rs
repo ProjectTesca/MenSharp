@@ -1571,7 +1571,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         self.emit_function_start_mark(&ctx);
         let value = match written {
-            InitializerValue::Expression(value) => self.lower_expression(&mut ctx, value),
+            // converted to the field's type: `float value = 0;` stores a
+            // Single, not the Int32 the literal is
+            InitializerValue::Expression(value) => self.owned_value_as(&mut ctx, value, &ty),
             // `static int[] Steps = { 1, 2 };`
             InitializerValue::Nested(nested) => {
                 self.lower_array_shorthand(&mut ctx, &ty, nested, nested.span())
@@ -4013,6 +4015,30 @@ fn literal_heap_init(expression: &Expression, udon_type: &str) -> Option<HeapIni
             let value = raw.parse::<i64>().ok()?;
             let value = if negated { -value } else { value };
             i32::try_from(value).ok().map(HeapInit::Int32)
+        }
+        // an integer literal converts implicitly to the wider types: the
+        // default is then of the slot's type, as `float value = 0;` means
+        (LiteralExpression::Integer(text), "SystemInt64") => {
+            let raw: String = text.value.chars().filter(|c| *c != '_').collect();
+            let value = raw.parse::<i64>().ok()?;
+            Some(HeapInit::Int64(if negated { -value } else { value }))
+        }
+        (LiteralExpression::Integer(text), "SystemUInt32") if !negated => {
+            let raw: String = text.value.chars().filter(|c| *c != '_').collect();
+            raw.parse::<u32>().ok().map(HeapInit::UInt32)
+        }
+        (LiteralExpression::Integer(text), "SystemSingle") => {
+            let raw: String = text.value.chars().filter(|c| *c != '_').collect();
+            let value = raw.parse::<i64>().ok()?;
+            let value = if negated { -value } else { value };
+            // exactly representable, as C# folds it
+            (value.unsigned_abs() <= 1 << 24).then_some(HeapInit::Single(value as f32))
+        }
+        (LiteralExpression::Integer(text), "SystemDouble") => {
+            let raw: String = text.value.chars().filter(|c| *c != '_').collect();
+            let value = raw.parse::<i64>().ok()?;
+            let value = if negated { -value } else { value };
+            (value.unsigned_abs() <= 1 << 53).then_some(HeapInit::Double(value as f64))
         }
         (LiteralExpression::Real(text), "SystemSingle") => {
             let raw: String = text.value.chars().filter(|c| *c != '_').collect();

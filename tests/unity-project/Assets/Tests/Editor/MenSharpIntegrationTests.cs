@@ -140,6 +140,9 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("MakeTexture");
         Assert.AreEqual("RGBA32", smoke.GetProgramVariable("formatName"));
 
+        smoke.RunProgram("Scale");
+        Assert.AreEqual(1f, smoke.GetProgramVariable("scaled"));
+
         smoke.RunProgram("EnumOps");
         Assert.AreEqual(2, smoke.GetProgramVariable("splitCount"));
         Assert.AreEqual(1, smoke.GetProgramVariable("flagsValue"));

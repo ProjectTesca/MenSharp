@@ -51,6 +51,15 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         keyName = key.ToString();
     }
 
+    // `float x = 0;` on a field the proxy does not transfer (private): the
+    // slot must hold a Single, or the multiplication halts the VM (issue)
+    private float scale = 0;
+    public float scaled;
+    public void Scale()
+    {
+        scaled = scale * 0.92f + 1f;
+    }
+
     const string greeting = "Hello";
     public string greeted;
     public void Greet()
