@@ -768,7 +768,8 @@ fn every_behaviour_in_the_compilation_is_discovered() {
     let programs =
         compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
     let names: Vec<&str> = programs.iter().map(|p| p.class_path.as_str()).collect();
-    assert_eq!(names, vec!["Game.Door", "Game.Lamp"]);
+    // ... plus the holder of the statics they share
+    assert_eq!(names, vec!["Game.Door", "Game.Lamp", "MenSharp.Statics"]);
     for program in &programs {
         assert!(
             program.output.errors.is_empty(),
@@ -1610,7 +1611,11 @@ fn an_udonsharp_behaviour_is_reached_by_its_export_names() {
     }
     // the UdonSharp program itself is not something M# compiles
     let found = compile_behaviours(sources());
-    assert_eq!(found, vec!["Game.Switch".to_string()], "{found:?}");
+    assert_eq!(
+        found,
+        vec!["Game.Switch".to_string(), "MenSharp.Statics".to_string()],
+        "{found:?}"
+    );
 }
 
 fn exported_int(emulator: &Emulator, name: &str) -> i32 {
@@ -11485,4 +11490,391 @@ fn a_binary_operand_keeps_its_value_across_a_delegate_call_that_writes_it() {
         return;
     };
     assert_eq!(int_of(&emulator, "result"), 4);
+}
+
+// ------------------------------------------------------------ shared statics
+// (a static field is one per compilation, however many behaviour instances
+// read it — through the holder program every behaviour's `__mensharp_statics`
+// names, the way the Unity package wires a scene)
+
+/// Compiles `source` once and wires the named instances of its behaviours
+/// into one world with the statics holder; an instance's index is its
+/// behaviour reference (the holder is index 0).
+fn statics_world(source: &str, instances: &[(&str, &str)]) -> Option<men_sharp_asm::World> {
+    let dir = dotnet_shared_dir()?;
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
+    let program_of = |class_path: &str| {
+        programs
+            .iter()
+            .find(|program| program.class_path == class_path)
+            .unwrap_or_else(|| panic!("no program {class_path}"))
+    };
+
+    let mut world = men_sharp_asm::World::new();
+    let holder = program_of("MenSharp.Statics");
+    let assembled = holder.output.program.assemble().unwrap();
+    let emulator = Emulator::new(&holder.output.program, &assembled);
+    let holder_index = world.add("MenSharp.Statics", assembled, emulator);
+    for (name, class_path) in instances {
+        let program = program_of(class_path);
+        assert!(
+            program.output.errors.is_empty(),
+            "codegen errors for {class_path}: {:#?}",
+            program.output.errors
+        );
+        let assembled = program.output.program.assemble().unwrap();
+        let mut emulator = Emulator::new(&program.output.program, &assembled);
+        // a program with no shared static to reach has no reference either
+        emulator.set_value("__mensharp_statics", Value::Behaviour(holder_index));
+        world.add(name, assembled, emulator);
+    }
+    Some(world)
+}
+
+fn world_int(world: &men_sharp_asm::World, instance: &str, name: &str) -> i32 {
+    let index = world.index_of(instance).unwrap();
+    int_of(world.program(index), name)
+}
+
+#[test]
+fn a_static_field_is_one_for_every_behaviour_instance() {
+    let source = r#"
+        using MenSharp;
+        namespace Game
+        {
+            public static class Counter
+            {
+                public static int count;
+                public static int Next() { count++; return count; }
+            }
+            public class Clicker : MenSharpBehaviour
+            {
+                public int seen;
+                public void Interact() { seen = Counter.Next(); }
+            }
+            public class Resetter : MenSharpBehaviour
+            {
+                public void Interact() { Counter.count = 10; }
+            }
+        }
+        "#;
+    let Some(mut world) = statics_world(
+        source,
+        &[
+            ("a", "Game.Clicker"),
+            ("b", "Game.Clicker"),
+            ("r", "Game.Resetter"),
+        ],
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let (a, b, r) = (
+        world.index_of("a").unwrap(),
+        world.index_of("b").unwrap(),
+        world.index_of("r").unwrap(),
+    );
+    world.raise(a, "_interact").unwrap();
+    world.raise(b, "_interact").unwrap();
+    assert_eq!(world_int(&world, "a", "seen"), 1);
+    assert_eq!(world_int(&world, "b", "seen"), 2);
+    // another class writes the same field
+    world.raise(r, "_interact").unwrap();
+    world.raise(a, "_interact").unwrap();
+    assert_eq!(world_int(&world, "a", "seen"), 11);
+}
+
+#[test]
+fn a_behaviour_classs_own_static_field_is_shared_too() {
+    let source = r#"
+        using MenSharp;
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour
+            {
+                public static int opened;
+                public int mine;
+                public void Interact() { opened++; mine = opened; }
+            }
+        }
+        "#;
+    let Some(mut world) = statics_world(source, &[("a", "Game.Door"), ("b", "Game.Door")]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let (a, b) = (world.index_of("a").unwrap(), world.index_of("b").unwrap());
+    world.raise(a, "_interact").unwrap();
+    world.raise(b, "_interact").unwrap();
+    world.raise(b, "_interact").unwrap();
+    assert_eq!(world_int(&world, "a", "mine"), 1);
+    assert_eq!(world_int(&world, "b", "mine"), 3);
+}
+
+#[test]
+fn shared_static_initializers_and_constructors_run_once_and_objects_are_shared() {
+    let source = r#"
+        using MenSharp;
+        namespace Game
+        {
+            public static class Cfg
+            {
+                public static int calls;
+                public static int value = Bump();
+                public static int[] table = { 1, 2 };
+                public static string name = "cfg";
+                static Cfg() { calls += 100; }
+                static int Bump() { calls++; return 7; }
+            }
+            public class Reader : MenSharpBehaviour
+            {
+                public int calls;
+                public int value;
+                public int second;
+                public string name;
+                public void Interact()
+                {
+                    calls = Cfg.calls;
+                    value = Cfg.value;
+                    second = Cfg.table[1];
+                    name = Cfg.name;
+                }
+            }
+            public class Writer : MenSharpBehaviour
+            {
+                public void Interact() { Cfg.table[1] = 9; Cfg.name = "changed"; }
+            }
+        }
+        "#;
+    let Some(mut world) = statics_world(
+        source,
+        &[
+            ("a", "Game.Reader"),
+            ("b", "Game.Reader"),
+            ("w", "Game.Writer"),
+        ],
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let (a, b, w) = (
+        world.index_of("a").unwrap(),
+        world.index_of("b").unwrap(),
+        world.index_of("w").unwrap(),
+    );
+    world.raise(a, "_interact").unwrap();
+    world.raise(w, "_interact").unwrap();
+    world.raise(b, "_interact").unwrap();
+    // the initializer and the constructor ran in one program only
+    assert_eq!(world_int(&world, "a", "calls"), 101);
+    assert_eq!(world_int(&world, "b", "calls"), 101);
+    assert_eq!(world_int(&world, "a", "value"), 7);
+    assert_eq!(world_int(&world, "b", "value"), 7);
+    // the array is one object, and the string one field
+    assert_eq!(world_int(&world, "a", "second"), 2);
+    assert_eq!(world_int(&world, "b", "second"), 9);
+    assert_eq!(string_of(world.program(a), "name"), "cfg");
+    assert_eq!(string_of(world.program(b), "name"), "changed");
+}
+
+#[test]
+fn constants_and_immutable_readonly_statics_stay_the_programs_own() {
+    let source = r#"
+        using MenSharp;
+        namespace Game
+        {
+            public static class Limits
+            {
+                public const int Max = 3;
+                public static readonly int Floor = 4;
+                public static readonly string Tag = "t";
+            }
+            public class User : MenSharpBehaviour
+            {
+                public int seen;
+                public string tag;
+                public void Interact() { seen = Limits.Max + Limits.Floor; tag = Limits.Tag; }
+            }
+        }
+        "#;
+    let Some(mut world) = statics_world(source, &[("a", "Game.User")]) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let a = world.index_of("a").unwrap();
+    world.raise(a, "_interact").unwrap();
+    assert_eq!(world_int(&world, "a", "seen"), 7);
+    assert_eq!(string_of(world.program(a), "tag"), "t");
+    // nothing of theirs is shared, so no program ever made the array
+    let holder = world.index_of("MenSharp.Statics").unwrap();
+    assert!(
+        matches!(
+            world.program(holder).value_of("__statics"),
+            Some(Value::Null)
+        ),
+        "{:?}",
+        world.program(holder).value_of("__statics")
+    );
+    assert!(world.program(a).value_of("__mensharp_statics").is_none());
+}
+
+#[test]
+fn a_behaviour_without_a_holder_keeps_statics_of_its_own() {
+    // no scene, no holder: the program makes an array for itself, and its
+    // statics work as they always did
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        namespace Game
+        {
+            public static class Counter
+            {
+                public static int count;
+                public static int Next() { count++; return count; }
+            }
+            public class Clicker : MenSharpBehaviour
+            {
+                public int seen;
+                public void Interact() { Counter.Next(); seen = Counter.Next(); }
+            }
+        }
+        "#,
+        "Game.Clicker",
+        "_interact",
+    ) else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert_eq!(int_of(&emulator, "seen"), 2);
+}
+
+#[test]
+fn a_static_field_of_a_delegate_type_is_reported() {
+    let source = r#"
+        using System;
+        using MenSharp;
+        namespace Game
+        {
+            public static class Bus
+            {
+                public static Action OnPing;
+                public static event Action Pinged;
+                public static void Ping() { OnPing?.Invoke(); Pinged?.Invoke(); }
+            }
+            public class Node : MenSharpBehaviour
+            {
+                public int hits;
+                public void Interact() { Bus.OnPing += () => { hits++; }; Bus.Pinged += () => { hits++; }; Bus.Ping(); }
+            }
+        }
+        "#;
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let Some(program) = compile_behaviour(sources, "Game.Node") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let messages: Vec<String> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.to_string())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("Game.Bus.OnPing") && m.contains("delegate type")),
+        "{messages:?}"
+    );
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("Game.Bus.Pinged") && m.contains("delegate type")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_static_synced_field_is_reported() {
+    let source = r#"
+        using MenSharp;
+        using UdonSharp;
+        namespace Game
+        {
+            public class Score : MenSharpBehaviour
+            {
+                [UdonSynced] public static int total;
+                public void Interact() { total++; }
+            }
+        }
+        "#;
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let Some(program) = compile_behaviour(sources, "Game.Score") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let messages: Vec<String> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.to_string())
+        .collect();
+    assert!(
+        messages
+            .iter()
+            .any(|m| m.contains("Game.Score.total") && m.contains("[UdonSynced]")),
+        "{messages:?}"
+    );
+}
+
+#[test]
+fn a_shared_static_initializer_runs_before_the_field_it_needs_is_read() {
+    // layout order is by name — `Cfg.twice` before `Other.Value` — but the
+    // read of `Other.Value` inside `twice`'s initializer initializes it first
+    let source = r#"
+        using MenSharp;
+        namespace Game
+        {
+            public static class Cfg
+            {
+                public static int seed;
+                public static int twice = Other.Value * 2;
+                static Cfg() { seed = 42 + twice; }
+            }
+            public static class Other
+            {
+                public static int Value = Compute();
+                static int Compute() { return 10; }
+            }
+            public class Reader : MenSharpBehaviour
+            {
+                public int seed;
+                public int twice;
+                public void Interact() { seed = Cfg.seed; twice = Cfg.twice; }
+            }
+        }
+        "#;
+    let Some(mut world) = statics_world(source, &[("a", "Game.Reader"), ("b", "Game.Reader")])
+    else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    let (a, b) = (world.index_of("a").unwrap(), world.index_of("b").unwrap());
+    world.raise(b, "_interact").unwrap();
+    world.raise(a, "_interact").unwrap();
+    for instance in ["a", "b"] {
+        assert_eq!(world_int(&world, instance, "seed"), 62, "{instance}");
+        assert_eq!(world_int(&world, instance, "twice"), 20, "{instance}");
+    }
 }

@@ -14,6 +14,16 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     public bool asyncDone;
     public int asyncResult;
 
+    // one count for every instance of this behaviour
+    public static int shared;
+    public int mine;
+
+    public void RunShared()
+    {
+        shared++;
+        mine = shared;
+    }
+
     public void RunSync()
     {
         var values = new List<int> { 1, 2, 3, 4 };

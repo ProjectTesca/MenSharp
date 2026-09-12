@@ -109,9 +109,9 @@ public class VerifyDelegates : MenSharpBehaviour
         int seen = 0;
         door.Opened += () => { hits++; };
         DlHandler h = t => { seen += t; };
-        DlDoor.Any += h;
+        door.Any += h;
         door.Open(); door.Open();
-        DlDoor.Any -= h;
+        door.Any -= h;
         door.Open();
         var quiet = new DlDoor();
         quiet.Open();
@@ -163,7 +163,9 @@ public class DlHolder<T>
 public class DlDoor
 {
     public event Action Opened;
-    public static event DlHandler Any;
+    // (an instance event: a static delegate is one program's code, so a
+    // static delegate field is a compile error)
+    public event DlHandler Any;
     public int Times;
     public void Open() { Times++; Opened?.Invoke(); Any?.Invoke(Times); }
 }

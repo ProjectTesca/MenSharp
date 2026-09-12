@@ -8,4 +8,7 @@ pub mod externs;
 pub mod generator;
 
 pub use externs::{UdonNodes, mangle_dotnet_name};
-pub use generator::{CodegenError, CodegenOutput, behaviour_classes, generate};
+pub use generator::{
+    CodegenError, CodegenOutput, STATICS_HOLDER_PATH, STATICS_HOLDER_VARIABLE,
+    STATICS_REFERENCE_VARIABLE, behaviour_classes, generate, generate_statics_holder,
+};

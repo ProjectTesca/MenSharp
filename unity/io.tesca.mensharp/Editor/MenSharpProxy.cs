@@ -155,6 +155,123 @@ public static class MenSharpProxy
         {
             TransferValues(proxy, udon);
         }
+        WireStatics(pairs, undoable);
+    }
+
+    // ---------------------------------------------------------------- statics
+
+    /// The scene object carrying the array every behaviour's static fields
+    /// live in — see the compiler's shared statics. Udon gives each
+    /// UdonBehaviour a heap of its own, so a static field would otherwise be
+    /// one per instance; instead every program of a compilation shares one
+    /// array, kept by a program of no code (`MenSharp.Statics`) on this
+    /// object, one per scene, made here on demand. Each backing UdonBehaviour
+    /// is told where it is through `__mensharp_statics`; a behaviour
+    /// instantiated at run time from a prefab finds the object by its name.
+    public const string StaticsHolderName = "MenSharp.Statics";
+    private const string StaticsReferenceVariable = "__mensharp_statics";
+
+    /// The holder's UdonBehaviour is not a backing behaviour: it has no proxy,
+    /// and the sweep must not clear it away as an orphan.
+    private static bool IsStaticsHolder(UdonBehaviour udon)
+    {
+        return udon != null
+            && udon.programSource is MenSharpProgramAsset program
+            && program.name == StaticsHolderName;
+    }
+
+    private static void WireStatics(
+        List<(MenSharpBehaviour proxy, UdonBehaviour udon)> pairs, bool undoable)
+    {
+        var holders = new Dictionary<Scene, UdonBehaviour>();
+        foreach ((MenSharpBehaviour _, UdonBehaviour udon) in pairs)
+        {
+            if (udon == null)
+            {
+                continue;
+            }
+            Scene scene = udon.gameObject.scene;
+            if (!holders.TryGetValue(scene, out UdonBehaviour holder))
+            {
+                holder = EnsureStaticsHolder(scene, undoable);
+                holders[scene] = holder;
+            }
+            if (holder != null)
+            {
+                SetBehaviourVariable(udon, StaticsReferenceVariable, holder);
+            }
+        }
+    }
+
+    /// The scene's holder, made when the scene has none yet.
+    private static UdonBehaviour EnsureStaticsHolder(Scene scene, bool undoable)
+    {
+        MenSharpProgramAsset program = MenSharpSources.FindProgram(StaticsHolderName);
+        if (program == null)
+        {
+            Debug.LogWarning(
+                "MenSharp: the statics holder program (MenSharp.Statics) has not been "
+                + "compiled yet — static fields are one per behaviour instance until the "
+                + "next compile.");
+            return null;
+        }
+        foreach (GameObject root in scene.GetRootGameObjects())
+        {
+            if (root.name != StaticsHolderName)
+            {
+                continue;
+            }
+            UdonBehaviour existing = root.GetComponent<UdonBehaviour>();
+            if (existing == null)
+            {
+                continue;
+            }
+            if (existing.programSource != program)
+            {
+                if (undoable)
+                {
+                    Undo.RecordObject(existing, "Pair MenSharp statics holder");
+                }
+                existing.programSource = program;
+                EditorUtility.SetDirty(existing);
+            }
+            ApplyVisibility(existing);
+            ApplySerializedProgram(existing, program);
+            root.hideFlags = Reveal ? HideFlags.None : HideFlags.HideInHierarchy;
+            return existing;
+        }
+
+        var holderObject = new GameObject(StaticsHolderName);
+        SceneManager.MoveGameObjectToScene(holderObject, scene);
+        if (undoable)
+        {
+            Undo.RegisterCreatedObjectUndo(holderObject, "Add MenSharp statics holder");
+        }
+        holderObject.hideFlags = Reveal ? HideFlags.None : HideFlags.HideInHierarchy;
+        UdonBehaviour holder = holderObject.AddComponent<UdonBehaviour>();
+        holder.programSource = program;
+        ApplyVisibility(holder);
+        ApplySerializedProgram(holder, program);
+        EditorUtility.SetDirty(holderObject);
+        return holder;
+    }
+
+    /// Sets one behaviour-typed public variable, the way TransferValues sets
+    /// a proxy's fields.
+    private static void SetBehaviourVariable(UdonBehaviour udon, string name, UdonBehaviour value)
+    {
+        IUdonVariableTable table = udon.publicVariables;
+        table.RemoveVariable(name);
+        if (!table.TryAddVariable(new UdonVariable<UdonBehaviour>(name, value)))
+        {
+            Debug.LogWarning($"MenSharp: could not set public variable {name} on {udon.name}", udon);
+            return;
+        }
+        if (udon is UnityEngine.ISerializationCallbackReceiver receiver)
+        {
+            receiver.OnBeforeSerialize();
+        }
+        EditorUtility.SetDirty(udon);
     }
 
     /// Every GameObject in a scene that either carries a MenSharp proxy or one
@@ -235,7 +352,7 @@ public static class MenSharpProxy
     /// touched — least of all removed.
     private static bool IsBackingBehaviour(UdonBehaviour udon)
     {
-        if (udon == null)
+        if (udon == null || IsStaticsHolder(udon))
         {
             return false;
         }

@@ -2319,8 +2319,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     && (member.kind != SymbolKind::Property || self.is_auto_property(symbol))
                 {
                     let export = self.is_public_variable(symbol);
-                    let slot = self.ensure_static(symbol, export);
-                    return Place::Slot(slot, member_type);
+                    return self.static_place(ctx, symbol, export, member_type, span);
                 }
                 // a member of *another* behaviour: two programs share no
                 // memory, so the only way across is Udon's by-name access
@@ -2343,8 +2342,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 match member.kind {
                     SymbolKind::Field | SymbolKind::Event if member.is_static => {
-                        let slot = self.ensure_static(symbol, false);
-                        Place::Slot(slot, member_type)
+                        self.static_place(ctx, symbol, false, member_type, span)
                     }
                     SymbolKind::Field | SymbolKind::Event => {
                         let Some(layout) = self.layout_of(&declaring) else {

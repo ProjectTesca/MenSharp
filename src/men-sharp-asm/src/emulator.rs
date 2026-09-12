@@ -1441,6 +1441,12 @@ impl Emulator {
                 self.heap[args[2]] = Value::Str(Rc::from(padded.as_str()));
                 Ok(())
             }
+            // ---- the scene: there is none, so nothing is found in it ----
+            "UnityEngineGameObject.__Find__SystemString__UnityEngineGameObject" => {
+                let args = self.pop_arguments(2)?;
+                self.heap[args[1]] = Value::Null;
+                Ok(())
+            }
             // ---- Debug ----
             "UnityEngineDebug.__LogError__SystemObject__SystemVoid" => {
                 let args = self.pop_arguments(1)?;

@@ -442,7 +442,7 @@ impl Compiler {
     ) -> Vec<UdonBehaviourProgram> {
         timescope::scope!("generate programs");
         let class_paths = men_sharp_codegen::behaviour_classes(declarations, signatures);
-        self.pool.install(|| {
+        let mut programs: Vec<UdonBehaviourProgram> = self.pool.install(|| {
             class_paths
                 .into_par_iter()
                 .map(|class_path| {
@@ -457,7 +457,16 @@ impl Compiler {
                     UdonBehaviourProgram { class_path, output }
                 })
                 .collect()
-        })
+        });
+        // the holder of the static fields the behaviours share: one more
+        // program, wherever there is at least one behaviour to share them
+        if !programs.is_empty() {
+            programs.push(UdonBehaviourProgram {
+                class_path: men_sharp_codegen::STATICS_HOLDER_PATH.to_string(),
+                output: men_sharp_codegen::generate_statics_holder(),
+            });
+        }
+        programs
     }
 
     /// Assembles every program that generated without errors, in parallel:

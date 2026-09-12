@@ -40,8 +40,8 @@ use men_sharp_diagnostics::Message;
 use men_sharp_parser::ast::{
     AccessorKind, Argument, ArgumentModifier, ArgumentValue, AssignmentOperator, BinaryOperator,
     Block, EntityID, Expression, ForInitializer, FunctionBody, InitializerValue, InterpolationPart,
-    LiteralExpression, PrimaryExpression, PrimaryLeft, PrimaryRight, Statement, TypeRefBase,
-    UnaryOperator,
+    LiteralExpression, Modifier, PrimaryExpression, PrimaryLeft, PrimaryRight, Statement,
+    TypeRefBase, UnaryOperator,
 };
 use men_sharp_semantics::types::ExternalTypeId;
 use men_sharp_semantics::{
@@ -105,6 +105,11 @@ pub fn generate(
         static_init_emitted: HashSet::default(),
         static_init_phase: false,
         static_constructors: Vec::new(),
+        shared: None,
+        static_storage_cache: HashMap::default(),
+        shared_slot: None,
+        shared_owner: None,
+        shared_reported: HashSet::default(),
         layouts: HashMap::default(),
         type_order: Vec::new(),
         exception_state: None,
@@ -438,6 +443,20 @@ struct Generator<'a, 'ast> {
     /// Every static constructor in the compilation, in declaration order;
     /// the static initializer runs them after the field initializers.
     static_constructors: Vec<FunctionKey>,
+    /// The static fields every behaviour shares, once computed — see
+    /// [`Self::shared_statics`].
+    shared: Option<SharedStatics>,
+    /// Where each static field lives, once decided; `sync_mode_of` reports
+    /// a misspelt mode, so the decision is made once per field.
+    static_storage_cache: HashMap<SymbolId, StaticStorage>,
+    /// `__statics`: this program's reference to the shared array.
+    shared_slot: Option<DataId>,
+    /// `__statics_owner`: whether this program made the array, and so runs
+    /// the shared fields' initializers; set while the static initializer is
+    /// being emitted.
+    shared_owner: Option<DataId>,
+    /// Static fields whose storage was reported (a delegate, a synced one).
+    shared_reported: HashSet<SymbolId>,
     layouts: HashMap<Type, Layout>,
     type_order: Vec<Type>,
     /// The heap slots exceptions travel in: the exception itself and the
@@ -1388,6 +1407,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let true_constant = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
         self.copy(true_constant, initialized);
 
+        // the array of shared statics: found, or made — and then the maker
+        // runs their initializers, below, which every other program skips
+        if self.entry_class.is_some() && !self.shared_statics().fields.is_empty() {
+            self.emit_shared_statics_prologue();
+        }
+
         // an initializer's expression may meet further static fields; those
         // join the list as it is walked (and are emitted inline where met,
         // see `ensure_static`), so this is an index loop, not an iterator
@@ -1403,10 +1428,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.static_init_phase = false;
 
         // then every static constructor body (§15.12): after its class's
-        // field initializers — all of them ran above — and once
+        // field initializers — all of them ran above — and once: a class of
+        // the user's has shared statics, so only the program that made the
+        // array runs its constructor; the corlib's statics are each
+        // program's own, so their constructors run everywhere
         let constructors = self.static_constructors.clone();
         for key in constructors {
             let (file, span) = self.declaration_site(key.symbol);
+            let guard = (self.shared_owner.is_some() && !self.is_corlib_file(file))
+                .then(|| self.begin_owner_guard());
             let mut ctx = Ctx {
                 key: key.clone(),
                 file,
@@ -1422,6 +1452,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 iterator_state: None,
             };
             self.call_function(&mut ctx, &key, None, &[], &[], span);
+            if let Some(skip) = guard {
+                self.end_owner_guard(skip);
+            }
         }
         self.program.code.push(Op::JumpIndirect(init_return));
     }
@@ -1479,11 +1512,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let Some(written) = &declarator.initializer else {
             return;
         };
-        let slot = self.statics[&field];
         let ty = match self.signatures.members.get(&field) {
             Some(MemberSignature::Field(ty)) => ty.clone(),
             _ => Type::Error,
         };
+        let span = declarator.span.clone();
+        let shared = self.static_storage(field) == StaticStorage::Shared;
 
         let mut ctx = Ctx {
             key: FunctionKey {
@@ -1498,26 +1532,455 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             this_type: None,
             loop_stack: Vec::new(),
             result: None,
-            return_slot: slot, // unused
+            return_slot: DataId(0), // unused
             caught: Vec::new(),
             async_state: None,
             iterator_state: None,
         };
+        // a shared field is initialized by the program that made the array
+        let guard = shared.then(|| self.begin_owner_guard());
+        let place = if shared {
+            self.static_place(&ctx, field, false, ty.clone(), span.clone())
+        } else {
+            Place::Slot(self.statics[&field], ty.clone())
+        };
         self.emit_function_start_mark(&ctx);
-        match written {
-            InitializerValue::Expression(value) => {
-                if let Some(value_slot) = self.lower_expression(&mut ctx, value) {
-                    let _ = ty;
-                    self.copy(value_slot, slot);
-                }
-            }
+        let value = match written {
+            InitializerValue::Expression(value) => self.lower_expression(&mut ctx, value),
             // `static int[] Steps = { 1, 2 };`
             InitializerValue::Nested(nested) => {
-                if let Some(array) =
-                    self.lower_array_shorthand(&mut ctx, &ty, nested, nested.span())
-                {
-                    self.copy(array, slot);
+                self.lower_array_shorthand(&mut ctx, &ty, nested, nested.span())
+            }
+        };
+        if let Some(value) = value {
+            self.write_place(&mut ctx, place, value, span);
+        }
+        if let Some(skip) = guard {
+            self.end_owner_guard(skip);
+        }
+    }
+
+    // ------------------------------------------------------ shared statics
+    //
+    // Udon gives every UdonBehaviour a heap of its own, so a static field
+    // lowered to a heap slot is one per behaviour instance — `count++` in
+    // three instances counts three separate things. C# says there is one.
+    //
+    // So every behaviour of a compilation shares one `object[]`: element
+    // `i + 1` is the `i`th static field in a layout every program computes
+    // the same way (the fields sorted by name), element 0 the layout's id.
+    // The array lives in the *holder*, a program with one exported variable
+    // (`generate_statics_holder`) that the Unity package puts on a scene
+    // object and names in each program's `__mensharp_statics`. A program's
+    // first event fetches the array from there, or — when it is the first
+    // to ask — makes it, publishes it, and runs the fields' initializers and
+    // the static constructors; every other program finds it made. A field
+    // access is then an element read or write, what a class field costs.
+    //
+    // Without a holder (no scene object, the emulator) a program makes an
+    // array of its own and the statics are its own: the single-program
+    // semantics of before. What stays a slot of the program's own: `const`
+    // and immutable `static readonly` fields (no one can tell), the
+    // corlib's statics (the scheduler's queues are per program by design),
+    // and every static of a plain-class compilation, which is one program.
+
+    /// Where a static field lives — cached, since deciding reads attributes.
+    fn static_storage(&mut self, field: SymbolId) -> StaticStorage {
+        if let Some(&storage) = self.static_storage_cache.get(&field) {
+            return storage;
+        }
+        let storage = self.decide_static_storage(field);
+        self.static_storage_cache.insert(field, storage);
+        storage
+    }
+
+    fn decide_static_storage(&mut self, field: SymbolId) -> StaticStorage {
+        if self.entry_class.is_none() {
+            return StaticStorage::Local;
+        }
+        let symbol = self.declarations.table.symbol(field);
+        if !symbol.is_static || !matches!(symbol.kind, SymbolKind::Field | SymbolKind::Event) {
+            return StaticStorage::Local;
+        }
+        let Some(site) = symbol.declarations.first() else {
+            return StaticStorage::Local;
+        };
+        if self.declarations.is_foreign(site.file) || self.is_corlib_file(site.file) {
+            return StaticStorage::Local;
+        }
+        if symbol.kind == SymbolKind::Event {
+            return StaticStorage::Delegate;
+        }
+        let modifiers: &[men_sharp_parser::ast::Spanned<Modifier>] = match &site.syntax {
+            SyntaxRef::Field { field, .. } => field.modifiers,
+            _ => &[],
+        };
+        let has = |modifier: Modifier| modifiers.iter().any(|written| written.value == modifier);
+        if has(Modifier::Const) {
+            return StaticStorage::Local;
+        }
+        let ty = match self.signatures.members.get(&field) {
+            Some(MemberSignature::Field(ty)) => ty.clone(),
+            _ => return StaticStorage::Local,
+        };
+        if has(Modifier::Readonly) && self.is_immutable_value(&ty) {
+            return StaticStorage::Local;
+        }
+        if self.is_delegate_type(&ty) {
+            return StaticStorage::Delegate;
+        }
+        if self.sync_mode_of(field).is_some() {
+            return StaticStorage::Synced;
+        }
+        StaticStorage::Shared
+    }
+
+    /// A value no program can change in place: a number, a string, an enum.
+    /// A `static readonly` of such a type reads the same from every
+    /// program's own copy.
+    fn is_immutable_value(&self, ty: &Type) -> bool {
+        if self.source_enum(ty).is_some() || self.external_enum(ty).is_some() {
+            return true;
+        }
+        matches!(
+            self.extern_type_name(ty).as_deref(),
+            Some(
+                "SystemBoolean"
+                    | "SystemChar"
+                    | "SystemString"
+                    | "SystemByte"
+                    | "SystemSByte"
+                    | "SystemInt16"
+                    | "SystemUInt16"
+                    | "SystemInt32"
+                    | "SystemUInt32"
+                    | "SystemInt64"
+                    | "SystemUInt64"
+                    | "SystemSingle"
+                    | "SystemDouble"
+                    | "SystemDecimal"
+            )
+        )
+    }
+
+    /// Whether a file is one of the corlib's — sources the compiler ships,
+    /// named `corlib/...` by the compiler crate.
+    fn is_corlib_file(&self, file: FileId) -> bool {
+        self.declarations
+            .sources
+            .get(file.0 as usize)
+            .is_some_and(|source| source.name.starts_with("corlib/"))
+    }
+
+    /// The shared statics and their layout, computed once: every static
+    /// field of the compilation that `static_storage` shares, in name order,
+    /// so that every program of the compilation lays the array out alike.
+    fn shared_statics(&mut self) -> &SharedStatics {
+        if self.shared.is_none() {
+            let candidates: Vec<SymbolId> = self
+                .declarations
+                .table
+                .iter()
+                .filter(|(_, entry)| entry.is_static && entry.kind == SymbolKind::Field)
+                .map(|(id, _)| id)
+                .collect();
+            let mut fields: Vec<(String, SymbolId)> = Vec::new();
+            for field in candidates {
+                if self.static_storage(field) == StaticStorage::Shared {
+                    fields.push((self.symbol_path(field), field));
                 }
+            }
+            fields.sort_by(|a, b| a.0.cmp(&b.0));
+            // FNV-1a over the layout: a program compiled against another
+            // layout must not read this array as its own
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            let mut index_of = HashMap::default();
+            for (position, (path, field)) in fields.iter().enumerate() {
+                index_of.insert(*field, position + 1);
+                let ty = match self.signatures.members.get(field) {
+                    Some(MemberSignature::Field(ty)) => ty.clone(),
+                    _ => Type::Error,
+                };
+                let udon_type = self.heap_type(&ty);
+                for byte in format!("{path}:{udon_type}\n").bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            self.shared = Some(SharedStatics {
+                fields: fields.into_iter().map(|(_, field)| field).collect(),
+                index_of,
+                id: format!("mensharp-statics:{hash:016x}"),
+            });
+        }
+        self.shared.as_ref().expect("computed above")
+    }
+
+    /// `__statics`: this program's reference to the shared array.
+    fn shared_statics_slot(&mut self) -> DataId {
+        if let Some(slot) = self.shared_slot {
+            return slot;
+        }
+        let slot = self.program.add_data(DataSymbol {
+            name: "__statics".into(),
+            udon_type: "SystemObjectArray".into(),
+            init: HeapInit::Null,
+            export: false,
+            sync: None,
+        });
+        self.shared_slot = Some(slot);
+        slot
+    }
+
+    /// The place a static (or a behaviour's own instance) field is read and
+    /// written at: its element of the shared array, or its slot.
+    pub(super) fn static_place(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        field: SymbolId,
+        export: bool,
+        ty: Type,
+        span: Range<usize>,
+    ) -> Place {
+        match self.static_storage(field) {
+            StaticStorage::Shared => {
+                // met while the static initializer is being emitted (by
+                // another field's initializer): initialized right here,
+                // ahead of the read being lowered — C#'s "initialized before
+                // first use", as `ensure_static` does for a slot
+                if self.static_init_phase && self.static_init_emitted.insert(field) {
+                    let file = self.declaration_site(field).0;
+                    self.emit_static_field_initializer(field, file);
+                }
+                let position = self.shared_statics().index_of[&field];
+                let object = self.shared_statics_slot();
+                let index = self.int_constant(position as i32);
+                Place::Field { object, index, ty }
+            }
+            storage => {
+                if storage != StaticStorage::Local && self.shared_reported.insert(field) {
+                    let name = self.display_path(field);
+                    let key = match storage {
+                        StaticStorage::Delegate => {
+                            "codegen.a_static_field_of_a_delegate_type_is_not"
+                        }
+                        _ => "codegen.a_static_field_cannot_be_udonsynced",
+                    };
+                    self.error(ctx, Message::key(key).arg("name", name), span);
+                }
+                Place::Slot(self.ensure_static(field, export), ty)
+            }
+        }
+    }
+
+    /// Opens a stretch of the static initializer only the program that made
+    /// the shared array runs; `end_owner_guard` closes it.
+    fn begin_owner_guard(&mut self) -> LabelId {
+        let owner = self.shared_owner.expect("the shared statics prologue ran");
+        let skip = self.fresh_label("statics_not_owner");
+        self.program.code.push(Op::Push(owner));
+        self.program.code.push(Op::JumpIfFalse(Target::Label(skip)));
+        skip
+    }
+
+    fn end_owner_guard(&mut self, skip: LabelId) {
+        self.program.code.push(Op::Label(skip));
+    }
+
+    /// The start of the static initializer of a program with shared statics:
+    /// finds the array — in the holder the editor named, or the one found by
+    /// name in the scene — or makes and publishes it; see the module note.
+    /// Leaves `__statics` set and `__statics_owner` saying which happened,
+    /// and queues every shared field's initializer for the loop that
+    /// follows (each one guarded by the owner flag as it is emitted).
+    fn emit_shared_statics_prologue(&mut self) {
+        let entry = self.entry.expect("an entry class");
+        let (file, span) = self.declaration_site(entry);
+        let (fields, id) = {
+            let shared = self.shared_statics();
+            (shared.fields.clone(), shared.id.clone())
+        };
+        let ctx = Ctx {
+            key: FunctionKey {
+                symbol: entry,
+                role: Role::Method,
+                bindings: Vec::new(),
+            },
+            file,
+            locals: vec![HashMap::default()],
+            boxed: Vec::new(),
+            this_slot: None,
+            this_type: None,
+            loop_stack: Vec::new(),
+            result: None,
+            return_slot: DataId(0), // unused
+            caught: Vec::new(),
+            async_state: None,
+            iterator_state: None,
+        };
+
+        let holder = self.program.add_data(DataSymbol {
+            name: STATICS_REFERENCE_VARIABLE.into(),
+            udon_type: "VRCUdonUdonBehaviour".into(),
+            init: HeapInit::Null,
+            export: true,
+            sync: None,
+        });
+        let array = self.shared_statics_slot();
+        let owner = self.program.add_data(DataSymbol {
+            name: "__statics_owner".into(),
+            udon_type: "SystemBoolean".into(),
+            init: HeapInit::Boolean(false),
+            export: false,
+            sync: None,
+        });
+        self.shared_owner = Some(owner);
+        let false_constant = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
+        let true_constant = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
+        self.copy(false_constant, owner);
+
+        let have_holder = self.fresh_label("statics_holder");
+        let found_object = self.fresh_label("statics_object");
+        let check = self.fresh_label("statics_check");
+        let allocate = self.fresh_label("statics_allocate");
+        let publish = self.fresh_label("statics_publish");
+        let done = self.fresh_label("statics_done");
+
+        // the holder the editor named — or, for a behaviour instantiated at
+        // run time from a prefab, which no scene object can be named in,
+        // the scene object found by its name
+        let null = self.is_null(&ctx, holder, span.clone());
+        self.program.code.push(Op::Push(null));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(have_holder)));
+        let name = self.string_constant(STATICS_HOLDER_OBJECT);
+        let object = self.temp("UnityEngineGameObject");
+        self.call_extern(
+            &ctx,
+            "UnityEngineGameObject.__Find__SystemString__UnityEngineGameObject",
+            &[name, object],
+            span.clone(),
+        );
+        let null = self.is_null(&ctx, object, span.clone());
+        self.program.code.push(Op::Push(null));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(found_object)));
+        self.program.code.push(Op::Jump(Target::Label(allocate)));
+        self.program.code.push(Op::Label(found_object));
+        let behaviour_type = self.constant(
+            "SystemType",
+            "VRC.Udon.UdonBehaviour",
+            HeapInit::TypeOf("VRC.Udon.UdonBehaviour".into()),
+        );
+        let component = self.temp("UnityEngineComponent");
+        self.call_extern(
+            &ctx,
+            "UnityEngineGameObject.__GetComponent__SystemType__UnityEngineComponent",
+            &[object, behaviour_type, component],
+            span.clone(),
+        );
+        self.copy(component, holder);
+        let null = self.is_null(&ctx, holder, span.clone());
+        self.program.code.push(Op::Push(null));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(have_holder)));
+        self.program.code.push(Op::Jump(Target::Label(allocate)));
+
+        // the holder's array, if some program made it already — and made it
+        // to this layout
+        self.program.code.push(Op::Label(have_holder));
+        let object_array = Type::Array {
+            element: Box::new(self.corlib_type("Object")),
+            rank: 1,
+        };
+        let found = self.get_program_variable(
+            &ctx,
+            holder,
+            STATICS_HOLDER_VARIABLE,
+            &object_array,
+            span.clone(),
+        );
+        let null = self.is_null(&ctx, found, span.clone());
+        self.program.code.push(Op::Push(null));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(check)));
+        self.program.code.push(Op::Jump(Target::Label(allocate)));
+        self.program.code.push(Op::Label(check));
+        let zero = self.int_constant(0);
+        let string = self.corlib_type("String");
+        let first = self.get_element(&ctx, found, zero, &string, span.clone());
+        let layout_id = self.string_constant(&id);
+        let same = self.temp("SystemBoolean");
+        self.call_extern(
+            &ctx,
+            "SystemString.__op_Equality__SystemString_SystemString__SystemBoolean",
+            &[first, layout_id, same],
+            span.clone(),
+        );
+        self.program.code.push(Op::Push(same));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(allocate)));
+        self.copy(found, array);
+        self.program.code.push(Op::Jump(Target::Label(done)));
+
+        // none yet: this program makes it, and publishes it before running
+        // any initializer, so a program the initializers reach finds it
+        self.program.code.push(Op::Label(allocate));
+        let size = self.int_constant(fields.len() as i32 + 1);
+        self.call_extern(
+            &ctx,
+            "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
+            &[size, array],
+            span.clone(),
+        );
+        self.set_element(&ctx, array, zero, layout_id, span.clone());
+        self.copy(true_constant, owner);
+        // a value type's default, where nothing is written: an `int` read
+        // as null would halt the first arithmetic on it
+        for (position, field) in fields.iter().enumerate() {
+            let symbol = self.declarations.table.symbol(*field);
+            let initialized = symbol.declarations.first().is_some_and(|site| {
+                matches!(&site.syntax, SyntaxRef::Field { declarator, .. }
+                    if declarator.initializer.is_some())
+            });
+            if initialized {
+                continue;
+            }
+            let ty = match self.signatures.members.get(field) {
+                Some(MemberSignature::Field(ty)) => ty.clone(),
+                _ => continue,
+            };
+            let value = self.default_value(&ty);
+            let index = self.int_constant(position as i32 + 1);
+            self.set_element(&ctx, array, index, value, span.clone());
+        }
+        let null = self.is_null(&ctx, holder, span.clone());
+        self.program.code.push(Op::Push(null));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(publish)));
+        self.program.code.push(Op::Jump(Target::Label(done)));
+        self.program.code.push(Op::Label(publish));
+        self.set_program_variable(&ctx, holder, STATICS_HOLDER_VARIABLE, array, span);
+        self.program.code.push(Op::Label(done));
+
+        // every shared field's initializer, in layout order, for the loop
+        // in `emit_static_initializer` — whichever program turns out to be
+        // the owner has to have them all
+        for field in fields {
+            let symbol = self.declarations.table.symbol(field);
+            let Some(site) = symbol.declarations.first() else {
+                continue;
+            };
+            if matches!(&site.syntax, SyntaxRef::Field { declarator, .. }
+                if declarator.initializer.is_some())
+            {
+                self.static_init.push((field, site.file));
             }
         }
     }
@@ -2978,6 +3441,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if !matches!(symbol.kind, SymbolKind::Field | SymbolKind::Event) || !symbol.is_static {
                 continue;
             }
+            // a shared static is an element of the array every behaviour
+            // reads, not a slot of this program's — nothing to export
+            if self.static_storage(member) == StaticStorage::Shared {
+                continue;
+            }
             self.ensure_static(member, export);
         }
     }
@@ -3836,4 +4304,80 @@ fn extern_is_pure(signature: &str) -> bool {
                 | "UnityEngineRandom"
                 | "UnityEngineDebug"
         )
+}
+
+// ---------------------------------------------------------- shared statics
+
+/// Where a static field lives — see the shared-statics note in the impl.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum StaticStorage {
+    /// A heap slot of this program's own.
+    Local,
+    /// An element of the array every behaviour of the compilation shares.
+    Shared,
+    /// Shared by the rules, but of a delegate type — code addresses of one
+    /// program, which no other can jump to: reported, then a slot.
+    Delegate,
+    /// Shared by the rules, but `[UdonSynced]`, and a synced variable
+    /// belongs to one behaviour: reported, then a slot.
+    Synced,
+}
+
+/// The shared static fields and their layout in the array.
+struct SharedStatics {
+    /// Element `i + 1` of the array holds `fields[i]`.
+    fields: Vec<SymbolId>,
+    /// Each field's element index.
+    index_of: HashMap<SymbolId, usize>,
+    /// The layout's id, held in element 0: a hash over the fields' names and
+    /// types, so a program compiled against another layout does not read
+    /// this array as its own.
+    id: String,
+}
+
+/// The class path the holder program is emitted under, and the name of the
+/// scene object the Unity package puts it on.
+pub const STATICS_HOLDER_PATH: &str = "MenSharp.Statics";
+const STATICS_HOLDER_OBJECT: &str = STATICS_HOLDER_PATH;
+/// The holder's one variable: the shared array, made by the first program
+/// to ask for it.
+pub const STATICS_HOLDER_VARIABLE: &str = "__statics";
+/// Every program's reference to the holder, set by the Unity package when it
+/// pairs the scene's behaviours.
+pub const STATICS_REFERENCE_VARIABLE: &str = "__mensharp_statics";
+
+/// The holder: a program of no code and one exported variable, the array
+/// every behaviour's static fields live in. The Unity package puts it on a
+/// scene object named [`STATICS_HOLDER_PATH`] and names that object in each
+/// behaviour's [`STATICS_REFERENCE_VARIABLE`]; see the shared-statics note.
+pub fn generate_statics_holder() -> CodegenOutput {
+    let mut program = Program::default();
+    let id = components::program_id_of(STATICS_HOLDER_PATH);
+    program.add_data(DataSymbol {
+        name: "__program_id".into(),
+        udon_type: "SystemInt64".into(),
+        init: HeapInit::Int64(id),
+        export: false,
+        sync: None,
+    });
+    program.add_data(DataSymbol {
+        name: "__program_name".into(),
+        udon_type: "SystemString".into(),
+        init: HeapInit::Str(STATICS_HOLDER_PATH.into()),
+        export: false,
+        sync: None,
+    });
+    program.program_id = Some(id);
+    program.add_data(DataSymbol {
+        name: STATICS_HOLDER_VARIABLE.into(),
+        udon_type: "SystemObjectArray".into(),
+        init: HeapInit::Null,
+        export: true,
+        sync: None,
+    });
+    CodegenOutput {
+        program,
+        errors: Vec::new(),
+        source_file: None,
+    }
 }

@@ -19,6 +19,7 @@ public class MenSharpIntegrationTests
     {
         "Door",
         "JsonVerify.VerifyJson",
+        "MenSharp.Statics",
         "MenSharpRuntimeCaller",
         "MenSharpRuntimeSmoke",
         "MenSharpRuntimeTarget",
@@ -142,6 +143,16 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(true, caller.GetProgramVariable("done"));
         Assert.AreEqual(42, caller.GetProgramVariable("result"));
 
+        // a static field is one for every instance (issue: each instance
+        // counted from 0), through the holder the scene carries
+        Assert.IsNotNull(GameObject.Find(MenSharpProxy.StaticsHolderName), "no statics holder in the scene");
+        UdonBehaviour second = FindUdon("MenSharpRuntimeSmoke2");
+        smoke.RunProgram("RunShared");
+        second.RunProgram("RunShared");
+        smoke.RunProgram("RunShared");
+        Assert.AreEqual(3, smoke.GetProgramVariable("mine"));
+        Assert.AreEqual(2, second.GetProgramVariable("mine"));
+
         yield return new ExitPlayMode();
         AssetDatabase.DeleteAsset(GeneratedScene);
     }
@@ -162,6 +173,7 @@ public class MenSharpIntegrationTests
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
         GameObject smokeObject = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke", "MenSharpRuntimeSmoke", Vector3.zero);
+        GameObject secondSmoke = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke2", "MenSharpRuntimeSmoke", Vector3.up * 4);
         GameObject targetObject = MenSharpTestScene.AddProxy("MenSharpRuntimeTarget", "MenSharpRuntimeTarget", Vector3.right * 4);
         GameObject callerObject = MenSharpTestScene.AddProxy("MenSharpRuntimeCaller", "MenSharpRuntimeCaller", Vector3.right * 8);
         MenSharpTestScene.Assign(
@@ -169,7 +181,7 @@ public class MenSharpIntegrationTests
             "target",
             MenSharpTestScene.Proxy(targetObject, "MenSharpRuntimeTarget"));
 
-        var targets = new List<GameObject> { smokeObject, targetObject, callerObject };
+        var targets = new List<GameObject> { smokeObject, secondSmoke, targetObject, callerObject };
         MenSharpProxy.SyncThenTransfer(targets, false);
         foreach (GameObject target in targets)
         {
