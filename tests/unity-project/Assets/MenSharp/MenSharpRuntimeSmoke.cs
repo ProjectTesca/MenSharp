@@ -97,12 +97,19 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     public int genericString;
     public int genericMine;
 
+    public int genericSeededInt;
+    public int genericSeededString;
+
     public void GenericStatics()
     {
         GenericCache<int>.Count++;
         GenericCache<string>.Count += 10;
         genericInt = GenericCache<int>.Count;
         genericString = GenericCache<string>.Count;
+        // each closed type takes its own constant initializer (7)
+        GenericCache<int>.Seeded += 1;
+        genericSeededInt = GenericCache<int>.Seeded;    // 8
+        genericSeededString = GenericCache<string>.Seeded; // 7, untouched
     }
 
     public void BumpGeneric()
@@ -148,4 +155,7 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
 public static class GenericCache<T>
 {
     public static int Count;
+    // a constant-literal initializer: one per closed type (int and string
+    // each start at 7), baked with no code
+    public static int Seeded = 7;
 }

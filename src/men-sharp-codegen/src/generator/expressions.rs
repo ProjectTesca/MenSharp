@@ -2625,7 +2625,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         if self.static_storage(symbol) == StaticStorage::Shared
                             && let Some(key) = self.generic_static_key(&declaring, symbol)
                         {
-                            return self.generic_static_place(ctx, symbol, &key, member_type, span);
+                            return self.generic_static_place(
+                                ctx,
+                                symbol,
+                                &declaring,
+                                &key,
+                                member_type,
+                                span,
+                            );
                         }
                         self.static_place(ctx, symbol, false, member_type, span)
                     }

@@ -1867,13 +1867,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// The place a generic class's static field is read and written at: its
     /// entry in the shared array's registry, found by the closed type's key or
-    /// appended (with the field's default) the first time any program asks.
-    /// The registry is two parallel arrays — keys and values — kept in the two
-    /// slots the layout reserves past the plain shared statics.
+    /// appended the first time any program asks — with the field's initializer
+    /// value (a constant literal) or its default. The registry is two parallel
+    /// arrays — keys and values — kept in the two slots the layout reserves
+    /// past the plain shared statics.
     fn generic_static_place(
         &mut self,
         ctx: &Ctx<'ast>,
         field: SymbolId,
+        declaring: &Type,
         key: &str,
         ty: Type,
         span: Range<usize>,
@@ -1887,24 +1889,49 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return Place::Error;
         }
-        // an initializer would have to run once per closed type, which nothing
-        // models yet; leaving it out would make `= 5` silently read 0, so this
-        // is an error rather than a wrong value
-        let has_initializer = self
+
+        // the closed type's arguments bind the class's own type parameters
+        // (`Cache<int>` gives T = int), so a field typed or initialized in
+        // terms of T resolves to the concrete type
+        let class = self.declarations.table.symbol(field).parent;
+        let class_bindings: Vec<(SymbolId, Type)> = match (class, declaring) {
+            (Some(class), Type::Named { arguments, .. }) => self
+                .declarations
+                .table
+                .symbol(class)
+                .type_parameters
+                .iter()
+                .copied()
+                .zip(arguments.iter().cloned())
+                .collect(),
+            _ => Vec::new(),
+        };
+        let ty = self.substitute(&ty, &class_bindings);
+
+        // the initializer, if any. Only a constant literal is supported: a
+        // computed one (`= new List<T>()`, a call) would have to run once per
+        // closed type with a real call frame, which the inline append has not.
+        // A literal bakes to a heap value with no code, so it is safe here.
+        let written = self
             .declarations
             .table
             .symbol(field)
             .declarations
             .first()
-            .is_some_and(|site| {
-                matches!(&site.syntax, SyntaxRef::Field { declarator, .. }
-                    if declarator.initializer.is_some())
+            .and_then(|site| match site.syntax {
+                SyntaxRef::Field { declarator, .. } => declarator.initializer.as_ref(),
+                _ => None,
             });
-        if has_initializer {
+        let udon = self.heap_type(&ty);
+        let literal_init = match written {
+            Some(InitializerValue::Expression(expression)) => literal_heap_init(expression, &udon),
+            _ => None,
+        };
+        if written.is_some() && literal_init.is_none() {
             self.error(
                 ctx,
-                "a static field of a generic class cannot have an initializer yet (its value \
-                 would have to be built once per closed type); leave it default"
+                "a static field of a generic class can only be initialized with a constant \
+                 literal (= 5, = \"text\", = true); a computed initializer is not supported yet"
                     .to_string(),
                 span,
             );
@@ -1965,8 +1992,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             span.clone(),
         );
         let new_keys = self.grow_object_array(ctx, keys, length, grown, key_constant, span.clone());
-        let default = self.default_value(&ty);
-        let new_values = self.grow_object_array(ctx, values, length, grown, default, span.clone());
+        // the field's initial value: its constant-literal initializer, baked to
+        // a heap slot with no code (safe to place directly), or its default
+        let tail = match literal_init {
+            Some(init) => {
+                let serial = self.program.data.len();
+                self.program.add_data(DataSymbol {
+                    name: format!("__gstatic_init_{serial}"),
+                    udon_type: udon.clone(),
+                    init,
+                    export: false,
+                    sync: None,
+                })
+            }
+            None => self.default_value(&ty),
+        };
+        let new_values = self.grow_object_array(ctx, values, length, grown, tail, span.clone());
         self.set_element(ctx, array, keys_index, new_keys, span.clone());
         self.set_element(ctx, array, values_index, new_values, span.clone());
         self.copy(new_values, values);

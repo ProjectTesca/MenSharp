@@ -204,6 +204,10 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("GenericStatics");
         Assert.AreEqual(1, smoke.GetProgramVariable("genericInt"));
         Assert.AreEqual(10, smoke.GetProgramVariable("genericString"));
+        // constant-literal initializer, one per closed type: <int> seeded 7 → 8,
+        // <string> its own 7
+        Assert.AreEqual(8, smoke.GetProgramVariable("genericSeededInt"));
+        Assert.AreEqual(7, smoke.GetProgramVariable("genericSeededString"));
         smoke.RunProgram("BumpGeneric");
         second.RunProgram("BumpGeneric");
         smoke.RunProgram("BumpGeneric");

@@ -843,6 +843,68 @@ fn a_generic_static_reached_through_a_type_parameter_is_tracked() {
 }
 
 #[test]
+fn a_generic_static_takes_its_constant_initializer_per_closed_type() {
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public static class Cache<T> { public static int Count = 5; }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int a;
+            public int b;
+            public int c;
+            public void Interact()
+            {
+                a = Cache<int>.Count;      // initialized to 5
+                Cache<int>.Count += 100;
+                b = Cache<int>.Count;      // 105
+                c = Cache<string>.Count;   // its own 5, untouched
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "a"), 5);
+    assert_eq!(int_of(&emulator, "b"), 105);
+    assert_eq!(int_of(&emulator, "c"), 5);
+}
+
+#[test]
+fn a_generic_static_with_a_computed_initializer_is_rejected() {
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        using System.Text;
+
+        public static class Cache<T> { public static StringBuilder B = new StringBuilder(); }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public void Interact() { Cache<int>.B.Append("x"); }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let Some(program) = compile_behaviour(sources, "Probe") else {
+        return; // no dotnet reference assemblies available
+    };
+    assert!(
+        program.output.errors.iter().any(|error| error
+            .message
+            .to_string()
+            .contains("can only be initialized with a constant literal")),
+        "expected the computed-initializer error, got: {:#?}",
+        program.output.errors
+    );
+}
+
+#[test]
 fn behaviour_instance_fields_become_public_variables() {
     let Some(emulator) = run_behaviour(
         r#"
