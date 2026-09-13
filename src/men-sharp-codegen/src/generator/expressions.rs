@@ -4486,7 +4486,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     return piece;
                 }
                 let receiver_type = receiver.as_ref().map(|(_, ty)| ty);
-                let Some(signature) = self.external_signature(ctx, call, receiver_type, &span)
+                let Some((signature, passes_type_arguments)) =
+                    self.external_signature(ctx, call, receiver_type, &span)
                 else {
                     return Piece::Error;
                 };
@@ -4502,19 +4503,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     }
                 }
                 pushed.extend(values.iter().copied());
-                // a generic extern takes its type argument as a value, after
-                // the ordinary parameters and before the result
-                for argument in &call.type_arguments {
-                    let argument = self.substitute(argument, &ctx.key.bindings);
-                    match self.type_constant(&argument) {
-                        Some(slot) => pushed.push(slot),
-                        None => {
-                            self.error(
-                                ctx,
-                                Message::key("codegen.this_type_argument_has_no_system_type"),
-                                span,
-                            );
-                            return Piece::Error;
+                // a real generic extern takes its type argument as a value,
+                // after the ordinary parameters and before the result; an
+                // erased one (C# sugar over an `object` extern) takes none
+                if passes_type_arguments {
+                    for argument in &call.type_arguments {
+                        let argument = self.substitute(argument, &ctx.key.bindings);
+                        match self.type_constant(&argument) {
+                            Some(slot) => pushed.push(slot),
+                            None => {
+                                self.error(
+                                    ctx,
+                                    Message::key("codegen.this_type_argument_has_no_system_type"),
+                                    span,
+                                );
+                                return Piece::Error;
+                            }
                         }
                     }
                 }

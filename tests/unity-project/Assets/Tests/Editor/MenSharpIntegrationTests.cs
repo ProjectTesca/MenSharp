@@ -184,6 +184,13 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(true, caller.GetProgramVariable("done"));
         Assert.AreEqual(42, caller.GetProgramVariable("result"));
 
+        // SetProgramVariable("received", int[]) — a generic method that erases
+        // to the (string, object) extern; passing an array once failed to compile
+        UdonBehaviour arrayTarget = FindUdon("MenSharpRuntimeTarget");
+        caller.SetProgramVariable("receiver", arrayTarget);
+        caller.RunProgram("PushArray");
+        Assert.AreEqual(new int[] { 7, 8, 9 }, arrayTarget.GetProgramVariable("received"));
+
         // a static field is one for every instance (issue: each instance
         // counted from 0), through the holder the scene carries
         GameObject holderObject = GameObject.Find(MenSharpProxy.StaticsHolderName);

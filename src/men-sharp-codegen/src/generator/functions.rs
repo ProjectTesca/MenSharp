@@ -1,7 +1,7 @@
 //! Function instances: scheduling, frames, bodies, calls and virtual dispatch.
 
 use men_sharp_parser::ast::{AccessorKind, Modifier};
-use men_sharp_semantics::{FunctionSignature, ParameterPassing};
+use men_sharp_semantics::{ExternalMember, FunctionSignature, ParameterPassing};
 
 use super::*;
 
@@ -1877,13 +1877,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// static type the call was made on, when it was made on a value: the
     /// whitelist may have the member there rather than on the declaring
     /// type (see exposed_owner).
+    /// The extern for a call, and whether its type arguments are passed as
+    /// `System.Type` values. A real Udon generic (`GetComponent<T>`) takes the
+    /// type as a value and its extern ends in `__T`; but some generic methods
+    /// are only C# sugar over a non-generic `object` extern
+    /// (`UdonBehaviour.SetProgramVariable<T>(string, T)` → the whitelisted
+    /// `(string, object)` extern), and passing a type value — or worse, a
+    /// type the VM cannot name like `int[]` — is wrong for those.
     pub(super) fn external_signature(
         &mut self,
         ctx: &Ctx,
         call: &ResolvedCall,
         receiver: Option<&Type>,
         span: &Range<usize>,
-    ) -> Option<String> {
+    ) -> Option<(String, bool)> {
         let MemberOrigin::External { member, .. } = &call.origin else {
             return None;
         };
@@ -1938,18 +1945,92 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         } else {
             format!("__{}", parts.join("_"))
         };
-        // Udon has no generics: a generic method is one extern named `…__T`
-        // that takes its type argument as an ordinary `System.Type` value.
-        // The caller supplies that value; see emit_call.
-        let suffix = if call.type_arguments.is_empty() {
-            format!("__{name}{middle}__{return_part}")
-        } else {
-            format!("__{name}{middle}__T")
-        };
         let receiver = receiver.map(|ty| self.substitute(ty, &ctx.key.bindings));
-        let owner =
-            self.exposed_owner(&declaring, receiver.as_ref(), std::slice::from_ref(&suffix))?;
-        Some(format!("{owner}.{suffix}"))
+
+        // no type arguments: the ordinary extern
+        if call.type_arguments.is_empty() {
+            let suffix = format!("__{name}{middle}__{return_part}");
+            let owner =
+                self.exposed_owner(&declaring, receiver.as_ref(), std::slice::from_ref(&suffix))?;
+            return Some((format!("{owner}.{suffix}"), false));
+        }
+
+        // Udon has no generics: a real generic method is one extern named
+        // `…__T` that takes its type argument as an ordinary `System.Type`
+        // value (`GetComponent<T>`). Prefer that when the VM actually exposes
+        // it — the caller supplies the value (see emit_call).
+        let generic_suffix = format!("__{name}{middle}__T");
+        if let Some(full) = self.real_extern(&declaring, receiver.as_ref(), &generic_suffix) {
+            return Some((full, true));
+        }
+        // otherwise the method may be C# sugar over a non-generic `object`
+        // extern: erase its type parameters to `object` and use that, without
+        // a type value (`SetProgramVariable<T>` → `(string, object)`).
+        if let Some(erased_suffix) = self.erased_generic_suffix(&name, member)
+            && let Some(full) = self.real_extern(&declaring, receiver.as_ref(), &erased_suffix)
+        {
+            return Some((full, false));
+        }
+        // neither exists: keep the `__T` shape so the later "not exposed"
+        // diagnostic reads as it did before
+        let owner = self.exposed_owner(
+            &declaring,
+            receiver.as_ref(),
+            std::slice::from_ref(&generic_suffix),
+        )?;
+        Some((format!("{owner}.{generic_suffix}"), true))
+    }
+
+    /// The full extern signature for `suffix`, but only when the VM really
+    /// exposes it — `exposed_owner` alone falls back to a plausible owner even
+    /// when nothing matches, which is what the callers here must tell apart.
+    fn real_extern(
+        &self,
+        declaring: &Type,
+        receiver: Option<&Type>,
+        suffix: &str,
+    ) -> Option<String> {
+        let owner = self.exposed_owner(
+            declaring,
+            receiver,
+            std::slice::from_ref(&suffix.to_string()),
+        )?;
+        let full = format!("{owner}.{suffix}");
+        self.nodes.has_signature(&full).then_some(full)
+    }
+
+    /// The extern suffix of a generic method with its type parameters erased to
+    /// `object`, or `None` when a non-type-parameter part cannot be named. The
+    /// original (uninstantiated) signature is read, so which parameters were
+    /// the method's own type parameters is still visible.
+    fn erased_generic_suffix(&self, name: &str, member: &ExternalMember) -> Option<String> {
+        let MemberSignature::Function(signature) = &member.signature else {
+            return None;
+        };
+        let mut parts: Vec<String> = Vec::new();
+        for parameter in &signature.parameters {
+            let mut part = match &parameter.parameter_type {
+                Type::ExternalMethodTypeParameter(_) => "SystemObject".to_string(),
+                other => self.extern_type_name(other)?,
+            };
+            if matches!(
+                parameter.passing,
+                ParameterPassing::Ref | ParameterPassing::Out
+            ) {
+                part.push_str("Ref");
+            }
+            parts.push(part);
+        }
+        let return_part = match &signature.return_type {
+            Type::ExternalMethodTypeParameter(_) => "SystemObject".to_string(),
+            other => self.extern_type_name(other)?,
+        };
+        let middle = if parts.is_empty() {
+            String::new()
+        } else {
+            format!("__{}", parts.join("_"))
+        };
+        Some(format!("__{name}{middle}__{return_part}"))
     }
 
     pub(super) fn substitute_signature(
