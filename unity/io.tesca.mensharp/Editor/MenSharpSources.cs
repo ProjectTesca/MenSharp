@@ -4,10 +4,13 @@
 // The rule is one Unity already enforces: MenSharp sources are the scripts of
 // every assembly definition that references ProjectTesca.MenSharp.Runtime —
 // the reference `MenSharpBehaviour` needs to resolve at all, so an asset
-// author has it whether or not they think about it — plus Assets/MenSharp,
-// for the project that dropped its asmdef to live in Assembly-CSharp. A
-// program asset is written beside the assembly that declares its behaviour
-// (`<asmdef folder>/Programs/`), so a package ships its programs with its
+// author has it whether or not they think about it — plus any folder marked
+// with a `.mensharp` file (see MenSharpMarker) and everything under it, and
+// Assets/MenSharp, which is such a folder implicitly. The marker is for the
+// project that dropped its asmdef to live in Assembly-CSharp but wants its
+// sources somewhere other than Assets/MenSharp. A program asset is written
+// beside the assembly (or under the marked folder) that declares its
+// behaviour (`<folder>/Programs/`), so a package ships its programs with its
 // prefabs and a consumer's recompile updates them in place.
 //
 // Every other .cs in the project — Assets outside Editor folders, packages
@@ -86,6 +89,20 @@ public static class MenSharpSources
                 AddMenSharp(source, DefaultProgramsFolder);
             }
         }
+        // folders the user marked with a .mensharp file, and their subtrees;
+        // each file's programs go under the nearest marked folder to it
+        foreach (string root in MenSharpMarker.MarkedRoots())
+        {
+            if (!Directory.Exists(root))
+            {
+                continue;
+            }
+            foreach (string source in Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories))
+            {
+                string owner = MenSharpMarker.MarkedRootOf(source) ?? root;
+                AddMenSharp(source, owner + "/Programs");
+            }
+        }
 
         // everything else is a library
         var roots = new List<string> { "Assets" };
@@ -155,6 +172,10 @@ public static class MenSharpSources
             return false;
         }
         if (path.StartsWith(SourceRoot + "/", StringComparison.Ordinal))
+        {
+            return true;
+        }
+        if (MenSharpMarker.MarkedRootOf(path) != null)
         {
             return true;
         }

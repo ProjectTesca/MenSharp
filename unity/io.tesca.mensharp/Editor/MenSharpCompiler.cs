@@ -61,6 +61,9 @@ public static class MenSharpCompiler
         if (!Directory.Exists(SourceRoot))
         {
             Directory.CreateDirectory(SourceRoot);
+            // the default source folder is a marked folder like any other; the
+            // marker also makes it a working example of how to make more
+            MenSharpMarker.EnsureMarker(SourceRoot);
             AssetDatabase.Refresh();
             Debug.Log(
                 $"MenSharp: created {SourceRoot}. Put your .cs sources there (classes "

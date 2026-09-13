@@ -18,6 +18,7 @@ MonoBehaviour:
   newScriptTemplateOverride: {fileID: 0}
   scanningDirectoryBlacklist:
   - Assets/MenSharp/
+  - Assets/Gadget/
   defaultBehaviourInterfaceType: 
   buildDebugInfo: 1
   includeInlineCode: 1

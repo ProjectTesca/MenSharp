@@ -10,6 +10,8 @@
 /tests/unity-project/obj/
 /tests/unity-project/Assets/MenSharp/Programs/
 /tests/unity-project/Assets/MenSharp/Programs.meta
+/tests/unity-project/Assets/Gadget/Programs/
+/tests/unity-project/Assets/Gadget/Programs.meta
 /tests/unity-project/Assets/Tests/Generated/
 /tests/unity-project/Assets/Tests/Generated.meta
 /tests/unity-project/Assets/Scenes/

@@ -808,7 +808,13 @@ public static class MenSharpProxy
 /// transfer, strip.
 public class MenSharpSceneProcessor : IProcessSceneWithReport
 {
-    public int callbackOrder => -10_000;
+    /// M# strips proxies and transfers values to Udon this early so anything
+    /// that reads the finished UdonBehaviours can order itself after it, and
+    /// anything that must run before it (e.g. resolving references M# will
+    /// bake) can subtract from this value instead of copying the literal.
+    public const int CallbackOrder = -10_000;
+
+    public int callbackOrder => CallbackOrder;
 
     public void OnProcessScene(Scene scene, BuildReport report)
     {
