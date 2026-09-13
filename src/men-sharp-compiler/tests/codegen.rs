@@ -776,6 +776,73 @@ fn run_behaviour(source: &str, class_path: &str, event: &str) -> Option<Emulator
 }
 
 #[test]
+fn a_generic_class_static_is_one_per_closed_type() {
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public static class Cache<T> { public static int Count; }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int a;
+            public int b;
+            public void Interact()
+            {
+                Cache<int>.Count++;
+                Cache<string>.Count += 10;
+                a = Cache<int>.Count;
+                b = Cache<string>.Count;
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    // Cache<int>.Count and Cache<string>.Count are distinct storage
+    assert_eq!(int_of(&emulator, "a"), 1);
+    assert_eq!(int_of(&emulator, "b"), 10);
+}
+
+#[test]
+fn a_generic_static_reached_through_a_type_parameter_is_tracked() {
+    // T flows from Bump<U> into Cache<U>: the closed type is known at the
+    // access, so int and string still count apart
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public static class Cache<T> { public static int Count; }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int a;
+            public int b;
+
+            private static void Bump<U>() { Cache<U>.Count++; }
+
+            public void Interact()
+            {
+                Bump<int>();
+                Bump<int>();
+                Bump<string>();
+                a = Cache<int>.Count;
+                b = Cache<string>.Count;
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "a"), 2);
+    assert_eq!(int_of(&emulator, "b"), 1);
+}
+
+#[test]
 fn behaviour_instance_fields_become_public_variables() {
     let Some(emulator) = run_behaviour(
         r#"

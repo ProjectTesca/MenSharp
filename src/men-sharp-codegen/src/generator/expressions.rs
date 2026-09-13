@@ -2617,6 +2617,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
                 match member.kind {
                     SymbolKind::Field | SymbolKind::Event if member.is_static => {
+                        // a mutable static of a *generic* class is one per
+                        // closed type (`Cache<int>` and `Cache<string>` count
+                        // apart): it lives in the shared array's registry,
+                        // keyed by type. `const`/immutable `readonly` are
+                        // Local (folded or copied per program) — left alone.
+                        if self.static_storage(symbol) == StaticStorage::Shared
+                            && let Some(key) = self.generic_static_key(&declaring, symbol)
+                        {
+                            return self.generic_static_place(ctx, symbol, &key, member_type, span);
+                        }
                         self.static_place(ctx, symbol, false, member_type, span)
                     }
                     SymbolKind::Field | SymbolKind::Event => {

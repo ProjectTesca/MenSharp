@@ -90,6 +90,27 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         mine = shared;
     }
 
+    // a static of a generic class is one per closed type: Count<int> and
+    // Count<string> must not share (issue), and each is shared across every
+    // instance the same way `shared` is
+    public int genericInt;
+    public int genericString;
+    public int genericMine;
+
+    public void GenericStatics()
+    {
+        GenericCache<int>.Count++;
+        GenericCache<string>.Count += 10;
+        genericInt = GenericCache<int>.Count;
+        genericString = GenericCache<string>.Count;
+    }
+
+    public void BumpGeneric()
+    {
+        GenericCache<int>.Count++;
+        genericMine = GenericCache<int>.Count;
+    }
+
     // a delegate of one instance, invoked by another: the invoker hands it
     // back to the program that made it
     public static event Action<int> OnPublished;
@@ -120,4 +141,11 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         asyncResult = 42;
         asyncDone = true;
     }
+}
+
+// a generic class whose static field the smoke program keeps one of per closed
+// type — lives beside the behaviour, since a MenSharpBehaviour cannot be generic
+public static class GenericCache<T>
+{
+    public static int Count;
 }

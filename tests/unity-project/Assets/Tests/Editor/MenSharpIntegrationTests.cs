@@ -199,6 +199,18 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(3, smoke.GetProgramVariable("mine"));
         Assert.AreEqual(2, second.GetProgramVariable("mine"));
 
+        // a static of a generic class: one per closed type (int vs string do
+        // not share), and — like `shared` above — one across every instance
+        smoke.RunProgram("GenericStatics");
+        Assert.AreEqual(1, smoke.GetProgramVariable("genericInt"));
+        Assert.AreEqual(10, smoke.GetProgramVariable("genericString"));
+        smoke.RunProgram("BumpGeneric");
+        second.RunProgram("BumpGeneric");
+        smoke.RunProgram("BumpGeneric");
+        // GenericStatics already made GenericCache<int>.Count 1; three bumps → 4
+        Assert.AreEqual(4, smoke.GetProgramVariable("genericMine"));
+        Assert.AreEqual(3, second.GetProgramVariable("genericMine"));
+
         // a static event: subscribed in one instance, raised from another —
         // the handler runs in the instance that made it
         smoke.RunProgram("Subscribe");

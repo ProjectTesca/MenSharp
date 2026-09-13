@@ -109,6 +109,7 @@ pub fn generate(
         static_storage_cache: HashMap::default(),
         shared_slot: None,
         shared_owner: None,
+        uses_generic_statics: false,
         shared_reported: HashSet::default(),
         layouts: HashMap::default(),
         type_order: Vec::new(),
@@ -460,6 +461,11 @@ struct Generator<'a, 'ast> {
     /// the shared fields' initializers; set while the static initializer is
     /// being emitted.
     shared_owner: Option<DataId>,
+    /// Whether any body reached a static field of a *generic* class. Those
+    /// live in the shared array's registry (keyed by closed type), which the
+    /// prologue only sets up when something uses it — set as bodies lower,
+    /// read when the prologue is emitted (after every body).
+    uses_generic_statics: bool,
     /// Static fields whose storage was reported (a delegate, a synced one).
     shared_reported: HashSet<SymbolId>,
     layouts: HashMap<Type, Layout>,
@@ -1433,8 +1439,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.copy(true_constant, initialized);
 
         // the array of shared statics: found, or made — and then the maker
-        // runs their initializers, below, which every other program skips
-        if self.entry_class.is_some() && !self.shared_statics().fields.is_empty() {
+        // runs their initializers, below, which every other program skips. A
+        // program with no plain shared statics still needs the array when it
+        // reached a generic class's static (the registry rides in the array).
+        if self.entry_class.is_some()
+            && (!self.shared_statics().fields.is_empty() || self.uses_generic_statics)
+        {
             self.emit_shared_statics_prologue();
         }
 
@@ -1749,8 +1759,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             fields.sort_by(|a, b| a.0.cmp(&b.0));
             // FNV-1a over the layout: a program compiled against another
-            // layout must not read this array as its own
+            // layout must not read this array as its own. The leading token is
+            // the array's shape version — bumped when the two registry slots
+            // were added, so an array from before them is never mistaken for
+            // one that has them.
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for byte in b"v2\n" {
+                hash ^= u64::from(*byte);
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
             let mut index_of = HashMap::default();
             for (position, (path, field)) in fields.iter().enumerate() {
                 index_of.insert(*field, position + 1);
@@ -1829,6 +1846,189 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 Place::Slot(self.ensure_static(field, export), ty)
             }
         }
+    }
+
+    /// The registry key for a static field of a generic class, or `None` when
+    /// the declaring type is not a closed generic (an ordinary static, handled
+    /// the usual way). `Cache<int>.Count` and `Cache<string>.Count` are one
+    /// field symbol but distinct storage; the closed type's spelling tells
+    /// them apart, and every program spells it the same, so they agree on the
+    /// entry without a compilation-wide list of instantiations.
+    fn generic_static_key(&self, declaring: &Type, field: SymbolId) -> Option<String> {
+        match declaring {
+            Type::Named { arguments, .. } if !arguments.is_empty() => Some(format!(
+                "{}#{}",
+                self.display_type(declaring),
+                self.declarations.table.symbol(field).name
+            )),
+            _ => None,
+        }
+    }
+
+    /// The place a generic class's static field is read and written at: its
+    /// entry in the shared array's registry, found by the closed type's key or
+    /// appended (with the field's default) the first time any program asks.
+    /// The registry is two parallel arrays — keys and values — kept in the two
+    /// slots the layout reserves past the plain shared statics.
+    fn generic_static_place(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        field: SymbolId,
+        key: &str,
+        ty: Type,
+        span: Range<usize>,
+    ) -> Place {
+        if self.entry_class.is_none() {
+            self.error(
+                ctx,
+                "a static field of a generic class is only supported inside a behaviour"
+                    .to_string(),
+                span,
+            );
+            return Place::Error;
+        }
+        // an initializer would have to run once per closed type, which nothing
+        // models yet; leaving it out would make `= 5` silently read 0, so this
+        // is an error rather than a wrong value
+        let has_initializer = self
+            .declarations
+            .table
+            .symbol(field)
+            .declarations
+            .first()
+            .is_some_and(|site| {
+                matches!(&site.syntax, SyntaxRef::Field { declarator, .. }
+                    if declarator.initializer.is_some())
+            });
+        if has_initializer {
+            self.error(
+                ctx,
+                "a static field of a generic class cannot have an initializer yet (its value \
+                 would have to be built once per closed type); leave it default"
+                    .to_string(),
+                span,
+            );
+            return Place::Error;
+        }
+
+        self.uses_generic_statics = true;
+        let array = self.shared_statics_slot();
+        let plain = self.shared_statics().fields.len();
+        let keys_index = self.int_constant(plain as i32 + 1);
+        let values_index = self.int_constant(plain as i32 + 2);
+        let object_array = Type::Array {
+            element: Box::new(self.corlib_type("Object")),
+            rank: 1,
+        };
+
+        let keys = self.get_element(ctx, array, keys_index, &object_array, span.clone());
+        let values = self.get_element(ctx, array, values_index, &object_array, span.clone());
+        let key_constant = self.string_constant(key);
+        let index = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemArray.__IndexOf__SystemArray_SystemObject__SystemInt32",
+            &[keys, key_constant, index],
+            span.clone(),
+        );
+
+        // idx >= 0: the entry exists; skip the append
+        let found = self.fresh_label("generic_static_found");
+        let zero = self.int_constant(0);
+        let missing = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_LessThan__SystemInt32_SystemInt32__SystemBoolean",
+            &[index, zero, missing],
+            span.clone(),
+        );
+        self.program.code.push(Op::Push(missing));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(found)));
+
+        // append: grow both arrays by one, key and default at the new slot,
+        // and store them back into the shared array so every program sees them
+        let length = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemArray.__get_Length__SystemInt32",
+            &[keys, length],
+            span.clone(),
+        );
+        let one = self.int_constant(1);
+        let grown = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32",
+            &[length, one, grown],
+            span.clone(),
+        );
+        let new_keys = self.grow_object_array(ctx, keys, length, grown, key_constant, span.clone());
+        let default = self.default_value(&ty);
+        let new_values = self.grow_object_array(ctx, values, length, grown, default, span.clone());
+        self.set_element(ctx, array, keys_index, new_keys, span.clone());
+        self.set_element(ctx, array, values_index, new_values, span.clone());
+        self.copy(new_values, values);
+        self.copy(length, index);
+        self.program.code.push(Op::Label(found));
+
+        // the resolved array and index outlive this straight-line stretch (a
+        // compound assignment reads then writes the place, evaluating its
+        // right-hand side in between), and `values`/`index` are pooled temps
+        // that could be handed out again there — so pin them to slots of their
+        // own before returning the place
+        let serial = self.program.data.len();
+        let object = self.program.add_data(DataSymbol {
+            name: format!("__gstatic_arr_{serial}"),
+            udon_type: "SystemObjectArray".into(),
+            init: HeapInit::Null,
+            export: false,
+            sync: None,
+        });
+        let slot_index = self.program.add_data(DataSymbol {
+            name: format!("__gstatic_idx_{serial}"),
+            udon_type: "SystemInt32".into(),
+            init: HeapInit::Int32(0),
+            export: false,
+            sync: None,
+        });
+        self.copy(values, object);
+        self.copy(index, slot_index);
+        Place::Field {
+            object,
+            index: slot_index,
+            ty,
+        }
+    }
+
+    /// A copy of `source` (an `object[]` of `length` elements) one slot longer,
+    /// with `tail` written into the new last slot. Used to append to the
+    /// generic-static registry — rare, so a fresh array each time is fine.
+    fn grow_object_array(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        source: DataId,
+        length: DataId,
+        grown_length: DataId,
+        tail: DataId,
+        span: Range<usize>,
+    ) -> DataId {
+        let grown = self.temp("SystemObjectArray");
+        self.call_extern(
+            ctx,
+            "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
+            &[grown_length, grown],
+            span.clone(),
+        );
+        self.call_extern(
+            ctx,
+            "SystemArray.__Copy__SystemArray_SystemArray_SystemInt32__SystemVoid",
+            &[source, grown, length],
+            span.clone(),
+        );
+        self.set_element(ctx, grown, length, tail, span);
+        grown
     }
 
     /// Opens a stretch of the static initializer only the program that made
@@ -1989,7 +2189,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // none yet: this program makes it, and publishes it before running
         // any initializer, so a program the initializers reach finds it
         self.program.code.push(Op::Label(allocate));
-        let size = self.int_constant(fields.len() as i32 + 1);
+        // element 0 is the layout id; 1..=N the plain shared statics; the last
+        // two are the generic-static registry (keys and values arrays)
+        let size = self.int_constant(fields.len() as i32 + 3);
         self.call_extern(
             &ctx,
             "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
@@ -1997,6 +2199,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             span.clone(),
         );
         self.set_element(&ctx, array, zero, layout_id, span.clone());
+        // the registry starts as two empty object[] — Array.IndexOf needs a
+        // real array to search, and the append path grows them from here
+        let empty = self.int_constant(0);
+        let keys_index = self.int_constant(fields.len() as i32 + 1);
+        let values_index = self.int_constant(fields.len() as i32 + 2);
+        let keys = self.temp("SystemObjectArray");
+        self.call_extern(
+            &ctx,
+            "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
+            &[empty, keys],
+            span.clone(),
+        );
+        self.set_element(&ctx, array, keys_index, keys, span.clone());
+        let values = self.temp("SystemObjectArray");
+        self.call_extern(
+            &ctx,
+            "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
+            &[empty, values],
+            span.clone(),
+        );
+        self.set_element(&ctx, array, values_index, values, span.clone());
         self.copy(true_constant, owner);
         // a value type's default, where nothing is written: an `int` read
         // as null would halt the first arithmetic on it

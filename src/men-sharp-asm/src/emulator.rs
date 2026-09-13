@@ -1421,6 +1421,18 @@ impl Emulator {
                 }
                 Ok(())
             }
+            "SystemArray.__IndexOf__SystemArray_SystemObject__SystemInt32" => {
+                let args = self.pop_arguments(3)?;
+                let array = self.heap[args[0]].as_array()?;
+                let needle = self.heap[args[1]].clone();
+                let elements = array.borrow();
+                let found = elements
+                    .iter()
+                    .position(|element| values_equal(element, &needle))
+                    .map_or(-1, |index| index as i32);
+                self.heap[args[2]] = Value::Int32(found);
+                Ok(())
+            }
             // ---- formatting ----
             sig if sig.ends_with(".__ToString__SystemString__SystemString") => {
                 let args = self.pop_arguments(3)?;
@@ -1629,6 +1641,26 @@ fn fixed_point(value: f64, decimals: usize, grouped: bool) -> String {
     match fraction {
         Some(fraction) => format!("{sign}{grouped_whole}.{fraction}"),
         None => format!("{sign}{grouped_whole}"),
+    }
+}
+
+/// Value equality for `Array.IndexOf`: scalars and strings by value, arrays
+/// and other references by identity. Enough for the string keys the generic
+/// static registry looks up; anything exotic simply does not match.
+fn values_equal(a: &Value, b: &Value) -> bool {
+    match (a, b) {
+        (Value::Null, Value::Null) => true,
+        (Value::Boolean(x), Value::Boolean(y)) => x == y,
+        (Value::Int32(x), Value::Int32(y)) => x == y,
+        (Value::Int64(x), Value::Int64(y)) => x == y,
+        (Value::UInt32(x), Value::UInt32(y)) => x == y,
+        (Value::Single(x), Value::Single(y)) => x == y,
+        (Value::Double(x), Value::Double(y)) => x == y,
+        (Value::Char(x), Value::Char(y)) => x == y,
+        (Value::Str(x), Value::Str(y)) => x == y,
+        (Value::Type(x), Value::Type(y)) => x == y,
+        (Value::Array(x), Value::Array(y)) => Rc::ptr_eq(x, y),
+        _ => false,
     }
 }
 
