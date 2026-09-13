@@ -141,6 +141,21 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         result.Dispose();
     }
 
+    // VRCPlayerApi.TrackingDataType / .TrackingData are nested types: their
+    // externs are named after the enclosing type
+    // (`VRCSDKBaseVRCPlayerApi.__GetTrackingData__VRCSDKBaseVRCPlayerApiTrackingDataType__…`).
+    // Compile-only: there is no local player to ask in the test scene.
+    public Vector3 headPosition;
+
+    public void TrackHead()
+    {
+        VRC.SDKBase.VRCPlayerApi player = VRC.SDKBase.Networking.LocalPlayer;
+        if (player == null) return;
+        VRC.SDKBase.VRCPlayerApi.TrackingData head =
+            player.GetTrackingData(VRC.SDKBase.VRCPlayerApi.TrackingDataType.Head);
+        headPosition = head.position;
+    }
+
     // a delegate of one instance, invoked by another: the invoker hands it
     // back to the program that made it
     public static event Action<int> OnPublished;

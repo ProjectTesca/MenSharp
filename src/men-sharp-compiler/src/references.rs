@@ -130,13 +130,27 @@ impl<'data> ReferenceSet<'data> {
         self.assemblies[id.assembly as usize].type_definition(id.type_index)
     }
 
-    /// `UnityEngine.Debug`-style display name for diagnostics.
+    /// The flat .NET name of a type: `Namespace.Outer+Nested`, arity backtick
+    /// kept — what `mangle_dotnet_name` expects, and what reflection's
+    /// `GetType` needs to find a nested type again (the Unity importer
+    /// resolves baked `typeof`/enum constants by this name). Metadata keeps a
+    /// nested type's namespace empty and its enclosing type on the side, so
+    /// the chain is walked up to the top-level type, whose namespace it is.
     pub fn display_name(&self, id: ExternalTypeId) -> String {
-        let definition = self.type_definition(id);
-        if definition.namespace.is_empty() {
-            definition.name.to_string()
+        let assembly = &self.assemblies[id.assembly as usize];
+        let mut names = vec![self.type_definition(id).name];
+        let mut top = id.type_index;
+        while let Some(enclosing) = assembly.type_definition(top).enclosing_type {
+            top = enclosing;
+            names.push(assembly.type_definition(top).name);
+        }
+        names.reverse();
+        let namespace = assembly.type_definition(top).namespace;
+        let path = names.join("+");
+        if namespace.is_empty() {
+            path
         } else {
-            format!("{}.{}", definition.namespace, definition.name)
+            format!("{namespace}.{path}")
         }
     }
 

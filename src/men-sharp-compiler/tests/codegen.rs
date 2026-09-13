@@ -831,6 +831,39 @@ fn a_type_referenced_through_an_unloaded_assembly_resolves_by_name() {
 }
 
 #[test]
+fn a_nested_external_type_is_named_after_its_enclosing_type() {
+    // `VRCPlayerApi.TrackingDataType` reached Udon as `TrackingDataType`:
+    // metadata keeps a nested type's namespace empty and its enclosing type
+    // on the side, and the name walked neither. The flat .NET name must be
+    // `Namespace.Outer+Nested` — what the extern mangling flattens to
+    // `VRCSDKBaseVRCPlayerApiTrackingDataType`, and what reflection's GetType
+    // needs to find the type again when the importer bakes a constant of it
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    use men_sharp_semantics::ExternalTypes;
+    let environment = references
+        .find_type(&["System"], "Environment", 0)
+        .expect("System.Environment");
+    let folder = references
+        .find_nested_type(environment, "SpecialFolder", 0)
+        .expect("System.Environment.SpecialFolder");
+    assert_eq!(
+        references.display_name(folder),
+        "System.Environment+SpecialFolder"
+    );
+    assert_eq!(
+        men_sharp_codegen::mangle_dotnet_name(&references.display_name(folder)),
+        "SystemEnvironmentSpecialFolder"
+    );
+    // and a top-level type is unchanged
+    assert_eq!(references.display_name(environment), "System.Environment");
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at
