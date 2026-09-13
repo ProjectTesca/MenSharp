@@ -131,6 +131,20 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         arrayEmpty = b is null || b.Length == 0;  // true
     }
 
+    // a switch-expression arm guard: `2 when ok => 10` must keep its `=>`
+    // (the guard once swallowed `ok => 10` as a lambda)
+    public int guardedFalse;
+    public int guardedTrue;
+
+    public void GuardedSwitch()
+    {
+        int value = 2;
+        bool ok = false;
+        guardedFalse = value switch { 2 when ok => 10, _ => 20 };
+        ok = true;
+        guardedTrue = value switch { 2 when ok => 10, _ => 20 };
+    }
+
     // IVRCImageDownload : IDisposable, and VRCSDK3.dll names IDisposable as
     // living in `netstandard` — an assembly the compiler is never given. The
     // inherited Dispose() must still resolve (by name, into the loaded

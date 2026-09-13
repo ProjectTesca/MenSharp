@@ -864,6 +864,37 @@ fn a_nested_external_type_is_named_after_its_enclosing_type() {
 }
 
 #[test]
+fn a_switch_expression_arm_guard_keeps_its_fat_arrow() {
+    // `2 when ok => 10`: the guard must stop before `=>` — at full precedence
+    // `ok => 10` parsed as a lambda and the arm had no arrow left (issue)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int whenFalse;
+            public int whenTrue;
+            public void Interact()
+            {
+                int value = 2;
+                bool ok = false;
+                whenFalse = value switch { 2 when ok => 10, _ => 20 };
+                ok = true;
+                whenTrue = value switch { 2 when ok && value > 1 => 10, _ => 20 };
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "whenFalse"), 20);
+    assert_eq!(int_of(&emulator, "whenTrue"), 10);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

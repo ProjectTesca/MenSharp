@@ -215,6 +215,11 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(false, smoke.GetProgramVariable("arrayFull"));
         Assert.AreEqual(true, smoke.GetProgramVariable("arrayEmpty"));
 
+        // `2 when ok => 10`: the arm guard keeps its `=>`
+        smoke.RunProgram("GuardedSwitch");
+        Assert.AreEqual(20, smoke.GetProgramVariable("guardedFalse"));
+        Assert.AreEqual(10, smoke.GetProgramVariable("guardedTrue"));
+
         smoke.RunProgram("GenericStatics");
         Assert.AreEqual(1, smoke.GetProgramVariable("genericInt"));
         Assert.AreEqual(10, smoke.GetProgramVariable("genericString"));

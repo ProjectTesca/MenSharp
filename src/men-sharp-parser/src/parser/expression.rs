@@ -646,10 +646,21 @@ fn parse_switch_expression_arms<'input, 'allocator>(
             break;
         };
 
-        let guard = lexer
-            .eat(TokenKind::When)
-            .map(|_| parse_expression_or_recover(lexer, errors, allocator, EXPRESSION_RECOVERY))
-            .and_then(Result::ok);
+        // the guard stops short of the lambda/assignment level: at full
+        // precedence `2 when ok => 10` reads `ok => 10` as a lambda and the
+        // arm loses its `=>`. `?:`, `??`, `||` and everything below still
+        // belong to the guard
+        let guard = lexer.eat(TokenKind::When).and_then(|_| {
+            let guard = parse_conditional(lexer, errors, allocator);
+            if guard.is_none() {
+                errors.push(recover_until_balanced(
+                    lexer,
+                    &[TokenKind::FatArrow, TokenKind::Comma, TokenKind::BraceRight],
+                    ParseErrorKind::MissingExpression,
+                ));
+            }
+            guard
+        });
 
         let fat_arrow = lexer.eat(TokenKind::FatArrow);
         if fat_arrow.is_none() {
