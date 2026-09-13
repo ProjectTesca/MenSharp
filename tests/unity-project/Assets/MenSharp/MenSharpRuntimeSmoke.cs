@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using MenSharp;
 using UnityEngine;
+using VRC.SDK3.Image;
 
 // A deliberately small black-box test program. The Unity test runner invokes
 // its exported events through the SDK's real UdonBehaviour and reads these
@@ -116,6 +117,28 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     {
         GenericCache<int>.Count++;
         genericMine = GenericCache<int>.Count;
+    }
+
+    // `is null || …` must be `(x is null) || …`, not `x is (null || …)`
+    public bool arrayFull;
+    public bool arrayEmpty;
+
+    public void NullOrEmpty()
+    {
+        int[] a = { 1, 2, 3 };
+        arrayFull = a is null || a.Length == 0;   // false
+        int[] b = { };
+        arrayEmpty = b is null || b.Length == 0;  // true
+    }
+
+    // IVRCImageDownload : IDisposable, and VRCSDK3.dll names IDisposable as
+    // living in `netstandard` — an assembly the compiler is never given. The
+    // inherited Dispose() must still resolve (by name, into the loaded
+    // corlib) and map to the extern Udon exposes under the receiver's own
+    // interface name. Compile-only: there is no download to run it on here.
+    public void OnImageLoadSuccess(IVRCImageDownload result)
+    {
+        result.Dispose();
     }
 
     // a delegate of one instance, invoked by another: the invoker hands it

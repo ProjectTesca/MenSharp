@@ -460,7 +460,12 @@ fn parse_relational<'input, 'allocator>(
     Some(left)
 }
 
-fn parse_shift<'input, 'allocator>(
+/// The shift level and below (additive, multiplicative, unary, primary). A
+/// pattern's constant or relational operand is parsed here, not at full
+/// expression precedence: `x is null || y` is `(x is null) || y`, and
+/// `x is 0 == y` is `(x is 0) == y` — the `||`/`==` bind looser than `is` and
+/// must be left for the surrounding expression, while `is 1 + 2` still works.
+pub(crate) fn parse_shift<'input, 'allocator>(
     lexer: &mut Lexer<'input>,
     errors: &mut Errors,
     allocator: &'allocator Bump,

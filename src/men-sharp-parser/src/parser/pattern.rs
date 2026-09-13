@@ -167,7 +167,7 @@ fn parse_primary_pattern<'input, 'allocator>(
     };
     if let Some(relational) = relational {
         let operator = Spanned::new(relational, lexer.take_span());
-        let value = match super::expression::parse_expression(lexer, errors, allocator) {
+        let value = match super::expression::parse_shift(lexer, errors, allocator) {
             Some(value) => Ok(value),
             None => {
                 errors.push(recover_until_balanced(
@@ -221,9 +221,11 @@ fn parse_primary_pattern<'input, 'allocator>(
         });
     }
 
-    // a literal, or an expression starting with one -- unambiguously a constant
+    // a literal, or an expression starting with one -- unambiguously a
+    // constant. Parsed at shift precedence, so `is null || rest` leaves the
+    // `||` (and any `==`, `&&`, ...) for the surrounding expression
     if starts_constant_pattern(lexer.kind()) {
-        let value = super::expression::parse_expression(lexer, errors, allocator)?;
+        let value = super::expression::parse_shift(lexer, errors, allocator)?;
         return Some(Pattern::Constant(value));
     }
 

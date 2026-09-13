@@ -775,6 +775,98 @@ fn run_behaviour(source: &str, class_path: &str, event: &str) -> Option<Emulator
     Some(emulator)
 }
 
+/// The .NET reference pack, when the machine has one: assemblies whose
+/// TypeRefs name `System.Runtime`, a facade the tests deliberately never load.
+fn dotnet_ref_pack_dir() -> Option<std::path::PathBuf> {
+    let packs = std::path::Path::new("/usr/share/dotnet/packs/Microsoft.NETCore.App.Ref");
+    let mut candidates: Vec<std::path::PathBuf> = std::fs::read_dir(packs)
+        .ok()?
+        .flatten()
+        .map(|version| version.path().join("ref"))
+        .filter_map(|reference| std::fs::read_dir(reference).ok())
+        .flatten()
+        .flatten()
+        .map(|framework| framework.path())
+        .filter(|path| path.join("System.Collections.dll").is_file())
+        .collect();
+    candidates.sort();
+    candidates.pop()
+}
+
+#[test]
+fn a_type_referenced_through_an_unloaded_assembly_resolves_by_name() {
+    // `IVRCImageDownload : IDisposable` in VRCSDK3.dll names `IDisposable` as
+    // living in `netstandard`, which Unity never hands the compiler — so
+    // `result.Dispose()` used to find no member. Same shape here: the ref
+    // pack's ISet<T> extends ICollection<T> "in System.Runtime", which is not
+    // loaded; the name must still resolve into System.Private.CoreLib, and the
+    // inherited `Clear()` must be found.
+    let (Some(shared), Some(reference_pack)) = (dotnet_shared_dir(), dotnet_ref_pack_dir()) else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(shared.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(reference_pack.join("System.Collections.dll")).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        using System.Collections.Generic;
+        public class Thing : MenSharpBehaviour
+        {
+            public void Go(ISet<int> set) { set.Clear(); }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+}
+
+#[test]
+fn is_null_binds_tighter_than_logical_or() {
+    // `values is null || values.Length == 0` is `(values is null) || (...)`,
+    // not `values is (null || ...)` — the `is` pattern's constant is parsed at
+    // shift precedence, so the `||` is left for the surrounding expression
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public bool full;
+            public bool empty;
+            public void Interact()
+            {
+                int[] a = { 1, 2, 3 };
+                full = a is null || a.Length == 0;   // false: not null, length 3
+                int[] b = { };
+                empty = b is null || b.Length == 0;  // true: length 0
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert!(matches!(
+        emulator.value_of("full"),
+        Some(Value::Boolean(false))
+    ));
+    assert!(matches!(
+        emulator.value_of("empty"),
+        Some(Value::Boolean(true))
+    ));
+}
+
 #[test]
 fn a_generic_class_static_is_one_per_closed_type() {
     let Some(emulator) = run_behaviour(

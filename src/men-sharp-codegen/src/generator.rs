@@ -3071,12 +3071,35 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Some(receiver) = receiver
             && let Some(first) = declaring_chain.first()
         {
-            // a receiver that is not a subclass of the declaring type (a type
-            // parameter, an interface) says nothing about the owner
             let receiver_chain = self.external_chain(receiver);
             if let Some(position) = receiver_chain.iter().position(|name| name == first) {
+                // a subclass receiver: the classes between it and the
+                // declaring type, nearest first
                 chain.extend(receiver_chain[..position].iter().rev().cloned());
+            } else if self.type_system().is_interface(declaring) {
+                // the member is an interface's (`IDisposable.Dispose`), and
+                // Udon names its extern after the interface the receiver is
+                // used as (`VRCSDK3ImageIVRCImageDownload.__Dispose__…`), or
+                // after the receiver's class — none of which the declaring
+                // chain reaches, since an interface has no base class. So the
+                // receiver, its classes and every interface it implements are
+                // owners to try too
+                let mut pending: Vec<Type> = vec![receiver.clone()];
+                let mut seen: HashSet<Type> = HashSet::default();
+                while let Some(ty) = pending.pop() {
+                    if !seen.insert(ty.clone()) {
+                        continue;
+                    }
+                    for name in self.external_chain(&ty) {
+                        if !chain.contains(&name) {
+                            chain.push(name);
+                        }
+                    }
+                    pending.extend(self.type_system().interfaces_of(&ty));
+                }
             }
+            // otherwise a receiver that is not a subclass of the declaring
+            // type (a type parameter) says nothing about the owner
         }
         chain
             .iter()

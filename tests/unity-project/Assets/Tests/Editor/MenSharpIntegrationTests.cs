@@ -210,6 +210,11 @@ public class MenSharpIntegrationTests
 
         // a static of a generic class: one per closed type (int vs string do
         // not share), and — like `shared` above — one across every instance
+        // `values is null || values.Length == 0` binds as `(is null) || (…)`
+        smoke.RunProgram("NullOrEmpty");
+        Assert.AreEqual(false, smoke.GetProgramVariable("arrayFull"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("arrayEmpty"));
+
         smoke.RunProgram("GenericStatics");
         Assert.AreEqual(1, smoke.GetProgramVariable("genericInt"));
         Assert.AreEqual(10, smoke.GetProgramVariable("genericString"));

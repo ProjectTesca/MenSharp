@@ -22,7 +22,7 @@
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use men_sharp_dotnet::{
-    DotNetAssembly, MetadataError, MethodSig, TypeDefinition, TypeSig, TypeToken,
+    DotNetAssembly, MetadataError, MethodSig, TypeDefinition, TypeSig, TypeToken, split_arity,
 };
 use men_sharp_semantics::{
     Accessibility, DefaultArgument, ExternalConstant, ExternalMember, ExternalMemberKind,
@@ -158,22 +158,57 @@ impl<'data> ReferenceSet<'data> {
         let top = loop {
             let assembly = &self.assemblies[current as usize];
             if let Some(top) = assembly.find_type(namespace, first) {
-                break top;
+                break Some(top);
             }
 
-            // not defined here: follow the forwarder, if there is one
-            let target = self.forwarders[current as usize].get(&(namespace, first))?;
-            current = *self.assembly_by_name.get(target)?;
+            // not defined here: follow the forwarder, if there is one. A
+            // missing forwarder, or one pointing at an assembly that was not
+            // loaded, ends the precise chase — but not the search
+            let Some(target) = self.forwarders[current as usize].get(&(namespace, first)) else {
+                break None;
+            };
+            let Some(&next) = self.assembly_by_name.get(target) else {
+                break None;
+            };
+            current = next;
             hops += 1;
             if hops > self.assemblies.len() {
-                return None; // a forwarder cycle in broken metadata
+                break None; // a forwarder cycle in broken metadata
             }
         };
 
-        // walk the nesting chain by metadata name
-        let assembly = &self.assemblies[current as usize];
-        let mut index = top;
-        for name in &names[1..] {
+        match top {
+            Some(top) => self.walk_nested(
+                ExternalTypeId {
+                    assembly: current,
+                    type_index: top,
+                },
+                &names[1..],
+            ),
+            // the chase dead-ended: the reference names the type in an
+            // assembly (or through a forwarder hop) the caller did not load —
+            // `VRCSDK3.dll` says `System.IDisposable` lives in `netstandard`,
+            // which Unity never hands over. Whichever loaded assembly really
+            // defines the name is still the right answer.
+            None => self.resolve_by_name(namespace, names),
+        }
+    }
+
+    /// The last resort of TypeRef chasing: the top-level name in whichever
+    /// loaded assembly defines it (the first given wins, as for `find_type`),
+    /// then the nesting chain.
+    fn resolve_by_name(&self, namespace: &str, names: &[&str]) -> Option<ExternalTypeId> {
+        let first = *names.first()?;
+        let (name, arity) = split_arity(first);
+        let top = *self.types.get(&(namespace, name, arity))?;
+        self.walk_nested(top, &names[1..])
+    }
+
+    /// Down the nesting chain from `top`, one metadata name per level.
+    fn walk_nested(&self, top: ExternalTypeId, names: &[&str]) -> Option<ExternalTypeId> {
+        let assembly = &self.assemblies[top.assembly as usize];
+        let mut index = top.type_index;
+        for name in names {
             index = assembly
                 .type_definition(index)
                 .nested_types
@@ -181,9 +216,8 @@ impl<'data> ReferenceSet<'data> {
                 .copied()
                 .find(|&nested| assembly.type_definition(nested).name == *name)?;
         }
-
         Some(ExternalTypeId {
-            assembly: current,
+            assembly: top.assembly,
             type_index: index,
         })
     }
@@ -198,7 +232,13 @@ impl<'data> ReferenceSet<'data> {
             TypeToken::Reference(_) => {
                 let path = self.assemblies[within as usize].token_path(token)?;
                 let assembly = match path.assembly {
-                    Some(name) => *self.assembly_by_name.get(name)?,
+                    Some(name) => match self.assembly_by_name.get(name) {
+                        Some(&assembly) => assembly,
+                        // the reference points at an assembly that was not
+                        // loaded (a facade like `netstandard`): resolve by
+                        // name in whatever was
+                        None => return self.resolve_by_name(path.namespace, &path.names),
+                    },
                     None => within,
                 };
                 self.resolve_metadata_path(assembly, path.namespace, &path.names)
