@@ -452,7 +452,7 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
                 {
                     continue;
                 }
-                FieldInfo field = FindField(proxyType, init.field);
+                FieldInfo field = FindField(proxyType, init.field, init.declaringType);
                 if (field == null)
                 {
                     continue;
@@ -495,9 +495,12 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
     }
 
     /// A field by name, private ones on base classes included (GetField does
-    /// not return a base class's private fields).
-    private static FieldInfo FindField(Type type, string name)
+    /// not return a base class's private fields). When `declaringType` names a
+    /// class in the chain, the field of *that* class wins — a derived class may
+    /// shadow a base field of the same name, and each must read its own.
+    private static FieldInfo FindField(Type type, string name, string declaringType)
     {
+        FieldInfo firstByName = null;
         for (Type current = type;
             current != null && current != typeof(MenSharp.MenSharpBehaviour);
             current = current.BaseType)
@@ -506,12 +509,20 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
                 name,
                 BindingFlags.Public | BindingFlags.NonPublic
                     | BindingFlags.Instance | BindingFlags.DeclaredOnly);
-            if (field != null)
+            if (field == null)
+            {
+                continue;
+            }
+            firstByName ??= field;
+            string fullName = (current.FullName ?? current.Name).Replace('+', '.');
+            if (string.IsNullOrEmpty(declaringType) || fullName == declaringType)
             {
                 return field;
             }
         }
-        return null;
+        // the named class was not found in the chain (renamed?): fall back to
+        // the most-derived field of that name rather than nothing
+        return firstByName;
     }
 
     private static object Decode(MenSharpHeapEntry entry)
@@ -639,6 +650,10 @@ public class MenSharpProxyInit
     public string symbol;
     /// The C# field on the proxy behaviour to read.
     public string field;
+    /// The dotted full name of the class that declares the field. A derived
+    /// class may shadow a base field of the same name, so the importer reads
+    /// the field of this class, not the first one reflection finds.
+    public string declaringType;
 }
 
 [Serializable]

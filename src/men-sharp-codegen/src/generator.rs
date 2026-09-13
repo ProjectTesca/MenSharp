@@ -1557,6 +1557,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // outlive the `&mut self` emission below
         let field_name = symbol.name.to_string();
         let field_is_static = symbol.is_static;
+        let field_parent = symbol.parent;
 
         let mut ctx = Ctx {
             key: FunctionKey {
@@ -1621,11 +1622,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.errors.truncate(errors);
             self.program.code.truncate(code);
             let slot = self.statics[&field];
+            let declaring_type = field_parent
+                .map(|parent| self.display_path(parent))
+                .unwrap_or_default();
             self.program
                 .proxy_initialized
                 .push(men_sharp_asm::ProxyInit {
                     symbol: self.program.data[slot.0].name.clone(),
                     field: field_name,
+                    declaring_type,
                 });
         }
     }

@@ -12565,6 +12565,52 @@ fn a_field_initializer_udon_cannot_run_is_left_to_the_proxy() {
 }
 
 #[test]
+fn a_shadowed_proxy_field_records_its_own_declaring_type() {
+    // base and derived both declare `culture`: two distinct heap slots, two
+    // proxy-init entries, each naming the class whose field it must read — so
+    // the importer does not bake the derived value into both (issue).
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using MenSharp;
+        using System.Globalization;
+        public class Parent : MenSharpBehaviour
+        {
+            private CultureInfo culture = new CultureInfo("en-US");
+            protected bool HasBase() { return culture != null; }
+        }
+        public class Child : Parent
+        {
+            private CultureInfo culture = new CultureInfo("ja-JP");
+            public void Interact() { bool b = HasBase() && culture != null; }
+        }
+        "#,
+        "Child",
+    ) else {
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let proxy = &program.output.program.proxy_initialized;
+    assert_eq!(proxy.len(), 2, "{proxy:?}");
+    // both read a C# field named `culture`
+    assert!(
+        proxy.iter().all(|entry| entry.field == "culture"),
+        "{proxy:?}"
+    );
+    // but into distinct heap slots and from distinct declaring classes
+    assert_ne!(proxy[0].symbol, proxy[1].symbol, "{proxy:?}");
+    let types: std::collections::HashSet<&str> = proxy
+        .iter()
+        .map(|entry| entry.declaring_type.as_str())
+        .collect();
+    assert!(types.contains("Parent"), "{proxy:?}");
+    assert!(types.contains("Child"), "{proxy:?}");
+}
+
+#[test]
 fn an_initializer_udon_can_run_is_not_handed_to_the_proxy() {
     // the flip side: an external-typed field whose initializer Udon *can*
     // build (StringBuilder's `(string)` constructor is an extern) still

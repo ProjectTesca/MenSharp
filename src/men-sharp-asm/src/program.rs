@@ -247,6 +247,11 @@ pub struct ProxyInit {
     pub symbol: String,
     /// The C# field on the proxy to read (`url`).
     pub field: String,
+    /// The dotted full name of the class that declares the field
+    /// (`Demo.Test`). A derived class may shadow a base field of the same
+    /// name, so the importer must read the field of *this* class, not the
+    /// first one reflection finds walking down from the proxy.
+    pub declaring_type: String,
 }
 
 /// One network-callable event: the variables its arguments arrive in, by
@@ -730,6 +735,8 @@ impl Program {
                 write_json_string(&mut out, &entry.symbol);
                 out.push_str(", \"field\": ");
                 write_json_string(&mut out, &entry.field);
+                out.push_str(", \"declaringType\": ");
+                write_json_string(&mut out, &entry.declaring_type);
                 out.push('}');
             }
             out.push_str("\n  ]");

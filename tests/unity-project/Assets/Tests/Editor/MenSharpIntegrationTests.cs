@@ -24,6 +24,7 @@ public class MenSharpIntegrationTests
         "MenSharpRuntimeSmoke",
         "MenSharpRuntimeTarget",
         "RecordVerify.VerifyRecords",
+        "ShadowUrlBase",
         "Test1",
         "UnionVerify.VerifyUnion",
         "Verify",
@@ -55,6 +56,7 @@ public class MenSharpIntegrationTests
         "VerifyRemoteDoor",
         "VerifyResult",
         "VerifySequences",
+        "VerifyShadowedUrl",
         "VerifyString",
         "VerifyStringLoad",
         "VerifyStructKeys",
@@ -223,6 +225,14 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(40, smoke.GetProgramVariable("heard"));
         Assert.AreEqual(0, second.GetProgramVariable("heard"));
 
+        // a field shadowed across base and derived: two distinct heap slots,
+        // each proxy-baked from its own class's field — not both from the
+        // most-derived one (issue: base read the derived URL)
+        UdonBehaviour shadow = FindUdon("VerifyShadowedUrl");
+        shadow.RunProgram("Run");
+        Assert.AreEqual("https://example.com/base", shadow.GetProgramVariable("baseUrl"));
+        Assert.AreEqual("https://example.com/derived", shadow.GetProgramVariable("derivedUrl"));
+
         yield return new ExitPlayMode();
         AssetDatabase.DeleteAsset(GeneratedScene);
     }
@@ -254,8 +264,9 @@ public class MenSharpIntegrationTests
             MenSharpTestScene.Proxy(callerObject, "MenSharpRuntimeCaller"),
             "target",
             MenSharpTestScene.Proxy(targetObject, "MenSharpRuntimeTarget"));
+        GameObject shadowObject = MenSharpTestScene.AddProxy("VerifyShadowedUrl", "VerifyShadowedUrl", Vector3.right * 12);
 
-        var targets = new List<GameObject> { smokeObject, secondSmoke, targetObject, callerObject };
+        var targets = new List<GameObject> { smokeObject, secondSmoke, targetObject, callerObject, shadowObject };
         MenSharpProxy.SyncThenTransfer(targets, false);
         foreach (GameObject target in targets)
         {
