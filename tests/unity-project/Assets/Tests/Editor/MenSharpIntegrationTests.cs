@@ -184,7 +184,14 @@ public class MenSharpIntegrationTests
 
         // a static field is one for every instance (issue: each instance
         // counted from 0), through the holder the scene carries
-        Assert.IsNotNull(GameObject.Find(MenSharpProxy.StaticsHolderName), "no statics holder in the scene");
+        GameObject holderObject = GameObject.Find(MenSharpProxy.StaticsHolderName);
+        Assert.IsNotNull(holderObject, "no statics holder in the scene");
+        // the holder has no synced variables and never networks: it must sync
+        // None, not the Continuous a fresh UdonBehaviour defaults to
+        Assert.AreEqual(
+            VRC.SDKBase.Networking.SyncType.None,
+            holderObject.GetComponent<UdonBehaviour>().SyncMethod,
+            "the statics holder should sync None");
         UdonBehaviour second = FindUdon("MenSharpRuntimeSmoke2");
         smoke.RunProgram("RunShared");
         second.RunProgram("RunShared");

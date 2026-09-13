@@ -278,6 +278,7 @@ public static class MenSharpProxy
             }
             ApplyVisibility(existing);
             ApplySerializedProgram(existing, program);
+            PinHolderToNoSync(existing, undoable);
             root.hideFlags = Reveal ? HideFlags.None : HideFlags.HideInHierarchy;
             return existing;
         }
@@ -293,8 +294,28 @@ public static class MenSharpProxy
         holder.programSource = program;
         ApplyVisibility(holder);
         ApplySerializedProgram(holder, program);
+        PinHolderToNoSync(holder, undoable);
         EditorUtility.SetDirty(holderObject);
         return holder;
+    }
+
+    /// The holder carries no synced variables and never networks — Udon
+    /// statics are one array per scene, read and written locally. A fresh
+    /// UdonBehaviour defaults its SyncMethod to Unknown, which the inspector
+    /// shows as Continuous and asks the network manager for a slot it never
+    /// uses. Pin it to None. Existing holders are corrected on the next sweep.
+    private static void PinHolderToNoSync(UdonBehaviour holder, bool undoable)
+    {
+        if (holder == null || holder.SyncMethod == Networking.SyncType.None)
+        {
+            return;
+        }
+        if (undoable)
+        {
+            Undo.RecordObject(holder, "Set MenSharp statics holder sync mode");
+        }
+        holder.SyncMethod = Networking.SyncType.None;
+        EditorUtility.SetDirty(holder);
     }
 
     /// Sets one behaviour-typed public variable, the way TransferValues sets
