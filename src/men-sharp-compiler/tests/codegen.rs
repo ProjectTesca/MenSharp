@@ -1468,6 +1468,57 @@ fn a_boxed_number_unboxes_as_an_external_enum_through_its_value_table() {
 }
 
 #[test]
+fn a_type_nested_in_the_behaviour_is_an_ordinary_type() {
+    // `new TestData()` for a class declared inside the behaviour used to be
+    // refused as "belongs to the behaviour itself" — the nested type's
+    // symbol has the entry class as its parent, which the member test took
+    // for membership. Objects of it, its methods and a nested struct all
+    // work as any other type's do
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public class TestData
+            {
+                public int Value;
+                public int Doubled() { return Value * 2; }
+            }
+
+            public struct Pair
+            {
+                public int a;
+                public int b;
+                public int Sum() { return a + b; }
+            }
+
+            public int value;
+            public int doubled;
+            public int sum;
+
+            public void Interact()
+            {
+                var data = new TestData();
+                data.Value = 42;
+                value = data.Value;                    // 42
+                doubled = data.Doubled();              // 84
+                var pair = new Pair { a = 1, b = 2 };
+                sum = pair.Sum();                      // 3
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "value"), 42);
+    assert_eq!(int_of(&emulator, "doubled"), 84);
+    assert_eq!(int_of(&emulator, "sum"), 3);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

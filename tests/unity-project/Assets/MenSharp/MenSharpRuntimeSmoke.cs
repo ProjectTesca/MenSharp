@@ -261,6 +261,25 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         discardLambda = pair(5, 6) + lone(1);
     }
 
+    // a class nested in the behaviour is an ordinary class (issue: `new
+    // NestedData()` was "belongs to the behaviour itself")
+    public class NestedData
+    {
+        public int Value;
+        public int Doubled() { return Value * 2; }
+    }
+
+    public int nestedValue;
+    public int nestedDoubled;
+
+    public void NestedType()
+    {
+        var data = new NestedData();
+        data.Value = 42;
+        nestedValue = data.Value;
+        nestedDoubled = data.Doubled();
+    }
+
     // an engine enum read from JSON is the real boxed enum, not the Int32
     // the reader parsed (issue: the VM halted in the first extern given it)
     public bool jsonEnumEquals;

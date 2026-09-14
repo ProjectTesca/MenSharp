@@ -251,6 +251,11 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(2, smoke.GetProgramVariable("discardEvaluated"));
         Assert.AreEqual(3, smoke.GetProgramVariable("discardLambda"));
 
+        // a class nested in the behaviour is instantiated and called like any other
+        smoke.RunProgram("NestedType");
+        Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
+        Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
+
         // an engine enum parsed from JSON is usable by an extern
         smoke.RunProgram("JsonEnum");
         Assert.AreEqual(true, smoke.GetProgramVariable("jsonEnumEquals"));

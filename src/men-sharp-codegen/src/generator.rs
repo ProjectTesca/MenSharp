@@ -4208,7 +4208,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// Does this member belong to the one instance the behaviour program is —
     /// its entry class or any class that entry class inherits from?
     pub(super) fn is_entry_member(&self, member: SymbolId) -> bool {
-        let Some(parent) = self.declarations.table.symbol(member).parent else {
+        let symbol = self.declarations.table.symbol(member);
+        // a type nested in the behaviour (`public class TestData { … }`
+        // inside it) is no member of the instance: its objects are made and
+        // called on like any other class's
+        if symbol.kind.is_type() {
+            return false;
+        }
+        let Some(parent) = symbol.parent else {
             return false;
         };
         // MenSharpBehaviour's own members count too: `RequestSerialization()`
