@@ -20,8 +20,10 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using UnityEditor;
 using UnityEditor.Compilation;
+using UnityEditorInternal;
 using PackageInfo = UnityEditor.PackageManager.PackageInfo;
 using UnityEngine;
 
@@ -47,6 +49,9 @@ public static class MenSharpSources
 
     public static SourceSet Collect()
     {
+        // clear PlayerAssemblySources cache
+        PlayerAssemblySources.Clear();
+
         var set = new SourceSet();
         var claimed = new HashSet<string>(StringComparer.Ordinal);
 
@@ -127,7 +132,7 @@ public static class MenSharpSources
             foreach (string file in Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories))
             {
                 string path = Normalize(file);
-                if (claimed.Contains(path) || IsEditorPath(path))
+                if (claimed.Contains(path) || IsEditorScript(path))
                 {
                     continue;
                 }
@@ -200,7 +205,7 @@ public static class MenSharpSources
     public static bool IsLibrarySource(string assetPath)
     {
         string path = Normalize(assetPath);
-        if (!path.EndsWith(".cs", StringComparison.Ordinal) || IsEditorPath(path))
+        if (!path.EndsWith(".cs", StringComparison.Ordinal) || IsEditorScript(path))
         {
             return false;
         }
@@ -301,16 +306,94 @@ public static class MenSharpSources
         return assetPath;
     }
 
-    public static bool IsEditorPath(string path)
+    public static bool IsEditorScript(string path)
     {
-        foreach (string segment in Normalize(path).Split('/'))
+        var normalized = Normalize(path);
+
+        // by path
+        foreach (string segment in normalized.Split('/'))
         {
             if (segment == "Editor")
             {
                 return true;
             }
         }
+
+        // by assembly & asmdef
+        if (!IsSourceInPlayerAssembly(normalized) || !IsSourceIncludedInTarget(normalized)) return true;
+
         return false;
+    }
+
+    private static bool IsSourceInPlayerAssembly(string path)
+    {
+        return PlayerAssemblySources.GetPlayerAssemblySources().Contains(path);;
+    }
+
+    private static bool IsSourceIncludedInTarget(string path)
+    {
+        // by asmdef
+        var asmdefPath = CompilationPipeline.GetAssemblyDefinitionFilePathFromScriptPath(path);
+        if (string.IsNullOrEmpty(asmdefPath)) return false;
+        var asmdef = AssetDatabase.LoadAssetAtPath<AssemblyDefinitionAsset>(asmdefPath);
+        if (asmdef == null) return false;
+        var includePlatforms = JsonUtility.FromJson<AssemblyDefinitionData>(asmdef.text).includePlatforms ?? Array.Empty<string>();
+
+        // empty = Any Platform
+        if (includePlatforms.Length == 0) return false;
+
+        var currentPlatForm = BuildPipeline.GetBuildTargetName(EditorUserBuildSettings.activeBuildTarget);
+        return includePlatforms.Any(platform => string.Equals(platform, currentPlatForm));
+    }
+
+    /// <summary>
+    /// Caches source paths that belong to Unity player assemblies.
+    /// </summary>
+    private static class PlayerAssemblySources
+    {
+        private static HashSet<string> _playerAssemblySources;
+
+        /// <summary>
+        /// Clears the cached player assembly source paths.
+        /// </summary>
+        public static void Clear()
+        {
+            _playerAssemblySources = null;
+        }
+
+        /// <summary>
+        /// Gets the source paths that belong to Unity player assemblies.
+        /// </summary>
+        public static HashSet<string> GetPlayerAssemblySources()
+        {
+            // return cached value if available
+            if (_playerAssemblySources != null) return _playerAssemblySources;
+
+            _playerAssemblySources = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var assembly in CompilationPipeline.GetAssemblies(AssembliesType.PlayerWithoutTestAssemblies))
+            {
+                foreach (var source in assembly.sourceFiles)
+                {
+                    _playerAssemblySources.Add(Normalize(source));
+                }
+            }
+
+            return _playerAssemblySources;
+        }
+    }
+
+    /// <summary>
+    /// Represents the includePlatforms value from an assembly definition file.
+    /// </summary>
+    [Serializable]
+    private struct AssemblyDefinitionData
+    {
+        /// <summary>
+        /// The build platform names listed in the assembly definition's
+        /// includePlatforms property.
+        /// </summary>
+        public string[] includePlatforms;
     }
 }
 #endif
