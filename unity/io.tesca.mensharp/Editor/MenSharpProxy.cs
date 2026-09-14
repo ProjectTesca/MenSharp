@@ -640,6 +640,26 @@ public static class MenSharpProxy
 
     /// The UdonBehaviour behind a referenced proxy. A null here means the
     /// reference will do nothing at runtime, which is worth saying out loud.
+    /// A value for the transfer summary that never asks a Unity object to
+    /// describe itself: `TextAsset.ToString` reads the asset's text, which
+    /// throws on an unassigned or destroyed reference.
+    private static string Describe(object value)
+    {
+        if (value == null)
+        {
+            return "null";
+        }
+        if (value is UnityEngine.Object unityObject)
+        {
+            return unityObject == null ? "null" : unityObject.name;
+        }
+        if (value is Array array)
+        {
+            return $"{value.GetType().GetElementType()?.Name}[{array.Length}]";
+        }
+        return value.ToString();
+    }
+
     private static UdonBehaviour PairedOrWarn(
         MenSharpBehaviour other, MenSharpBehaviour from, string field)
     {
@@ -764,6 +784,14 @@ public static class MenSharpProxy
         {
             transferred.Add(field.Name);
             object value = field.GetValue(proxy);
+            // an unassigned or destroyed reference is Unity's "fake null": an
+            // object whose native side is gone, which anything reading it
+            // throws on (TextAsset.ToString did, summarizing below). The
+            // program gets a real null
+            if (value is UnityEngine.Object unityValue && unityValue == null)
+            {
+                value = null;
+            }
             Type valueType = field.FieldType;
             // what you drag in is a proxy component; what the program can talk
             // to is the UdonBehaviour paired with it
@@ -860,7 +888,7 @@ public static class MenSharpProxy
             {
                 summary.Append(", ");
             }
-            summary.Append(field.Name).Append('=').Append(value ?? "null");
+            summary.Append(field.Name).Append('=').Append(Describe(value));
         }
 
         foreach (string stale in new List<string>(table.VariableSymbols))

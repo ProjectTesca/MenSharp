@@ -262,6 +262,11 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // the inspector string arrived; the fake-null TextAsset is null
+        smoke.RunProgram("ReadText");
+        Assert.AreEqual("hello", smoke.GetProgramVariable("readText"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("textAssetMissing"));
+
         // `[JsonIgnore]` on an unsupported type compiles; reading one throws
         smoke.RunProgram("JsonIgnored");
         Assert.AreEqual(42, smoke.GetProgramVariable("jsonIgnoredValue"));
@@ -341,6 +346,16 @@ public class MenSharpIntegrationTests
             modes.SetValue(Enum.ToObject(modeType, 1), 1);
             modes.SetValue(Enum.ToObject(modeType, 1), 2);
             MenSharpTestScene.Assign(smokeProxy, "modes", modes);
+        }
+        // a string set in the inspector, next to an object reference that is
+        // a "fake null" (a destroyed asset, as an unassigned field is after
+        // deserialization): the transfer must survive it
+        {
+            Component smokeProxy = MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke");
+            MenSharpTestScene.Assign(smokeProxy, "text", "hello");
+            var dead = new TextAsset("gone");
+            UnityEngine.Object.DestroyImmediate(dead);
+            MenSharpTestScene.Assign(smokeProxy, "textAsset", dead);
         }
         GameObject secondSmoke = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke2", "MenSharpRuntimeSmoke", Vector3.up * 4);
         GameObject targetObject = MenSharpTestScene.AddProxy("MenSharpRuntimeTarget", "MenSharpRuntimeTarget", Vector3.right * 4);
