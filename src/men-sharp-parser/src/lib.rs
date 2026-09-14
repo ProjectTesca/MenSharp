@@ -22,6 +22,7 @@ use crate::{
 pub mod ast;
 pub mod directive;
 pub mod error;
+pub mod escapes;
 pub mod lexer;
 pub mod parser;
 pub mod preprocess;
@@ -98,6 +99,12 @@ impl MenSharpAST {
         let source: Arc<str> = match preprocess::preprocess(&source, defines) {
             std::borrow::Cow::Borrowed(_) => source,
             std::borrow::Cow::Owned(blanked) => Arc::from(blanked),
+        };
+        // identifiers spelled with escapes or formatting characters, in
+        // their normalized spelling (see `escapes`) — same length again
+        let source: Arc<str> = match escapes::unescape_identifiers(&source) {
+            std::borrow::Cow::Borrowed(_) => source,
+            std::borrow::Cow::Owned(rewritten) => Arc::from(rewritten),
         };
         let allocator = Arc::new(Bump::new());
         let mut errors = std::vec::Vec::new();

@@ -261,6 +261,24 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         discardLambda = pair(5, 6) + lone(1);
     }
 
+    // identifiers spelled with unicode escapes (issue: syntax errors): one
+    // variable spelled three ways, a formatting character that is no part
+    // of the name, an escaped keyword that is an identifier
+    public int escapedA;
+    public int escapedAb;
+    public int escapedKeyword;
+
+    public void EscapedIdentifiers()
+    {
+        int \u0061 = 1;
+        \U00000061 = 2;
+        escapedA = a;
+        int a\u200Db = 3;
+        escapedAb = ab;
+        int \u0069nt = 4;
+        escapedKeyword = @int;
+    }
+
     // a class nested in the behaviour is an ordinary class (issue: `new
     // NestedData()` was "belongs to the behaviour itself")
     public class NestedData

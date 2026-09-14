@@ -1519,6 +1519,43 @@ fn a_type_nested_in_the_behaviour_is_an_ordinary_type() {
 }
 
 #[test]
+fn identifiers_may_be_spelled_with_unicode_escapes() {
+    // C# §6.4.3: `\u0061` in an identifier is `a`, a formatting character
+    // (`\u200D`) is no part of the name, an escaped keyword is an identifier
+    // (issue: "this is a type, not a value" and a cascade of syntax errors)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int a;
+            public int ab;
+            public int escapedKeyword;
+
+            public void Interact()
+            {
+                int \u0061 = 1;
+                \U00000061 = 2;
+                this.a = a;                       // 2: one variable, spelled three ways
+                int a\u200Db = 3;
+                this.ab = ab;                     // 3: the formatting character is not part of the name
+                int \u0069nt = 4;
+                escapedKeyword = @int;            // 4: an escaped keyword is an identifier
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "a"), 2);
+    assert_eq!(int_of(&emulator, "ab"), 3);
+    assert_eq!(int_of(&emulator, "escapedKeyword"), 4);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

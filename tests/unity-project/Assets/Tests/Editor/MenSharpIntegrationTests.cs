@@ -251,6 +251,12 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(2, smoke.GetProgramVariable("discardEvaluated"));
         Assert.AreEqual(3, smoke.GetProgramVariable("discardLambda"));
 
+        // identifiers spelled with unicode escapes
+        smoke.RunProgram("EscapedIdentifiers");
+        Assert.AreEqual(2, smoke.GetProgramVariable("escapedA"));
+        Assert.AreEqual(3, smoke.GetProgramVariable("escapedAb"));
+        Assert.AreEqual(4, smoke.GetProgramVariable("escapedKeyword"));
+
         // a class nested in the behaviour is instantiated and called like any other
         smoke.RunProgram("NestedType");
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
