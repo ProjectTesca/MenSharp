@@ -1412,6 +1412,61 @@ fn an_out_var_discard_declares_no_variable() {
     );
 }
 
+const UNBOX_EXTERNAL_ENUM: &str = r#"
+    using System;
+    using MenSharp;
+
+    public class Probe : MenSharpBehaviour
+    {
+        public int unboxed;
+        public int boxedBack;
+
+        T Unbox<T>(object value) { return (T)value; }
+
+        public void Interact()
+        {
+            StringComparison mode = Unbox<StringComparison>((object)5);   // OrdinalIgnoreCase
+            unboxed = (int)mode;                                          // 5
+            boxedBack = (int)Unbox<StringComparison>((object)mode);       // 5: already boxed
+        }
+    }
+"#;
+
+#[test]
+fn a_boxed_number_unboxes_as_an_external_enum_through_its_value_table() {
+    // `(T)(object)(int)n` with `T` an engine enum (the corlib's Json reader
+    // does this) used to copy the raw Int32 into the enum slot, and the
+    // first extern reading it halted the VM (issue: "Cannot retrieve heap
+    // variable of type 'Int32' as type 'ShadowCastingMode'"). Now a boxed
+    // Int32 goes through the enum's value table, a boxed enum passes
+    let Some(emulator) = run_behaviour(UNBOX_EXTERNAL_ENUM, "Probe", "_interact") else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "unboxed"), 5);
+    assert_eq!(int_of(&emulator, "boxedBack"), 5);
+
+    // the emulator runs enums as plain Int32s, so the shape of the code is
+    // what shows the table is consulted: the enum's value table and the
+    // `typeof(Int32)` the runtime test compares against are both there
+    let mut sources = vec![SourceCode::new("test.cs", UNBOX_EXTERNAL_ENUM)];
+    sources.extend(Compiler::corlib_sources());
+    let Some(program) = compile_behaviour(sources, "Probe") else {
+        return;
+    };
+    let has_table = program.output.program.data.iter().any(|symbol| {
+        matches!(
+            &symbol.init,
+            men_sharp_asm::HeapInit::EnumArray { dotnet_type, .. }
+                if dotnet_type == "System.StringComparison"
+        )
+    });
+    let has_int32_type = program.output.program.data.iter().any(|symbol| {
+        matches!(&symbol.init, men_sharp_asm::HeapInit::TypeOf(name) if name == "System.Int32")
+    });
+    assert!(has_table, "no value table for System.StringComparison");
+    assert!(has_int32_type, "no typeof(Int32) for the runtime test");
+}
+
 #[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,

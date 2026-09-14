@@ -1029,6 +1029,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             return self.convert_to_external_enum(ctx, source, from, to, id, span);
         }
+        // `(T)(object)number` with `T` an external enum — generic code
+        // unboxing a number it boxed itself, as the corlib's Json reader
+        // does: the CLR lets an enum unbox from its underlying type, so a
+        // boxed Int32 goes through the value table; an already boxed enum
+        // passes as it is
+        if let Some(id) = self.external_enum(to)
+            && self.external_enum(from).is_none()
+            && self.numeric_rank(from).is_none()
+            && self.is_reference_type(from)
+        {
+            return self.unbox_as_external_enum(ctx, source, to, id, span);
+        }
         let from_name = self.extern_type_name(from);
         let to_name = self.extern_type_name(to);
         match (from_name, to_name) {
@@ -1149,6 +1161,48 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let index = self.convert(ctx, source, from, &int32, span.clone());
         self.box_external_enum(ctx, index, to, id, span)
             .unwrap_or(source)
+    }
+
+    /// An `object` as a value of the external enum `to`: a boxed Int32 is
+    /// looked up in the enum's value table (see convert_to_external_enum),
+    /// anything else — the boxed enum itself — is copied through.
+    fn unbox_as_external_enum(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        source: DataId,
+        to: &Type,
+        id: men_sharp_semantics::ExternalTypeId,
+        span: Range<usize>,
+    ) -> DataId {
+        let int32 = self.corlib_type("Int32");
+        let Some(int32_type) = self.type_constant(&int32) else {
+            return source;
+        };
+        let is_int = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemType.__IsInstanceOfType__SystemObject__SystemBoolean",
+            &[int32_type, source, is_int],
+            span.clone(),
+        );
+        let udon_type = self.heap_type(to);
+        let out = self.temp(&udon_type);
+        let boxed_already = self.fresh_label("enum_unbox_boxed");
+        let done = self.fresh_label("enum_unbox_done");
+        self.program.code.push(Op::Push(is_int));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(boxed_already)));
+        let number = self.temp("SystemInt32");
+        self.copy(source, number);
+        if let Some(value) = self.box_external_enum(ctx, number, to, id, span) {
+            self.copy(value, out);
+        }
+        self.program.code.push(Op::Jump(Target::Label(done)));
+        self.program.code.push(Op::Label(boxed_already));
+        self.copy(source, out);
+        self.program.code.push(Op::Label(done));
+        out
     }
 
     /// The enum's value table (see convert_to_external_enum) and its length,

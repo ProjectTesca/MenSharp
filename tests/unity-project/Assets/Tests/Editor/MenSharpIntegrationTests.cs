@@ -251,6 +251,11 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(2, smoke.GetProgramVariable("discardEvaluated"));
         Assert.AreEqual(3, smoke.GetProgramVariable("discardLambda"));
 
+        // an engine enum parsed from JSON is usable by an extern
+        smoke.RunProgram("JsonEnum");
+        Assert.AreEqual(true, smoke.GetProgramVariable("jsonEnumEquals"));
+        Assert.AreEqual("{\"mode\":5}", smoke.GetProgramVariable("jsonEnumBack"));
+
         // a user enum transferred from the inspector reaches the heap as Int32
         smoke.RunProgram("CheckMode");
         Assert.AreEqual(true, smoke.GetProgramVariable("modeIsSecond"));

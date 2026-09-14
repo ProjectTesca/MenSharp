@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using MenSharp;
+using MenSharp.Json;
 using UnityEngine;
 using VRC.SDK3.Image;
 
@@ -260,6 +261,18 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         discardLambda = pair(5, 6) + lone(1);
     }
 
+    // an engine enum read from JSON is the real boxed enum, not the Int32
+    // the reader parsed (issue: the VM halted in the first extern given it)
+    public bool jsonEnumEquals;
+    public string jsonEnumBack;
+
+    public void JsonEnum()
+    {
+        var parsed = Json.Parse<JsonComparison>("{\"mode\": 5}").Unwrap(); // OrdinalIgnoreCase
+        jsonEnumEquals = "abc".Equals("ABC", parsed.Mode);                  // an extern unboxes it
+        jsonEnumBack = Json.Stringify(parsed);                              // {"mode":5}
+    }
+
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
@@ -346,6 +359,13 @@ public static class GenericCache<T>
     // a constant-literal initializer: one per closed type (int and string
     // each start at 7), baked with no code
     public static int Seeded = 7;
+}
+
+// what `JsonEnum` reads: an engine enum property, as the issue wrote it
+public class JsonComparison
+{
+    [JsonName("mode"), JsonRequired]
+    public StringComparison Mode { get; }
 }
 
 // a static and a class whose members `RefAliasing` takes `ref` to
