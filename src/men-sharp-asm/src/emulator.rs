@@ -1419,6 +1419,20 @@ impl Emulator {
                 self.heap[args[2]] = value;
                 Ok(())
             }
+            "SystemArray.__SetValue__SystemObject_SystemInt32__SystemVoid" => {
+                let args = self.pop_arguments(3)?;
+                let array = self.heap[args[0]].as_array()?;
+                let value = self.heap[args[1]].clone();
+                let index = self.heap[args[2]].as_i32()?;
+                let mut elements = array.borrow_mut();
+                let length = elements.len();
+                let slot = elements
+                    .get_mut(index.max(0) as usize)
+                    .filter(|_| index >= 0)
+                    .ok_or(EmulatorError::IndexOutOfRange { index, length })?;
+                *slot = value;
+                Ok(())
+            }
             sig if is_array_signature(sig, "__Set__SystemInt32_") => {
                 let args = self.pop_arguments(3)?;
                 let array = self.heap[args[0]].as_array()?;

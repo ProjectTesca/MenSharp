@@ -229,6 +229,13 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("RefAliasing");
         Assert.AreEqual(8, smoke.GetProgramVariable("refAliased"));
         Assert.AreEqual(20, smoke.GetProgramVariable("refViaField"));
+        // ...and element referents: a static, a class field, an array
+        // element, a captured local
+        Assert.AreEqual(8, smoke.GetProgramVariable("refViaStatic"));
+        Assert.AreEqual(20, smoke.GetProgramVariable("refStaticReadsItself"));
+        Assert.AreEqual(20, smoke.GetProgramVariable("refViaClassField"));
+        Assert.AreEqual(8, smoke.GetProgramVariable("refViaElement"));
+        Assert.AreEqual(105, smoke.GetProgramVariable("refViaCaptured"));
 
         // a user enum transferred from the inspector reaches the heap as Int32
         smoke.RunProgram("CheckMode");

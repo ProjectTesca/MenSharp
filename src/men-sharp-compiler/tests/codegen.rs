@@ -1129,6 +1129,65 @@ fn ref_and_out_reach_through_forwarding_elements_and_externs() {
 }
 
 #[test]
+fn ref_aliases_elements_statics_class_fields_and_captured_locals() {
+    // referents that are elements of an `object[]` rather than heap symbols
+    // of their own — a shared static, a class instance's field, a captured
+    // local's box — and array elements proper are aliased too, as element
+    // cells; a copy would give 7, 13, 7 and 103
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public static class Counter { public static int total; }
+        public class Holder { public int v; }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int viaStatic;
+            public int staticReadsItself;
+            public int viaClassField;
+            public int viaElement;
+            public int viaCaptured;
+
+            void Bump(ref int a, ref int b) { a++; b += a; }
+            void SetTotal(ref int a) { a = 10; a += Counter.total; }
+            void Fill(ref int a, Holder h) { a = 10; a += h.v; }
+            void Around(ref int v, System.Action act) { act(); v += 100; act(); }
+
+            public void Interact()
+            {
+                Counter.total = 3;
+                Bump(ref Counter.total, ref Counter.total);
+                viaStatic = Counter.total;             // 8
+                Counter.total = 3;
+                SetTotal(ref Counter.total);
+                staticReadsItself = Counter.total;     // 20
+                var h = new Holder { v = 3 };
+                Fill(ref h.v, h);
+                viaClassField = h.v;                   // 20
+                int[] items = { 3 };
+                Bump(ref items[0], ref items[0]);
+                viaElement = items[0];                 // 8
+                int c = 3;
+                System.Action bump = () => c++;
+                Around(ref c, bump);
+                viaCaptured = c;                       // 105: 4, 104, 105
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "viaStatic"), 8);
+    assert_eq!(int_of(&emulator, "staticReadsItself"), 20);
+    assert_eq!(int_of(&emulator, "viaClassField"), 20);
+    assert_eq!(int_of(&emulator, "viaElement"), 8);
+    assert_eq!(int_of(&emulator, "viaCaptured"), 105);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

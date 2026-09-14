@@ -4865,6 +4865,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 Some((self.reference_cell(ctx, receiver, name, span), None))
             }
             Place::ByName { cell, .. } => Some((cell, None)),
+            // an element of an array — or of the `object[]` a class instance,
+            // the shared statics, or a captured local's box is: the array and
+            // the index name it, aliased like a symbol is
+            Place::Field { object, index, .. } => {
+                Some((self.element_cell(ctx, object, index, span), None))
+            }
+            Place::Element {
+                array,
+                index,
+                array_type,
+                ..
+            } => {
+                // `ref items[9]` throws at the call, as in C#, not on the
+                // callee's first touch
+                self.check_array_access(ctx, array, index, &array_type, span.clone());
+                Some((self.element_cell(ctx, array, index, span), None))
+            }
             other => {
                 let temporary = self.temp_for(parameter_type);
                 if modifier == ArgumentModifier::Ref {

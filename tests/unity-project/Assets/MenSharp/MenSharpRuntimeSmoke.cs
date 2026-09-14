@@ -170,6 +170,19 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     void R1(ref int a, ref int b) { a++; b += a; }
     void R2(ref int a) { a = 10; a += this.refField; }
 
+    // ...and so are referents that are elements rather than heap symbols: a
+    // shared static (8, and 20 reading itself), a class instance's field
+    // (20), an array element (8), a captured local (105: bumped, +100,
+    // bumped — a copy would be 103)
+    public int refViaStatic;
+    public int refStaticReadsItself;
+    public int refViaClassField;
+    public int refViaElement;
+    public int refViaCaptured;
+    void R3(ref int a) { a = 10; a += RefCounter.total; }
+    void R4(ref int a, RefHolder h) { a = 10; a += h.v; }
+    void R5(ref int v, System.Action act) { act(); v += 100; act(); }
+
     public void RefAliasing()
     {
         int x1 = 3;
@@ -178,6 +191,23 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         refField = 3;
         R2(ref this.refField);
         refViaField = refField;
+
+        RefCounter.total = 3;
+        R1(ref RefCounter.total, ref RefCounter.total);
+        refViaStatic = RefCounter.total;
+        RefCounter.total = 3;
+        R3(ref RefCounter.total);
+        refStaticReadsItself = RefCounter.total;
+        var h = new RefHolder { v = 3 };
+        R4(ref h.v, h);
+        refViaClassField = h.v;
+        int[] items = { 3 };
+        R1(ref items[0], ref items[0]);
+        refViaElement = items[0];
+        int c = 3;
+        System.Action bump = () => c++;
+        R5(ref c, bump);
+        refViaCaptured = c;
     }
 
     // a user enum (byte-backed, even) set from the inspector: the proxy
@@ -266,6 +296,17 @@ public static class GenericCache<T>
     // a constant-literal initializer: one per closed type (int and string
     // each start at 7), baked with no code
     public static int Seeded = 7;
+}
+
+// a static and a class whose members `RefAliasing` takes `ref` to
+public static class RefCounter
+{
+    public static int total;
+}
+
+public class RefHolder
+{
+    public int v;
 }
 
 // a byte-backed enum: an Int32 on the M# heap whatever its C# underlying type

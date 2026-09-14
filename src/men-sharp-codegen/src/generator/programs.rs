@@ -38,6 +38,10 @@ pub(super) const UDONSHARP_BEHAVIOUR: &str = "UdonSharp.UdonSharpBehaviour";
 
 const RECEIVER: &str = BEHAVIOUR_EXTERN_TYPE;
 
+/// The index a reference cell carries when it names a whole heap symbol
+/// rather than an element.
+const WHOLE_SYMBOL: i32 = -1;
+
 /// What a layout is filed under: a method, or one accessor of a property.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) enum LayoutKey {
@@ -801,12 +805,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         );
     }
 
-    /// The variable comes back boxed as `object`; the value inside is already
-    /// of the right runtime type, so copying it into a typed slot is all the
-    /// conversion Udon needs.
-    /// A reference cell for a `ref`/`out` argument (see `Place::ByName`): a
-    /// two-element `object[]` — the behaviour the referent lives in, then
-    /// its heap symbol name.
+    /// A reference cell for a `ref`/`out` argument (see `Place::ByName`)
+    /// naming a whole heap symbol: `[behaviour, symbol name, -1]`.
     pub(super) fn reference_cell(
         &mut self,
         ctx: &Ctx<'ast>,
@@ -814,23 +814,85 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         name: DataId,
         span: Range<usize>,
     ) -> DataId {
+        let cell = self.empty_reference_cell(ctx, span.clone());
+        let zero = self.int_constant(0);
+        let one = self.int_constant(1);
         let two = self.int_constant(2);
+        let whole = self.int_constant(WHOLE_SYMBOL);
+        self.set_element(ctx, cell, zero, target, span.clone());
+        self.set_element(ctx, cell, one, name, span.clone());
+        self.set_element(ctx, cell, two, whole, span);
+        cell
+    }
+
+    /// A reference cell naming one element of an array — `ref items[i]`, a
+    /// field of a class instance, a shared static, a captured local's box:
+    /// `[array, null, index]`. The array object itself goes in, not what
+    /// held it, so the alias survives the holder being reassigned.
+    pub(super) fn element_cell(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        array: DataId,
+        index: DataId,
+        span: Range<usize>,
+    ) -> DataId {
+        let cell = self.empty_reference_cell(ctx, span.clone());
+        let zero = self.int_constant(0);
+        let two = self.int_constant(2);
+        self.set_element(ctx, cell, zero, array, span.clone());
+        self.set_element(ctx, cell, two, index, span);
+        cell
+    }
+
+    fn empty_reference_cell(&mut self, ctx: &Ctx<'ast>, span: Range<usize>) -> DataId {
+        let three = self.int_constant(3);
         let cell = self.temp("SystemObjectArray");
         self.call_extern(
             ctx,
             "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
-            &[two, cell],
-            span.clone(),
+            &[three, cell],
+            span,
         );
-        let zero = self.int_constant(0);
-        let one = self.int_constant(1);
-        self.set_element(ctx, cell, zero, target, span.clone());
-        self.set_element(ctx, cell, one, name, span);
         cell
     }
 
-    /// The behaviour and symbol name a reference cell holds.
-    fn reference_cell_parts(
+    /// Opens the two-way split every access through a reference cell makes.
+    /// Returns `(index, element_label, done_label)`: the cell's index, with
+    /// the code now on the whole-symbol path — the caller emits that path, a
+    /// jump to `done_label`, `element_label`, the element path, `done_label`.
+    fn branch_on_reference_cell(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        cell: DataId,
+        span: Range<usize>,
+    ) -> (DataId, LabelId, LabelId) {
+        let two = self.int_constant(2);
+        let index = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemObjectArray.__Get__SystemInt32__SystemObject",
+            &[cell, two, index],
+            span.clone(),
+        );
+        let whole = self.int_constant(WHOLE_SYMBOL);
+        let is_symbol = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
+            &[index, whole, is_symbol],
+            span,
+        );
+        let element = self.fresh_label("ref_element");
+        let done = self.fresh_label("ref_done");
+        self.program.code.push(Op::Push(is_symbol));
+        self.program
+            .code
+            .push(Op::JumpIfFalse(Target::Label(element)));
+        (index, element, done)
+    }
+
+    /// The behaviour and symbol name of a whole-symbol cell.
+    fn reference_cell_symbol(
         &mut self,
         ctx: &Ctx<'ast>,
         cell: DataId,
@@ -855,7 +917,26 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         (target, name)
     }
 
-    /// Reads the variable a reference cell names.
+    /// The array of an element cell.
+    fn reference_cell_array(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        cell: DataId,
+        span: Range<usize>,
+    ) -> DataId {
+        let zero = self.int_constant(0);
+        let array = self.temp("SystemArray");
+        self.call_extern(
+            ctx,
+            "SystemObjectArray.__Get__SystemInt32__SystemObject",
+            &[cell, zero, array],
+            span,
+        );
+        array
+    }
+
+    /// Reads the variable a reference cell names: the symbol through
+    /// `GetProgramVariable`, the element through `Array.GetValue`.
     pub(super) fn get_program_variable_at(
         &mut self,
         ctx: &Ctx<'ast>,
@@ -863,20 +944,35 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ty: &Type,
         span: Range<usize>,
     ) -> DataId {
-        let (target, name) = self.reference_cell_parts(ctx, cell, span.clone());
         let boxed = self.temp("SystemObject");
+        let (index, element, done) = self.branch_on_reference_cell(ctx, cell, span.clone());
+        let (target, name) = self.reference_cell_symbol(ctx, cell, span.clone());
         self.call_extern(
             ctx,
             &format!("{RECEIVER}.__GetProgramVariable__SystemString__SystemObject"),
             &[target, name, boxed],
+            span.clone(),
+        );
+        self.program.code.push(Op::Jump(Target::Label(done)));
+        self.program.code.push(Op::Label(element));
+        let array = self.reference_cell_array(ctx, cell, span.clone());
+        self.call_extern(
+            ctx,
+            "SystemArray.__GetValue__SystemInt32__SystemObject",
+            &[array, index, boxed],
             span,
         );
+        self.program.code.push(Op::Label(done));
+        // the value comes back boxed as `object`, already of the right
+        // runtime type: copying it into a typed slot is all the conversion
+        // Udon needs
         let out = self.temp_for(ty);
         self.copy(boxed, out);
         out
     }
 
-    /// Writes the variable a reference cell names.
+    /// Writes the variable a reference cell names: the symbol through
+    /// `SetProgramVariable`, the element through `Array.SetValue`.
     pub(super) fn set_program_variable_at(
         &mut self,
         ctx: &Ctx<'ast>,
@@ -884,13 +980,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         value: DataId,
         span: Range<usize>,
     ) {
-        let (target, name) = self.reference_cell_parts(ctx, cell, span.clone());
+        let (index, element, done) = self.branch_on_reference_cell(ctx, cell, span.clone());
+        let (target, name) = self.reference_cell_symbol(ctx, cell, span.clone());
         self.call_extern(
             ctx,
             &format!("{RECEIVER}.__SetProgramVariable__SystemString_SystemObject__SystemVoid"),
             &[target, name, value],
+            span.clone(),
+        );
+        self.program.code.push(Op::Jump(Target::Label(done)));
+        self.program.code.push(Op::Label(element));
+        let array = self.reference_cell_array(ctx, cell, span.clone());
+        self.call_extern(
+            ctx,
+            "SystemArray.__SetValue__SystemObject_SystemInt32__SystemVoid",
+            &[array, value, index],
             span,
         );
+        self.program.code.push(Op::Label(done));
     }
 
     pub(super) fn get_program_variable(

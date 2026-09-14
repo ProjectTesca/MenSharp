@@ -737,13 +737,15 @@ enum Place {
         name: String,
         ty: Type,
     },
-    /// A `ref`/`out` parameter of a source method: `cell` is a two-element
-    /// `object[]` naming the referent — the behaviour it lives in and its heap
-    /// symbol — and every read and write goes through `GetProgramVariable` /
-    /// `SetProgramVariable` on it. That is what makes the parameter an alias
-    /// of the caller's variable (`F(ref x, ref x)` sees one `x`, a callee
-    /// reading `this.x` sees what it wrote to `ref this.x`), where a copied-in
-    /// slot could not be.
+    /// A `ref`/`out` parameter of a source method: `cell` is a three-element
+    /// `object[]` naming the referent — `[behaviour, heap symbol, -1]` for a
+    /// whole variable, read and written through `GetProgramVariable` /
+    /// `SetProgramVariable`; `[array, null, index]` for one element of an
+    /// array (a class instance's field, a shared static, a captured local's
+    /// box, `items[i]`), through `Array.GetValue` / `SetValue`. That is what
+    /// makes the parameter an alias of the caller's variable (`F(ref x, ref
+    /// x)` sees one `x`, a callee reading `this.x` sees what it wrote to `ref
+    /// this.x`), where a copied-in slot could not be.
     ByName {
         cell: DataId,
         ty: Type,
