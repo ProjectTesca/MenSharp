@@ -334,13 +334,13 @@ public static class MenSharpSources
     {
         // by asmdef
         var asmdefPath = CompilationPipeline.GetAssemblyDefinitionFilePathFromScriptPath(path);
-        if (string.IsNullOrEmpty(asmdefPath)) return false;
+        if (string.IsNullOrEmpty(asmdefPath)) return true;
         var asmdef = AssetDatabase.LoadAssetAtPath<AssemblyDefinitionAsset>(asmdefPath);
-        if (asmdef == null) return false;
+        if (asmdef == null) return true;
         var includePlatforms = JsonUtility.FromJson<AssemblyDefinitionData>(asmdef.text).includePlatforms ?? Array.Empty<string>();
 
         // empty = Any Platform
-        if (includePlatforms.Length == 0) return false;
+        if (includePlatforms.Length == 0) return true;
 
         var currentPlatForm = BuildPipeline.GetBuildTargetName(EditorUserBuildSettings.activeBuildTarget);
         return includePlatforms.Any(platform => string.Equals(platform, currentPlatForm));
