@@ -262,6 +262,11 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // `[JsonIgnore]` on an unsupported type compiles; reading one throws
+        smoke.RunProgram("JsonIgnored");
+        Assert.AreEqual(42, smoke.GetProgramVariable("jsonIgnoredValue"));
+        StringAssert.Contains("Vector3", (string)smoke.GetProgramVariable("jsonUnsupportedMessage"));
+
         // an engine enum parsed from JSON is usable by an extern
         smoke.RunProgram("JsonEnum");
         Assert.AreEqual(true, smoke.GetProgramVariable("jsonEnumEquals"));

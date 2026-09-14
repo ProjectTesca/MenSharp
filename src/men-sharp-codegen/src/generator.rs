@@ -120,6 +120,8 @@ pub fn generate(
         emitted_dispatchers: HashSet::default(),
         export_layouts: HashMap::default(),
         call_edges: HashMap::default(),
+        field_visits: HashSet::default(),
+        deferred_unsupported: Vec::new(),
         temp_counter: 0,
         temp_live: Vec::new(),
         effects: Effects::default(),
@@ -489,6 +491,15 @@ struct Generator<'a, 'ast> {
     /// and accessors — the names UdonSharp would use. See `programs`.
     export_layouts: HashMap<SymbolId, HashMap<programs::LayoutKey, programs::ExportLayout>>,
     call_edges: HashMap<FunctionKey, HashSet<FunctionKey>>,
+    /// The `Visit<F>` instances `Reflect.VisitFields` calls, one per field.
+    /// Whether the visitor takes a field is its own decision at run time
+    /// (`[JsonIgnore]`), so what is unsupported behind one of these is
+    /// only an error when it is also reached some other way — see
+    /// `report_unsupported_reached`.
+    field_visits: HashSet<FunctionKey>,
+    /// `Reflect.Unsupported<T>` calls met so far: the function they are in
+    /// and the error each would be, decided once the call graph is whole.
+    deferred_unsupported: Vec<(FunctionKey, CodegenError)>,
     temp_counter: usize,
     /// The temps of the function being compiled, in allocation order, each
     /// with its Udon type. A statement releases what it allocated once it is
@@ -1214,6 +1225,49 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
 
         self.resolve_frame_markers(init_label);
+
+        self.report_unsupported_reached();
+    }
+
+    /// `Reflect.Unsupported<T>` is a compile error where the code is
+    /// reached — from an event, through calls — other than through a
+    /// `Visit<F>` a `Reflect.VisitFields` made: a visitor decides at run
+    /// time whether it takes a field (`[JsonIgnore]`), so behind one the
+    /// call is a run-time exception instead, thrown only if it does.
+    fn report_unsupported_reached(&mut self) {
+        if self.deferred_unsupported.is_empty() {
+            return;
+        }
+        let mut called: HashSet<&FunctionKey> = HashSet::default();
+        for callees in self.call_edges.values() {
+            called.extend(callees.iter());
+        }
+        let mut reached: HashSet<FunctionKey> = HashSet::default();
+        let mut pending: Vec<FunctionKey> = self
+            .functions
+            .keys()
+            .filter(|key| !called.contains(key) && !self.field_visits.contains(key))
+            .cloned()
+            .collect();
+        while let Some(key) = pending.pop() {
+            if !reached.insert(key.clone()) {
+                continue;
+            }
+            if let Some(callees) = self.call_edges.get(&key) {
+                pending.extend(
+                    callees
+                        .iter()
+                        .filter(|callee| !self.field_visits.contains(callee))
+                        .cloned(),
+                );
+            }
+        }
+        let deferred = std::mem::take(&mut self.deferred_unsupported);
+        for (key, error) in deferred {
+            if reached.contains(&key) {
+                self.errors.push(error);
+            }
+        }
     }
 
     /// Compiles everything queued, to a fixpoint: draining the queue may

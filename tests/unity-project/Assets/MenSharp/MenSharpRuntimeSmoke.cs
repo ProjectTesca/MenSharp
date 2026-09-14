@@ -298,6 +298,25 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         nestedDoubled = data.Doubled();
     }
 
+    // a `[JsonIgnore]`d field of a type JSON cannot read is left alone
+    // (issue: a compile error naming Vector3); the same field without the
+    // attribute is an exception when the JSON actually has it
+    public int jsonIgnoredValue;
+    public string jsonUnsupportedMessage;
+
+    public void JsonIgnored()
+    {
+        jsonIgnoredValue = Json.Parse<JsonPartial>("{\"value\":42}").Unwrap().Value;
+        try
+        {
+            Json.Parse<JsonUnsupported>("{\"value\":1,\"Position\":0}");
+        }
+        catch (Exception e)
+        {
+            jsonUnsupportedMessage = e.Message;
+        }
+    }
+
     // an engine enum read from JSON is the real boxed enum, not the Int32
     // the reader parsed (issue: the VM halted in the first extern given it)
     public bool jsonEnumEquals;
@@ -396,6 +415,24 @@ public static class GenericCache<T>
     // a constant-literal initializer: one per closed type (int and string
     // each start at 7), baked with no code
     public static int Seeded = 7;
+}
+
+// what `JsonIgnored` reads: the issue's class, and one that forgot the attribute
+public class JsonPartial
+{
+    [JsonName("value")]
+    public int Value { get; }
+
+    [JsonIgnore]
+    public Vector3 Position { get; }
+}
+
+public class JsonUnsupported
+{
+    [JsonName("value")]
+    public int Value { get; }
+
+    public Vector3 Position { get; }
 }
 
 // what `JsonEnum` reads: an engine enum property, as the issue wrote it

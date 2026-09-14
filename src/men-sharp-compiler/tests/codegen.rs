@@ -1555,6 +1555,119 @@ fn identifiers_may_be_spelled_with_unicode_escapes() {
     assert_eq!(int_of(&emulator, "escapedKeyword"), 4);
 }
 
+/// Codegen errors of a behaviour compiled with the corlib, as text.
+fn codegen_messages(source: &str, class_path: &str) -> Option<Vec<String>> {
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, class_path)?;
+    Some(
+        program
+            .output
+            .errors
+            .iter()
+            .map(|error| error.message.to_string())
+            .collect(),
+    )
+}
+
+const SKIPPING_VISITOR: &str = r#"
+    using System;
+    using MenSharp;
+    using MenSharp.Reflection;
+
+    public class SkipAttribute : Attribute { }
+
+    public class Data
+    {
+        public int Value;
+        [Skip] public DateTime Stamp;
+    }
+
+    public class Unskipped
+    {
+        public int Value;
+        public DateTime Stamp;
+    }
+
+    public class Reader : IFieldVisitor
+    {
+        public void Visit<F>(FieldInfo field, ref F value)
+        {
+            if (field.Has<SkipAttribute>()) return;
+            value = Convert<F>();
+        }
+
+        public F Convert<F>()
+        {
+            if (typeof(F) == typeof(int)) { return (F)(object)7; }
+            else { Reflect.Unsupported<F>("Reader"); return default(F); }
+        }
+    }
+"#;
+
+#[test]
+fn an_unsupported_type_behind_a_skipped_field_visit_is_no_error() {
+    // `Reflect.VisitFields` instantiates the visitor's `Visit<F>` for every
+    // field, skipped ones included, and `Reflect.Unsupported` behind it was
+    // a compile error for a field the visitor never reads (issue: a
+    // `[JsonIgnore]`d Vector3 — "`Json.Parse` does not support
+    // `UnityEngine.Vector3`"). The error now waits for the call graph:
+    // reached only through a field visit, it is an exception thrown if the
+    // visitor does read the field
+    let source = format!(
+        r#"{SKIPPING_VISITOR}
+        public class Probe : MenSharpBehaviour
+        {{
+            public int value;
+            public string thrown;
+            public void Interact()
+            {{
+                var data = new Data();
+                Reflect.VisitFields(ref data, new Reader());
+                value = data.Value;                              // 7: Stamp skipped
+                var unskipped = new Unskipped();
+                try {{ Reflect.VisitFields(ref unskipped, new Reader()); }}
+                catch (InvalidOperationException e) {{ thrown = e.Message; }}
+            }}
+        }}
+        "#
+    );
+    let Some(emulator) = run_behaviour(&source, "Probe", "_interact") else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "value"), 7);
+    assert!(
+        string_of(&emulator, "thrown").contains("DateTime"),
+        "{}",
+        string_of(&emulator, "thrown")
+    );
+}
+
+#[test]
+fn an_unsupported_type_reached_directly_is_still_an_error() {
+    let source = format!(
+        r#"{SKIPPING_VISITOR}
+        public class Probe : MenSharpBehaviour
+        {{
+            public string text;
+            public void Interact()
+            {{
+                text = new Reader().Convert<DateTime>().ToString();
+            }}
+        }}
+        "#
+    );
+    let Some(messages) = codegen_messages(&source, "Probe") else {
+        return;
+    };
+    assert!(
+        messages
+            .iter()
+            .any(|message| message.contains("does not support")),
+        "{messages:?}"
+    );
+}
+
 #[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,

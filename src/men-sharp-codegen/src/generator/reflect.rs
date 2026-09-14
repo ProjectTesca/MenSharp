@@ -109,14 +109,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         _ => None,
                     })
                     .unwrap_or_else(|| "this code".to_string());
-                self.error(
+                // an error once the call graph shows the code reached (see
+                // `report_unsupported_reached`); where only a field visitor
+                // could reach it, an exception thrown if one does
+                self.deferred_unsupported.push((
+                    ctx.key.clone(),
+                    CodegenError {
+                        message: Message::key("codegen.reflect_what_does_not_support_display")
+                            .arg("what", what.clone())
+                            .arg("display", display.clone()),
+                        file: ctx.file,
+                        span: span.clone(),
+                    },
+                ));
+                let message =
+                    self.string_constant(&format!("`{what}` does not support `{display}`"));
+                self.throw_new(
                     ctx,
-                    Message::key("codegen.reflect_what_does_not_support_display")
-                        .arg("what", what)
-                        .arg("display", display),
+                    &["System", "InvalidOperationException"],
+                    Some(message),
                     span,
                 );
-                Piece::Error
+                Piece::Void
             }
             "IsObject" | "IsArray" | "IsList" | "IsNullable" | "IsEnum" | "Is" => {
                 let answer = match (name, type_arguments.as_slice()) {
@@ -352,6 +366,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let name = self.string_constant(&name);
             let target_behaviour = self.self_behaviour_slot();
             let cell = self.reference_cell(ctx, target_behaviour, name, span.clone());
+            self.field_visits.insert(key.clone());
             self.call_function(
                 ctx,
                 &key,
