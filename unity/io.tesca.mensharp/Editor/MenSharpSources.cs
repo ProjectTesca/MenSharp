@@ -319,8 +319,11 @@ public static class MenSharpSources
             }
         }
 
-        // by assembly & asmdef
-        if (!IsSourceInPlayerAssembly(normalized) || !IsSourceIncludedInTarget(normalized)) return true;
+        // by asmdef
+        if (!IsSourceIncludedInTarget(normalized)) return true;
+
+        // by assembly & reference
+        if (!(IsSourceInPlayerAssembly(normalized) && IsSourceReferencedByPlayerAssembly(normalized))) return true;
 
         return false;
     }
@@ -332,7 +335,7 @@ public static class MenSharpSources
 
     private static bool IsSourceIncludedInTarget(string path)
     {
-        // by asmdef
+        // get asmdef data
         var asmdefPath = CompilationPipeline.GetAssemblyDefinitionFilePathFromScriptPath(path);
         if (string.IsNullOrEmpty(asmdefPath)) return true;
         var asmdef = AssetDatabase.LoadAssetAtPath<AssemblyDefinitionAsset>(asmdefPath);
@@ -344,6 +347,19 @@ public static class MenSharpSources
 
         var currentPlatForm = BuildPipeline.GetBuildTargetName(EditorUserBuildSettings.activeBuildTarget);
         return includePlatforms.Any(platform => string.Equals(platform, currentPlatForm));
+    }
+
+    private static bool IsSourceReferencedByPlayerAssembly(string path)
+    {
+        var assemblyName = CompilationPipeline.GetAssemblyNameFromScriptPath(path);
+        if (string.IsNullOrEmpty(assemblyName)) return true;
+
+        // predefined assemblies are Player roots
+        if (assemblyName.StartsWith("Assembly-CSharp", StringComparison.Ordinal))  return true;
+
+        return CompilationPipeline.GetAssemblies(AssembliesType.PlayerWithoutTestAssemblies)
+            .SelectMany(assembly => assembly.assemblyReferences)
+            .Any(reference => reference.name == assemblyName);
     }
 
     /// <summary>
