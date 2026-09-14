@@ -161,6 +161,25 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         overloadShort = F2(x);
     }
 
+    // `ref` is an alias: `R1(ref x1, ref x1)` sees one variable (8, not 7),
+    // and `R2(ref this.refField)` reading `this.refField` sees its own write
+    // (20, not 13)
+    public int refAliased;
+    public int refViaField;
+    public int refField;
+    void R1(ref int a, ref int b) { a++; b += a; }
+    void R2(ref int a) { a = 10; a += this.refField; }
+
+    public void RefAliasing()
+    {
+        int x1 = 3;
+        R1(ref x1, ref x1);
+        refAliased = x1;
+        refField = 3;
+        R2(ref this.refField);
+        refViaField = refField;
+    }
+
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.

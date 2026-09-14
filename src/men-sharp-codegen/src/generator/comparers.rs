@@ -128,6 +128,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 vec![b],
                 Vec::new(),
                 Vec::new(),
+                Vec::new(),
                 span.clone(),
                 false,
             ) {

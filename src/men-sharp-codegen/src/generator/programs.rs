@@ -804,6 +804,95 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// The variable comes back boxed as `object`; the value inside is already
     /// of the right runtime type, so copying it into a typed slot is all the
     /// conversion Udon needs.
+    /// A reference cell for a `ref`/`out` argument (see `Place::ByName`): a
+    /// two-element `object[]` — the behaviour the referent lives in, then
+    /// its heap symbol name.
+    pub(super) fn reference_cell(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        target: DataId,
+        name: DataId,
+        span: Range<usize>,
+    ) -> DataId {
+        let two = self.int_constant(2);
+        let cell = self.temp("SystemObjectArray");
+        self.call_extern(
+            ctx,
+            "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
+            &[two, cell],
+            span.clone(),
+        );
+        let zero = self.int_constant(0);
+        let one = self.int_constant(1);
+        self.set_element(ctx, cell, zero, target, span.clone());
+        self.set_element(ctx, cell, one, name, span);
+        cell
+    }
+
+    /// The behaviour and symbol name a reference cell holds.
+    fn reference_cell_parts(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        cell: DataId,
+        span: Range<usize>,
+    ) -> (DataId, DataId) {
+        let zero = self.int_constant(0);
+        let one = self.int_constant(1);
+        let target = self.temp(BEHAVIOUR_HEAP_TYPE);
+        self.call_extern(
+            ctx,
+            "SystemObjectArray.__Get__SystemInt32__SystemObject",
+            &[cell, zero, target],
+            span.clone(),
+        );
+        let name = self.temp("SystemString");
+        self.call_extern(
+            ctx,
+            "SystemObjectArray.__Get__SystemInt32__SystemObject",
+            &[cell, one, name],
+            span,
+        );
+        (target, name)
+    }
+
+    /// Reads the variable a reference cell names.
+    pub(super) fn get_program_variable_at(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        cell: DataId,
+        ty: &Type,
+        span: Range<usize>,
+    ) -> DataId {
+        let (target, name) = self.reference_cell_parts(ctx, cell, span.clone());
+        let boxed = self.temp("SystemObject");
+        self.call_extern(
+            ctx,
+            &format!("{RECEIVER}.__GetProgramVariable__SystemString__SystemObject"),
+            &[target, name, boxed],
+            span,
+        );
+        let out = self.temp_for(ty);
+        self.copy(boxed, out);
+        out
+    }
+
+    /// Writes the variable a reference cell names.
+    pub(super) fn set_program_variable_at(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        cell: DataId,
+        value: DataId,
+        span: Range<usize>,
+    ) {
+        let (target, name) = self.reference_cell_parts(ctx, cell, span.clone());
+        self.call_extern(
+            ctx,
+            &format!("{RECEIVER}.__SetProgramVariable__SystemString_SystemObject__SystemVoid"),
+            &[target, name, value],
+            span,
+        );
+    }
+
     pub(super) fn get_program_variable(
         &mut self,
         ctx: &Ctx<'ast>,

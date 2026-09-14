@@ -79,6 +79,40 @@ pub(super) struct LocalFunctionInfo<'ast> {
     returns: Type,
 }
 
+impl LocalFunctionInfo<'_> {
+    /// How many boxes precede the function's own parameters.
+    pub(super) fn capture_count(&self) -> usize {
+        self.captures.len()
+    }
+}
+
+impl LambdaInfo<'_> {
+    /// How many boxes precede the lambda's own parameters.
+    pub(super) fn capture_count(&self) -> usize {
+        self.captures.len()
+    }
+
+    /// Which of the lambda's own parameters are `ref`/`out`.
+    pub(super) fn by_ref_parameters(&self) -> Vec<bool> {
+        match &self.node.parameters {
+            LambdaParameters::Single(_) => vec![false],
+            LambdaParameters::List(list) => list
+                .parameters
+                .iter()
+                .map(|parameter| {
+                    parameter.modifiers.iter().any(|modifier| {
+                        matches!(
+                            modifier.value,
+                            men_sharp_parser::ast::ParameterModifier::Ref
+                                | men_sharp_parser::ast::ParameterModifier::Out
+                        )
+                    })
+                })
+                .collect(),
+        }
+    }
+}
+
 /// A thunk waiting to be emitted: the entry into `target` from the invoker
 /// of `shape`.
 pub(super) struct Thunk {
@@ -748,6 +782,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     slot: slots[next],
                     ty,
                     boxed: true,
+                    by_ref: false,
                 },
             );
             next += 1;
@@ -760,11 +795,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .map(|parameter| parameter.name.as_ref().ok().map(|name| name.value))
                 .collect(),
         };
+        let by_ref: Vec<bool> = match &node.parameters {
+            LambdaParameters::Single(_) => vec![false],
+            LambdaParameters::List(list) => list
+                .parameters
+                .iter()
+                .map(|parameter| Self::is_by_ref_parameter(parameter))
+                .collect(),
+        };
         for (index, name) in names.into_iter().enumerate() {
             if let (Some(name), Some(&slot), Some(ty)) =
                 (name, slots.get(next + index), parameters.get(index))
             {
-                self.bind_local(ctx, name, slot, ty.clone());
+                if by_ref.get(index).copied().unwrap_or(false) {
+                    self.bind_local_by_ref(ctx, name, slot, ty.clone());
+                } else {
+                    self.bind_local(ctx, name, slot, ty.clone());
+                }
             }
         }
         let is_async = Self::has_async_modifier(node.modifiers);
@@ -956,6 +1003,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     slot: slots[next],
                     ty,
                     boxed: true,
+                    by_ref: false,
                 },
             );
             next += 1;
@@ -1059,7 +1107,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         call: &ResolvedCall,
         receiver: Option<(DataId, Type)>,
         values: Vec<DataId>,
-        source_by_ref: Vec<(usize, Place)>,
+        source_by_ref: Vec<(DataId, Place)>,
         span: Range<usize>,
     ) -> Piece {
         let Some((delegate, delegate_type)) = receiver else {
@@ -1083,11 +1131,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let (invoker, _) = self.ensure_invoker(&shape);
         let mut arguments = vec![delegate];
         arguments.extend(values);
-        let by_ref: Vec<(usize, Place)> = source_by_ref
-            .into_iter()
-            .map(|(index, place)| (index + 1, place))
-            .collect();
-        match self.call_function(ctx, &invoker, None, &arguments, &by_ref, span) {
+        match self.call_function(ctx, &invoker, None, &arguments, &source_by_ref, span) {
             Some(result) => Piece::Value(result, returns),
             None if returns == Type::Void => Piece::Void,
             None => Piece::Error,
@@ -1112,12 +1156,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 slot: cell,
                 ty,
                 boxed: true,
+                by_ref: false,
             }
         } else {
             Local {
                 slot,
                 ty,
                 boxed: false,
+                by_ref: false,
             }
         };
         ctx.locals
@@ -1136,8 +1182,47 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         cell
     }
 
+    /// Is a declared parameter `ref`/`out`?
+    pub(super) fn is_by_ref_parameter(
+        parameter: &men_sharp_parser::ast::Parameter<'_, '_>,
+    ) -> bool {
+        parameter.modifiers.iter().any(|modifier| {
+            matches!(
+                modifier.value,
+                men_sharp_parser::ast::ParameterModifier::Ref
+                    | men_sharp_parser::ast::ParameterModifier::Out
+            )
+        })
+    }
+
+    /// A `ref`/`out` parameter: its slot holds the reference cell the caller
+    /// built (see `Place::ByName`), never a value of its own.
+    pub(super) fn bind_local_by_ref(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        name: &'ast str,
+        slot: DataId,
+        ty: Type,
+    ) {
+        ctx.locals.last_mut().expect("a scope is open").insert(
+            name.to_string(),
+            Local {
+                slot,
+                ty,
+                boxed: false,
+                by_ref: true,
+            },
+        );
+    }
+
     /// The assignable place of a local: its slot, or element 0 of its box.
     pub(super) fn local_place(&mut self, local: &Local) -> Place {
+        if local.by_ref {
+            return Place::ByName {
+                cell: local.slot,
+                ty: local.ty.clone(),
+            };
+        }
         if local.boxed {
             Place::Field {
                 object: local.slot,
@@ -1156,6 +1241,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         local: &Local,
         span: Range<usize>,
     ) -> (DataId, Type) {
+        if local.by_ref {
+            let value = self.get_program_variable_at(ctx, local.slot, &local.ty, span);
+            return (value, local.ty.clone());
+        }
         if local.boxed {
             let zero = self.int_constant(0);
             let value = self.get_element(ctx, local.slot, zero, &local.ty, span);

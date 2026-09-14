@@ -225,6 +225,11 @@ public class MenSharpIntegrationTests
         Assert.AreEqual("string", smoke.GetProgramVariable("overloadNull"));
         Assert.AreEqual("int", smoke.GetProgramVariable("overloadShort"));
 
+        // `ref` aliases: same variable twice (8), and through a field (20)
+        smoke.RunProgram("RefAliasing");
+        Assert.AreEqual(8, smoke.GetProgramVariable("refAliased"));
+        Assert.AreEqual(20, smoke.GetProgramVariable("refViaField"));
+
         // a user enum transferred from the inspector reaches the heap as Int32
         smoke.RunProgram("CheckMode");
         Assert.AreEqual(true, smoke.GetProgramVariable("modeIsSecond"));

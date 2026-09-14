@@ -180,6 +180,9 @@ pub enum EmulatorError {
 }
 
 pub struct Emulator {
+    /// This program's index in its world, once `adopt_as` wired it — what a
+    /// self reference reads as after that; `None` while standing alone.
+    own: Option<usize>,
     pub heap: Vec<Value>,
     names: HashMap<String, usize>,
     stack: Vec<usize>,
@@ -298,6 +301,7 @@ impl Emulator {
             });
         }
         Emulator {
+            own: None,
             heap,
             names,
             stack: Vec::new(),
@@ -343,6 +347,7 @@ impl Emulator {
     /// Joins a world at `index`: every `this` reference to the behaviour
     /// itself becomes a reference other programs can be handed.
     pub fn adopt_as(&mut self, index: usize) {
+        self.own = Some(index);
         for value in &mut self.heap {
             if matches!(value, Value::SelfComponent(name) if &**name == "VRCUdonUdonBehaviour") {
                 *value = Value::Behaviour(index);
@@ -735,16 +740,45 @@ impl Emulator {
                 let args = self.pop_arguments(3)?;
                 let name = self.heap[args[1]].as_str()?.to_string();
                 let value = self.heap[args[2]].clone();
-                let target = self.behaviour_at(args[0], &name)?;
-                peers.set_variable(target, &name, value)
+                // the program's own variable by name — how a `ref` parameter
+                // reaches the caller's variable — is its own heap, whether
+                // it is standing alone or wired into a world (where it is
+                // the one program the world cannot hand out right now)
+                if self.is_self(args[0]) {
+                    match self.names.get(&name) {
+                        Some(&index) => {
+                            self.heap[index] = value;
+                            Ok(())
+                        }
+                        None => Err(EmulatorError::Exception(format!(
+                            "SetProgramVariable: no variable `{name}` in this program"
+                        ))),
+                    }
+                } else {
+                    let target = self.behaviour_at(args[0], &name)?;
+                    peers.set_variable(target, &name, value)
+                }
             }
             "VRCUdonCommonInterfacesIUdonEventReceiver.__GetProgramVariable__SystemString__SystemObject" =>
             {
                 let args = self.pop_arguments(3)?;
                 let name = self.heap[args[1]].as_str()?.to_string();
-                let target = self.behaviour_at(args[0], &name)?;
-                self.heap[args[2]] = peers.get_variable(target, &name)?;
-                Ok(())
+                if self.is_self(args[0]) {
+                    let value = match self.names.get(&name) {
+                        Some(&index) => self.heap[index].clone(),
+                        None => {
+                            return Err(EmulatorError::Exception(format!(
+                                "GetProgramVariable: no variable `{name}` in this program"
+                            )));
+                        }
+                    };
+                    self.heap[args[2]] = value;
+                    Ok(())
+                } else {
+                    let target = self.behaviour_at(args[0], &name)?;
+                    self.heap[args[2]] = peers.get_variable(target, &name)?;
+                    Ok(())
+                }
             }
             // ---- time and delayed events ----
             "UnityEngineTime.__get_time__SystemSingle" => {
@@ -1497,6 +1531,16 @@ impl Emulator {
     }
 
     /// The program a behaviour-typed slot names.
+    /// Does this slot refer to the running program itself: its unwired self
+    /// reference, or its own index once wired into a world?
+    fn is_self(&self, address: usize) -> bool {
+        match &self.heap[address] {
+            Value::SelfComponent(name) => &**name == "VRCUdonUdonBehaviour",
+            Value::Behaviour(index) => self.own == Some(*index),
+            _ => false,
+        }
+    }
+
     fn behaviour_at(&self, address: usize, what: &str) -> Result<usize, EmulatorError> {
         match &self.heap[address] {
             Value::Behaviour(index) => Ok(*index),

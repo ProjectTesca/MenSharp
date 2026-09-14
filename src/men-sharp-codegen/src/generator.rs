@@ -611,6 +611,9 @@ struct Local {
     /// Captured by a lambda: the value is element 0 of the `object[]` in
     /// `slot`, which the lambda's closure shares.
     boxed: bool,
+    /// A `ref`/`out` parameter: `slot` holds a reference cell (see
+    /// [`Place::ByName`]), and the variable is whatever it names.
+    by_ref: bool,
 }
 
 /// What a primary-expression step produced.
@@ -732,6 +735,17 @@ enum Place {
     ProgramVariable {
         receiver: DataId,
         name: String,
+        ty: Type,
+    },
+    /// A `ref`/`out` parameter of a source method: `cell` is a two-element
+    /// `object[]` naming the referent — the behaviour it lives in and its heap
+    /// symbol — and every read and write goes through `GetProgramVariable` /
+    /// `SetProgramVariable` on it. That is what makes the parameter an alias
+    /// of the caller's variable (`F(ref x, ref x)` sees one `x`, a callee
+    /// reading `this.x` sees what it wrote to `ref this.x`), where a copied-in
+    /// slot could not be.
+    ByName {
+        cell: DataId,
         ty: Type,
     },
     /// A property with a body on *another* behaviour: reached through its
@@ -1051,7 +1065,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let function = &self.functions[key];
             let offset = function.parameters.len() - entry.arguments.len();
             let parameter_slots: Vec<DataId> = function.parameters[offset..].to_vec();
-            let mut write_backs: Vec<(DataId, DataId)> = Vec::new();
             for (argument, parameter) in entry.arguments.iter().zip(parameter_slots) {
                 let slot = self.program.add_data(DataSymbol {
                     name: argument.slot.clone(),
@@ -1060,9 +1073,32 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     export: false,
                     sync: None,
                 });
-                self.copy(slot, parameter);
                 if argument.write_back {
-                    write_backs.push((parameter, slot));
+                    // a `ref`/`out` parameter: the function takes a reference
+                    // cell (see `Place::ByName`) naming the event's variable,
+                    // and writes the variable itself — which is what the
+                    // caller reads back, as the protocol always had it
+                    let (file, _) = self.declaration_site(key.symbol);
+                    let stub_ctx = Ctx {
+                        key: key.clone(),
+                        file,
+                        locals: vec![HashMap::default()],
+                        boxed: Vec::new(),
+                        this_slot: None,
+                        this_type: None,
+                        loop_stack: Vec::new(),
+                        result: None,
+                        return_slot: init_return, // unused
+                        caught: Vec::new(),
+                        async_state: None,
+                        iterator_state: None,
+                    };
+                    let variable = self.string_constant(&argument.slot);
+                    let target = self.self_behaviour_slot();
+                    let cell = self.reference_cell(&stub_ctx, target, variable, 0..0);
+                    self.copy(cell, parameter);
+                } else {
+                    self.copy(slot, parameter);
                 }
             }
 
@@ -1083,9 +1119,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.emit_unhandled_check(name);
             // `ref`/`out` parameters and the result, where the caller reads
             // them back
-            for (parameter, slot) in write_backs {
-                self.copy(parameter, slot);
-            }
             if let (Some(result), Some((slot_name, udon_type))) =
                 (callee_result, entry.result_slot.clone())
             {
@@ -3344,6 +3377,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Place::ProgramVariable { receiver, .. } | Place::ProgramAccessor { receiver, .. } => {
                 f(receiver)
             }
+            Place::ByName { cell, .. } => f(cell),
             Place::ExternalProperty { receiver, .. } => receiver.iter_mut().for_each(f),
             Place::ExternalIndexer {
                 receiver, indices, ..

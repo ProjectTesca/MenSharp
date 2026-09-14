@@ -1046,6 +1046,89 @@ fn a_call_no_candidate_wins_on_every_argument_stays_ambiguous() {
 }
 
 #[test]
+fn ref_parameters_alias_the_callers_variable() {
+    // C# `ref` is an alias, not a copy: two `ref` arguments naming one
+    // variable are one variable inside the callee, and a callee that reads
+    // the field it was given `ref` to sees what it wrote (issue: 7 and 13)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int aliased;
+            public int viaField;
+            public int x;
+
+            void F1(ref int a, ref int b) { a++; b += a; }
+            void F2(ref int a) { a = 10; a += this.x; }
+
+            public void Interact()
+            {
+                int x1 = 3;
+                F1(ref x1, ref x1);
+                aliased = x1;            // 8, not 7
+                this.x = 3;
+                F2(ref this.x);
+                viaField = this.x;       // 20, not 13
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "aliased"), 8);
+    assert_eq!(int_of(&emulator, "viaField"), 20);
+}
+
+#[test]
+fn ref_and_out_reach_through_forwarding_elements_and_externs() {
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int forwarded;
+            public int element;
+            public int declared;
+            public int swapped;
+
+            void Inner(ref int v) { v *= 2; }
+            void Outer(ref int v) { Inner(ref v); v += 1; }   // ref passed on: one variable
+            void Set(out int v) { v = 42; }
+            void Swap(ref int a, ref int b) { int t = a; a = b; b = t; }
+
+            public void Interact()
+            {
+                int n = 5;
+                Outer(ref n);
+                forwarded = n;                       // 11
+                int[] items = { 1, 2, 3 };
+                Inner(ref items[1]);                 // an element: stood in for, written home
+                element = items[1];                  // 4
+                Set(out int fresh);
+                declared = fresh;                    // 42
+                int p = 1, q = 2;
+                Swap(ref p, ref q);
+                swapped = p * 10 + q;                // 21
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "forwarded"), 11);
+    assert_eq!(int_of(&emulator, "element"), 4);
+    assert_eq!(int_of(&emulator, "declared"), 42);
+    assert_eq!(int_of(&emulator, "swapped"), 21);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

@@ -39,7 +39,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         call: &ResolvedCall,
         symbol: SymbolId,
         values: &[DataId],
-        source_by_ref: &[(usize, Place)],
         span: Range<usize>,
     ) -> Option<Piece> {
         let entry = self.declarations.table.symbol(symbol);
@@ -48,6 +47,44 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         }
         let name = entry.name;
+        // a `ref` argument arrives as a reference cell (see `Place::ByName`);
+        // the intrinsics work on values, so each is read out here and written
+        // back through its cell once they are done
+        let signature = self.substitute_signature(&call.signature, &ctx.key.bindings);
+        let mut cells: Vec<(usize, DataId)> = Vec::new();
+        let mut values: Vec<DataId> = values.to_vec();
+        for (index, parameter) in signature.parameters.iter().enumerate() {
+            if matches!(
+                parameter.passing,
+                men_sharp_semantics::ParameterPassing::Ref
+                    | men_sharp_semantics::ParameterPassing::Out
+            ) && let Some(cell) = values.get(index).copied()
+            {
+                let value = self.get_program_variable_at(
+                    ctx,
+                    cell,
+                    &parameter.parameter_type,
+                    span.clone(),
+                );
+                values[index] = value;
+                cells.push((index, cell));
+            }
+        }
+        let piece = self.reflect_intrinsic_on_values(ctx, call, name, &values, span.clone());
+        for (index, cell) in cells {
+            self.set_program_variable_at(ctx, cell, values[index], span.clone());
+        }
+        piece
+    }
+
+    fn reflect_intrinsic_on_values(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        name: &str,
+        values: &[DataId],
+        span: Range<usize>,
+    ) -> Option<Piece> {
         let type_arguments: Vec<Type> = call
             .type_arguments
             .iter()
@@ -55,9 +92,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .collect();
         let boolean = self.corlib_type("Boolean");
         let piece = match name {
-            "VisitFields" => {
-                self.reflect_visit_fields(ctx, &type_arguments, values, source_by_ref, span)
-            }
+            "VisitFields" => self.reflect_visit_fields(ctx, &type_arguments, values, span),
             "VisitElementType" => {
                 self.reflect_visit_element_type(ctx, &type_arguments, values, span)
             }
@@ -250,7 +285,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ctx: &mut Ctx<'ast>,
         type_arguments: &[Type],
         values: &[DataId],
-        source_by_ref: &[(usize, Place)],
         span: Range<usize>,
     ) -> Piece {
         let ([target_type, visitor_type], [target, visitor]) = (type_arguments, values) else {
@@ -303,24 +337,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 role: Role::Method,
                 bindings,
             };
+            // `visitor.Visit(info, ref field)`: the field's current value
+            // stands in, handed over as a reference cell naming it, and goes
+            // back into the field after (see `Place::ByName`)
             let place = Place::Field {
                 object: target,
                 index,
                 ty: field.ty.clone(),
             };
+            let udon_type = self.program.data[current.0].udon_type.clone();
+            let scratch = self.scratch_slot(&udon_type);
+            self.copy(current, scratch);
+            let name = self.program.data[scratch.0].name.clone();
+            let name = self.string_constant(&name);
+            let target_behaviour = self.self_behaviour_slot();
+            let cell = self.reference_cell(ctx, target_behaviour, name, span.clone());
             self.call_function(
                 ctx,
                 &key,
                 Some(visitor),
-                &[info, current],
-                &[(1, place)],
+                &[info, cell],
+                &[(scratch, place)],
                 span.clone(),
             );
-        }
-        // `ref target` written through something other than a local: the
-        // stand-in value goes back where it came from, as after any call
-        for (_, place) in source_by_ref {
-            self.write_place(ctx, place.clone(), target, span.clone());
         }
         Piece::Void
     }

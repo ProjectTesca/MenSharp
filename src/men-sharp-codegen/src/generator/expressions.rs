@@ -2932,6 +2932,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let out = self.get_program_variable(ctx, receiver, &name, &ty, span);
                 Some((out, ty))
             }
+            Place::ByName { cell, ty } => {
+                let out = self.get_program_variable_at(ctx, cell, &ty, span);
+                Some((out, ty))
+            }
             Place::ProgramAccessor {
                 receiver,
                 getter,
@@ -3026,6 +3030,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             Place::ProgramVariable { receiver, name, .. } => {
                 self.set_program_variable(ctx, receiver, &name, value, span);
+            }
+            Place::ByName { cell, .. } => {
+                // the referent may be any variable of the program: an operand
+                // read before this write can no longer count on its slot
+                self.effects.calls += 1;
+                self.set_program_variable_at(ctx, cell, value, span);
             }
             Place::ProgramAccessor {
                 receiver,
@@ -3910,9 +3920,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // `ref`/`out` slots standing in for a field, element or property: the
         // extern writes the slot, and afterwards the slot is written home
         let mut write_backs: Vec<(Place, DataId)> = Vec::new();
-        // for calls into source: the callee's `ref`/`out` parameter slots and
-        // where each is copied back to (argument index, place)
-        let mut source_by_ref: Vec<(usize, Place)> = Vec::new();
+        // for calls into source: `ref`/`out` arguments stood in for by a named
+        // temporary (an element, a property), and where each goes home after
+        let mut source_by_ref: Vec<(DataId, Place)> = Vec::new();
+        // for calls into *another* behaviour: Udon only raises an event by
+        // name, with the arguments written to the callee's variables first
+        // and `ref`/`out` ones read back after — values, not references
+        // (argument index, where the value read back goes)
+        let mut remote_by_ref: Vec<(usize, Place)> = Vec::new();
+        let mut ref_scratches: Vec<(DataId, DataId)> = Vec::new();
+        let cross_program = receiver
+            .as_ref()
+            .is_some_and(|(_, receiver_type)| self.is_program_reference(receiver_type));
         let parameter_offset = usize::from(call.is_extension);
         // named arguments may sit in any order: each is evaluated where it is
         // written and lands in its parameter's position
@@ -3961,14 +3980,30 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             }
                             None => return Piece::Error,
                         }
-                    } else {
-                        // a source method writes its own parameter slot; the
-                        // call copies it back into the argument's place after
-                        match self.source_by_ref_argument(ctx, argument, modifier, &parameter_type)
+                    } else if cross_program {
+                        match self.remote_by_ref_argument(ctx, argument, modifier, &parameter_type)
                         {
                             Some((value, place)) => {
                                 ordered[slot] = Some(value);
-                                source_by_ref.push((slot, place));
+                                remote_by_ref.push((slot, place));
+                            }
+                            None => return Piece::Error,
+                        }
+                    } else {
+                        // a source method aliases the argument through a
+                        // reference cell (see `Place::ByName`)
+                        match self.source_by_ref_argument(
+                            ctx,
+                            argument,
+                            modifier,
+                            &parameter_type,
+                            &mut ref_scratches,
+                        ) {
+                            Some((cell, write_back)) => {
+                                ordered[slot] = Some(cell);
+                                if let Some(write_back) = write_back {
+                                    source_by_ref.push(write_back);
+                                }
                             }
                             None => return Piece::Error,
                         }
@@ -4058,6 +4093,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             values,
             write_backs,
             source_by_ref,
+            remote_by_ref,
             span,
             non_virtual,
         )
@@ -4270,11 +4306,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         receiver: Option<(DataId, Type)>,
         mut values: Vec<DataId>,
         write_backs: Vec<(Place, DataId)>,
-        source_by_ref: Vec<(usize, Place)>,
+        source_by_ref: Vec<(DataId, Place)>,
+        remote_by_ref: Vec<(usize, Place)>,
         span: Range<usize>,
         non_virtual: bool,
     ) -> Piece {
-        let parameter_offset = usize::from(call.is_extension);
         if call.is_extension {
             let Some((slot, receiver_type)) = &receiver else {
                 self.error(ctx, "internal: extension call without a receiver", span);
@@ -4316,14 +4352,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     return piece;
                 }
                 // ... and static reflection, answered for the type at hand
-                if let Some(piece) = self.try_reflect_intrinsic(
-                    ctx,
-                    call,
-                    symbol,
-                    &values,
-                    &source_by_ref,
-                    span.clone(),
-                ) {
+                if let Some(piece) =
+                    self.try_reflect_intrinsic(ctx, call, symbol, &values, span.clone())
+                {
+                    for (temporary, place) in source_by_ref {
+                        self.write_place(ctx, place, temporary, span.clone());
+                    }
                     return piece;
                 }
                 // calling into *another* behaviour: Udon has no cross-program
@@ -4346,7 +4380,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         symbol,
                         slot,
                         &values,
-                        &source_by_ref,
+                        &remote_by_ref,
                         span,
                     );
                 }
@@ -4361,11 +4395,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     return Piece::Error;
                 };
                 // the inserted extension receiver shifts every argument right
-                let by_ref: Vec<(usize, Place)> = source_by_ref
-                    .into_iter()
-                    .map(|(index, place)| (index + parameter_offset, place))
-                    .collect();
-                match self.call_function(ctx, &key, this, &values, &by_ref, span) {
+                match self.call_function(ctx, &key, this, &values, &source_by_ref, span) {
                     Some(result) => Piece::Value(result, return_type),
                     None if return_type == Type::Void => Piece::Void,
                     None => Piece::Error,
@@ -4382,14 +4412,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .function_has_this(&key)
                     .then_some(())
                     .and(payload.first().copied());
-                let leading = payload.len();
                 let mut arguments: Vec<DataId> = payload[usize::from(this.is_some())..].to_vec();
                 arguments.extend(values);
-                let by_ref: Vec<(usize, Place)> = source_by_ref
-                    .into_iter()
-                    .map(|(index, place)| (index + leading - usize::from(this.is_some()), place))
-                    .collect();
-                match self.call_function(ctx, &key, this, &arguments, &by_ref, span) {
+                match self.call_function(ctx, &key, this, &arguments, &source_by_ref, span) {
                     Some(result) => Piece::Value(result, return_type),
                     None if return_type == Type::Void => Piece::Void,
                     None => Piece::Error,
@@ -4701,7 +4726,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// A `ref`/`out` argument of a call into *source*: the value passed in
     /// (the current one for `ref`; a placeholder for `out`) and the place the
     /// callee's parameter slot is copied back into afterwards.
-    fn source_by_ref_argument(
+    /// A `ref`/`out` argument to a method of *another* behaviour: the value
+    /// to write into the callee's parameter variable, and the place the value
+    /// read back after the event goes to.
+    fn remote_by_ref_argument(
         &mut self,
         ctx: &mut Ctx<'ast>,
         argument: &'ast Argument<'ast, 'ast>,
@@ -4734,8 +4762,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     }
                 }
             }
-            // `out var x`: the call site declares the variable; the call
-            // writes it through the place like any other
             ArgumentValue::Declaration { name, .. } => {
                 let slot = self.temp_for(parameter_type);
                 self.bind_local(ctx, name.value, slot, parameter_type.clone());
@@ -4749,8 +4775,112 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    // ------------------------------------------------------------------ new
+    /// Is this slot a local or parameter of the function being emitted —
+    /// part of its frame, which a recursive call saves and restores?
+    fn is_frame_local(&self, ctx: &Ctx<'ast>, slot: DataId) -> bool {
+        ctx.locals.iter().any(|scope| {
+            scope
+                .values()
+                .any(|local| local.slot == slot && !local.boxed && !local.by_ref)
+        })
+    }
 
+    /// A `ref`/`out` argument to a source method, as the reference cell the
+    /// callee aliases the variable through (see `Place::ByName`): a variable
+    /// with a heap symbol of its own is named directly, another behaviour's
+    /// public variable likewise, a reference parameter is passed on as is —
+    /// and anything else (an element, a property, a captured local) is stood
+    /// in for by a named temporary, returned with the place it goes home to.
+    fn source_by_ref_argument(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        argument: &'ast Argument<'ast, 'ast>,
+        modifier: ArgumentModifier,
+        parameter_type: &Type,
+        // (referent slot, its scratch) for the call so far: two arguments
+        // naming one variable share one scratch, and so one referent
+        scratches: &mut Vec<(DataId, DataId)>,
+    ) -> Option<(DataId, Option<(DataId, Place)>)> {
+        let span = argument.span.clone();
+        let place = match &argument.value {
+            ArgumentValue::Expression(expression) => self.lower_place(ctx, expression),
+            // `out var x`: the call site declares the variable, and the
+            // callee writes it by name like any other
+            ArgumentValue::Declaration { name, .. } => {
+                let slot = self.temp_for(parameter_type);
+                self.bind_local(ctx, name.value, slot, parameter_type.clone());
+                match ctx.lookup(name.value) {
+                    Some(local) => self.local_place(&local),
+                    None => Place::Error,
+                }
+            }
+            ArgumentValue::Missing => Place::Error,
+        };
+        match place {
+            Place::SelfReference { .. } => {
+                self.error(
+                    ctx,
+                    Message::key("codegen.this_is_read_only_so_it_cannot"),
+                    span,
+                );
+                None
+            }
+            Place::Error => None,
+            // a slot of this function's own frame (a local, a parameter): a
+            // recursive call's frame restore would rewind what the callee
+            // wrote into it, so it is stood in for by a scratch outside every
+            // frame — one per variable, so `F(ref x, ref x)` still aliases —
+            // copied home after the call. A field or static, being no
+            // function's, is named directly
+            Place::Slot(slot, ty) if self.is_frame_local(ctx, slot) => {
+                let (scratch, fresh) =
+                    match scratches.iter().find(|(referent, _)| *referent == slot) {
+                        Some(&(_, scratch)) => (scratch, false),
+                        None => {
+                            let udon_type = self.program.data[slot.0].udon_type.clone();
+                            let scratch = self.scratch_slot(&udon_type);
+                            scratches.push((slot, scratch));
+                            (scratch, true)
+                        }
+                    };
+                if fresh {
+                    // the callee may read before writing (and an unwritten
+                    // value slot would be null): the current value goes first
+                    self.copy(slot, scratch);
+                }
+                let name = self.program.data[scratch.0].name.clone();
+                let name = self.string_constant(&name);
+                let target = self.self_behaviour_slot();
+                let cell = self.reference_cell(ctx, target, name, span);
+                Some((cell, fresh.then_some((scratch, Place::Slot(slot, ty)))))
+            }
+            Place::Slot(slot, _) => {
+                let name = self.program.data[slot.0].name.clone();
+                let name = self.string_constant(&name);
+                let target = self.self_behaviour_slot();
+                Some((self.reference_cell(ctx, target, name, span), None))
+            }
+            Place::ProgramVariable { receiver, name, .. } => {
+                let name = self.string_constant(&name);
+                Some((self.reference_cell(ctx, receiver, name, span), None))
+            }
+            Place::ByName { cell, .. } => Some((cell, None)),
+            other => {
+                let temporary = self.temp_for(parameter_type);
+                if modifier == ArgumentModifier::Ref {
+                    // the callee may read before writing: the current value
+                    // has to be there first
+                    let (value, _) = self.read_place(ctx, other.clone(), span.clone())?;
+                    self.copy(value, temporary);
+                }
+                let name = self.program.data[temporary.0].name.clone();
+                let name = self.string_constant(&name);
+                let target = self.self_behaviour_slot();
+                let cell = self.reference_cell(ctx, target, name, span);
+                Some((cell, Some((temporary, other))))
+            }
+        }
+    }
     fn lower_new(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -5331,6 +5461,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         values,
                         Vec::new(),
                         Vec::new(),
+                        Vec::new(),
                         span.clone(),
                         false,
                     );
@@ -5735,6 +5866,7 @@ pub(super) fn place_type(place: &Place) -> Option<Type> {
         | Place::Field { ty, .. }
         | Place::Accessor { ty, .. }
         | Place::ProgramVariable { ty, .. }
+        | Place::ByName { ty, .. }
         | Place::ProgramAccessor { ty, .. }
         | Place::ExternalProperty { ty, .. }
         | Place::ExternalIndexer { ty, .. } => Some(ty.clone()),

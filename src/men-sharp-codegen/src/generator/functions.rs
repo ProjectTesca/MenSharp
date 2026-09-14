@@ -8,6 +8,63 @@ use super::*;
 impl<'a, 'ast> Generator<'a, 'ast> {
     /// The instantiated parameter/return shape for a function instance:
     /// parameter types (setter value last) and the return type.
+    /// Which parameters of a function are `ref`/`out` — passed as reference
+    /// cells (see `Place::ByName`) — in the order of `function_shape`.
+    pub(super) fn function_passings(&self, key: &FunctionKey) -> Vec<bool> {
+        let by_ref = |passing: &ParameterPassing| {
+            matches!(passing, ParameterPassing::Ref | ParameterPassing::Out)
+        };
+        match key.role {
+            Role::LocalFunction(_) => {
+                let Some(info) = self.local_functions.get(key) else {
+                    return Vec::new();
+                };
+                let mut passings = vec![false; info.capture_count()];
+                let declared: &[men_sharp_parser::ast::Parameter<'_, '_>] = info
+                    .node
+                    .parameters
+                    .as_ref()
+                    .map(|list| list.parameters)
+                    .unwrap_or(&[]);
+                passings.extend(declared.iter().map(|parameter| {
+                    parameter.modifiers.iter().any(|modifier| {
+                        matches!(
+                            modifier.value,
+                            men_sharp_parser::ast::ParameterModifier::Ref
+                                | men_sharp_parser::ast::ParameterModifier::Out
+                        )
+                    })
+                }));
+                passings
+            }
+            Role::Lambda(_) => {
+                let Some(info) = self.lambdas.get(key) else {
+                    return Vec::new();
+                };
+                let mut passings = vec![false; info.capture_count()];
+                passings.extend(info.by_ref_parameters());
+                passings
+            }
+            Role::DelegateInvoker(index) => {
+                let shape = &self.delegate_shapes[index as usize];
+                let mut passings = vec![false];
+                passings.extend(shape.parameters.iter().map(|(_, by_ref)| *by_ref));
+                passings
+            }
+            Role::Method | Role::Constructor | Role::Dispatcher => {
+                match self.signatures.members.get(&key.symbol) {
+                    Some(MemberSignature::Function(signature)) => signature
+                        .parameters
+                        .iter()
+                        .map(|parameter| by_ref(&parameter.passing))
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            }
+            _ => Vec::new(),
+        }
+    }
+
     pub(super) fn function_shape(&self, key: &FunctionKey) -> (Vec<Type>, Type) {
         match key.role {
             Role::Lambda(_) => return self.lambda_shape(key),
@@ -201,8 +258,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             });
             parameters.push(slot);
         }
+        let by_ref = self.function_passings(key);
         for (index, ty) in parameter_types.iter().enumerate() {
-            let udon_type = self.heap_type(ty);
+            // a `ref`/`out` parameter holds a reference cell, not a value
+            let udon_type = if by_ref.get(index).copied().unwrap_or(false) {
+                "SystemObjectArray".to_string()
+            } else {
+                self.heap_type(ty)
+            };
             let slot = self.program.add_data(DataSymbol {
                 name: format!("{name}__p{index}"),
                 udon_type,
@@ -514,7 +577,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if let Ok(name) = &parameter.name
                 && let (Some(&slot), Some(ty)) = (slots.get(index), types.get(index))
             {
-                self.bind_local(ctx, name.value, slot, ty.clone());
+                let by_ref = parameter.modifiers.iter().any(|modifier| {
+                    matches!(
+                        modifier.value,
+                        men_sharp_parser::ast::ParameterModifier::Ref
+                            | men_sharp_parser::ast::ParameterModifier::Out
+                    )
+                });
+                if by_ref {
+                    self.bind_local_by_ref(ctx, name.value, slot, ty.clone());
+                } else {
+                    self.bind_local(ctx, name.value, slot, ty.clone());
+                }
             }
         }
     }
@@ -803,9 +877,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         key: &FunctionKey,
         this: Option<DataId>,
         arguments: &[DataId],
-        // (argument index, where its value goes back): the callee's `ref`/
-        // `out` parameters, whose slots are copied home after the call
-        by_ref: &[(usize, Place)],
+        // `ref`/`out` arguments with no heap symbol of their own (an array
+        // element, a property): the callee wrote the named temporary the
+        // caller stood in for it, which is written home after the call
+        write_backs: &[(DataId, Place)],
         span: Range<usize>,
     ) -> Option<DataId> {
         self.ensure_function(key);
@@ -886,23 +961,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::Jump(Target::Label(label)));
         self.program.code.push(Op::Label(continuation));
 
-        // `ref`/`out` results: the callee wrote its own parameter slots.
-        // Rescue them into scratch slots *before* a recursive restore rewinds
-        // the frame, write them into their places *after* it — a scratch is
-        // deliberately outside every frame, and nothing runs in between.
-        let mut returned: Vec<(DataId, Place)> = Vec::new();
-        for (argument_index, place) in by_ref {
-            let parameter = parameters[usize::from(this.is_some()) + argument_index];
-            let udon_type = self.program.data[parameter.0].udon_type.clone();
-            let scratch = self.scratch_slot(&udon_type);
-            self.copy(parameter, scratch);
-            returned.push((scratch, place.clone()));
-        }
-
         self.program.code.push(Op::RestoreFrame(marker));
 
-        for (scratch, place) in returned {
-            self.write_place(ctx, place, scratch, span.clone());
+        // a `ref`/`out` argument that had to be stood in for: the callee
+        // wrote the caller's temporary by name; it goes home now. (A variable
+        // with a symbol of its own was written directly — nothing to copy.)
+        for (temporary, place) in write_backs {
+            self.write_place(ctx, place.clone(), *temporary, span.clone());
         }
 
         // the callee may have returned early with an exception pending: it
@@ -1792,35 +1857,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // dispatcher → override edge and carries the frame-save
                 // markers, so recursion through virtual dispatch is seen like
                 // any other cycle instead of silently corrupting frames
+                // a `ref`/`out` parameter is a reference cell (see
+                // `Place::ByName`): handed on as it is, the override aliases
+                // the real caller's variable directly, nothing to copy back
                 let arguments: Vec<DataId> = parameters[1..].to_vec();
-                // the override's `ref`/`out` results come back into the
-                // dispatcher's own parameter slots, where the real caller's
-                // write-back then reads them
-                let (parameter_types, _) = self.function_shape(&key);
-                let by_ref: Vec<(usize, Place)> = match self.signatures.members.get(&key.symbol) {
-                    Some(MemberSignature::Function(signature)) => signature
-                        .parameters
-                        .iter()
-                        .enumerate()
-                        .filter(|(_, parameter)| {
-                            matches!(
-                                parameter.passing,
-                                ParameterPassing::Ref | ParameterPassing::Out
-                            )
-                        })
-                        .map(|(index, _)| {
-                            let ty = parameter_types.get(index).cloned().unwrap_or(Type::Error);
-                            (index, Place::Slot(parameters[1 + index], ty))
-                        })
-                        .collect(),
-                    _ => Vec::new(),
-                };
                 let value = self.call_function(
                     &mut ctx,
                     &implementation,
                     Some(this_slot),
                     &arguments,
-                    &by_ref,
+                    &[],
                     0..0,
                 );
                 if let (Some(mine), Some(value)) = (result, value) {
