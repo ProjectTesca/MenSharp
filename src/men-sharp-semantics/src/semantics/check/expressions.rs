@@ -127,6 +127,17 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     Err(()) => Type::Error,
                 };
 
+                // `c ? x : throw …` (§12.18): only one arm has a type, and
+                // it is the result's
+                let then_throws = matches!(conditional.then_value, Ok(Expression::Throw(_)));
+                let else_throws = matches!(conditional.else_value, Ok(Expression::Throw(_)));
+                if then_throws != else_throws {
+                    let typed = if then_throws { &else_type } else { &then_type };
+                    if !matches!(typed, Type::Null) {
+                        return typed.clone();
+                    }
+                }
+
                 let system = self.system();
                 match best_common_type(&system, &[then_type.clone(), else_type.clone()]) {
                     Some(common) => common,
@@ -174,6 +185,17 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     ),
                     Err(()) => (Type::Error, false, false),
                 };
+                // `x ?? throw …` (§12.14): the throw has no type, so the
+                // result is `x`'s — the underlying type when `x` is `T?`
+                if binary.operator.value == BinaryOperator::Coalesce
+                    && matches!(binary.right, Ok(Expression::Throw(_)))
+                    && !matches!(left, Type::Error | Type::Null)
+                {
+                    return match left {
+                        Type::Nullable(inner) => *inner,
+                        other => other,
+                    };
+                }
                 self.binary_type(
                     binary.operator.value,
                     left,

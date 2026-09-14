@@ -1188,6 +1188,56 @@ fn ref_aliases_elements_statics_class_fields_and_captured_locals() {
 }
 
 #[test]
+fn a_throw_expression_leaves_the_other_operand_its_type() {
+    // `a ?? throw …` is a string, `v ?? throw …` an int, `c ? a : throw …` a
+    // string: the throw has no type of its own, and used to make the whole
+    // expression untyped — `.Length` on it vanished (issue: 0, and an
+    // internal error as an argument)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using System;
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int length;
+            public int viaArgument;
+            public int fromNullable;
+            public int conditional;
+            public int unreached;
+            public string caught;
+
+            int Take(int n) { return n; }
+
+            public void Interact()
+            {
+                string a = "ok";
+                length = (a ?? throw new Exception()).Length;            // 2
+                viaArgument = Take((a ?? throw new Exception()).Length); // 2
+                int? v = 5;
+                fromNullable = v ?? throw new Exception();               // 5
+                bool ok = true;
+                conditional = (ok ? a : throw new Exception()).Length;   // 2
+                string missing = null;
+                try { unreached = (missing ?? throw new Exception("absent")).Length; }
+                catch (Exception e) { caught = e.Message; }
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "length"), 2);
+    assert_eq!(int_of(&emulator, "viaArgument"), 2);
+    assert_eq!(int_of(&emulator, "fromNullable"), 5);
+    assert_eq!(int_of(&emulator, "conditional"), 2);
+    assert_eq!(int_of(&emulator, "unreached"), 0);
+    assert_eq!(string_of(&emulator, "caught"), "absent");
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

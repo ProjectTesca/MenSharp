@@ -237,6 +237,13 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(8, smoke.GetProgramVariable("refViaElement"));
         Assert.AreEqual(105, smoke.GetProgramVariable("refViaCaptured"));
 
+        // `a ?? throw …` / `c ? a : throw …` keep the typed operand's type
+        smoke.RunProgram("ThrowExpressions");
+        Assert.AreEqual(2, smoke.GetProgramVariable("throwLength"));
+        Assert.AreEqual(5, smoke.GetProgramVariable("throwFromNullable"));
+        Assert.AreEqual(2, smoke.GetProgramVariable("throwConditional"));
+        Assert.AreEqual("absent", smoke.GetProgramVariable("throwCaught"));
+
         // a user enum transferred from the inspector reaches the heap as Int32
         smoke.RunProgram("CheckMode");
         Assert.AreEqual(true, smoke.GetProgramVariable("modeIsSecond"));

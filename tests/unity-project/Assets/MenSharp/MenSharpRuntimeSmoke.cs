@@ -210,6 +210,28 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         refViaCaptured = c;
     }
 
+    // `a ?? throw …` keeps `a`'s type (issue: `.Length` on it gave 0, and
+    // was an internal error as a `Debug.Log` argument); `?:` with a throw
+    // arm likewise; the throw itself still throws
+    public int throwLength;
+    public int throwFromNullable;
+    public int throwConditional;
+    public string throwCaught;
+
+    public void ThrowExpressions()
+    {
+        string a = "ok";
+        throwLength = (a ?? throw new Exception()).Length;
+        Debug.Log((a ?? throw new Exception()).Length);
+        int? v = 5;
+        throwFromNullable = v ?? throw new Exception();
+        bool ok = throwLength == 2;
+        throwConditional = (ok ? a : throw new Exception()).Length;
+        string missing = null;
+        try { throwLength = (missing ?? throw new Exception("absent")).Length; }
+        catch (Exception e) { throwCaught = e.Message; }
+    }
+
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
