@@ -895,6 +895,157 @@ fn a_switch_expression_arm_guard_keeps_its_fat_arrow() {
 }
 
 #[test]
+fn a_serialized_user_enum_field_is_declared_as_int32_on_the_heap() {
+    // the contract the Unity proxy transfer converts against: a user enum is
+    // an Int32 slot (whatever its C# underlying type), an array of one an
+    // object[] of Int32s. The transfer used to hand over the C# enum itself,
+    // which the VM could not read as Int32 (issue: `mode == Mode.Second`
+    // halted)
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        public enum InspectorEnumMode : byte { First = 0, Second }
+        public class Thing : MenSharpBehaviour
+        {
+            [SerializeField] private InspectorEnumMode mode;
+            [SerializeField] private InspectorEnumMode[] modes;
+            public bool second;
+            public void Interact() { second = mode == InspectorEnumMode.Second && modes.Length > 0; }
+        }
+        "#,
+        "Thing",
+    ) else {
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let slot = |name: &str| {
+        program
+            .output
+            .program
+            .data
+            .iter()
+            .find(|symbol| symbol.name == name)
+            .unwrap_or_else(|| panic!("no slot {name}"))
+    };
+    assert_eq!(slot("mode").udon_type, "SystemInt32");
+    assert!(
+        slot("mode").export,
+        "a [SerializeField] field is a public variable"
+    );
+    assert_eq!(slot("modes").udon_type, "SystemObjectArray");
+}
+
+#[test]
+fn the_better_function_member_breaks_an_overload_tie() {
+    // C# §12.6.4.5: `F1(null)` is `F1(string)` (string converts to object,
+    // not back), `F2(short)` is `F2(int)` (int converts to long, not back).
+    // M# called both ambiguous (issue)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public string first;
+            string F1(object x) => "object";
+            string F1(string x) => "string";
+            public void Interact() { first = F1(null); }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(string_of(&emulator, "first"), "string");
+
+    // the emulator has no Int16 value, so the short case is checked on the
+    // compiled program: a private overload is only compiled when something
+    // calls it, so the chosen one's body — and its string — is there alone
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public string second;
+            string F2(int x) => "int";
+            string F2(long x) => "long";
+            public void Interact() { short x = 1; second = F2(x); }
+        }
+        "#,
+        "Probe",
+    ) else {
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let strings: Vec<&str> = program
+        .output
+        .program
+        .data
+        .iter()
+        .filter_map(|symbol| match &symbol.init {
+            men_sharp_asm::HeapInit::Str(text) => Some(text.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        strings.contains(&"int"),
+        "F2(int) was not the overload compiled: {strings:?}"
+    );
+    assert!(
+        !strings.contains(&"long"),
+        "F2(long) was compiled too: {strings:?}"
+    );
+}
+
+#[test]
+fn a_call_no_candidate_wins_on_every_argument_stays_ambiguous() {
+    // each candidate is better on one argument and worse on the other: C#
+    // reports ambiguity, and so must M# — the tie-break is not a coin flip
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Probe : MenSharpBehaviour
+        {
+            string G(int a, long b) => "a";
+            string G(long a, int b) => "b";
+            public void Interact() { short x = 1; string s = G(x, x); }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::AmbiguousOverload
+        )),
+        "{:#?}",
+        bodies.errors
+    );
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

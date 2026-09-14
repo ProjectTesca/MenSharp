@@ -220,6 +220,16 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(20, smoke.GetProgramVariable("guardedFalse"));
         Assert.AreEqual(10, smoke.GetProgramVariable("guardedTrue"));
 
+        // the better function member: F1(null) → string, F2(short) → int
+        smoke.RunProgram("Overloads");
+        Assert.AreEqual("string", smoke.GetProgramVariable("overloadNull"));
+        Assert.AreEqual("int", smoke.GetProgramVariable("overloadShort"));
+
+        // a user enum transferred from the inspector reaches the heap as Int32
+        smoke.RunProgram("CheckMode");
+        Assert.AreEqual(true, smoke.GetProgramVariable("modeIsSecond"));
+        Assert.AreEqual(2, smoke.GetProgramVariable("modesSecondCount"));
+
         smoke.RunProgram("GenericStatics");
         Assert.AreEqual(1, smoke.GetProgramVariable("genericInt"));
         Assert.AreEqual(10, smoke.GetProgramVariable("genericString"));
@@ -274,6 +284,17 @@ public class MenSharpIntegrationTests
             MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke"),
             "items",
             new int[] { 42 });
+        // a user enum and an array of it, as the inspector would set them
+        {
+            Type modeType = MenSharpTestScene.FindType("InspectorEnumMode");
+            Component smokeProxy = MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke");
+            MenSharpTestScene.Assign(smokeProxy, "mode", Enum.ToObject(modeType, 1));
+            Array modes = Array.CreateInstance(modeType, 3);
+            modes.SetValue(Enum.ToObject(modeType, 0), 0);
+            modes.SetValue(Enum.ToObject(modeType, 1), 1);
+            modes.SetValue(Enum.ToObject(modeType, 1), 2);
+            MenSharpTestScene.Assign(smokeProxy, "modes", modes);
+        }
         GameObject secondSmoke = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke2", "MenSharpRuntimeSmoke", Vector3.up * 4);
         GameObject targetObject = MenSharpTestScene.AddProxy("MenSharpRuntimeTarget", "MenSharpRuntimeTarget", Vector3.right * 4);
         GameObject callerObject = MenSharpTestScene.AddProxy("MenSharpRuntimeCaller", "MenSharpRuntimeCaller", Vector3.right * 8);

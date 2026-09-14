@@ -145,6 +145,43 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         guardedTrue = value switch { 2 when ok => 10, _ => 20 };
     }
 
+    // overload tie-breaks C# makes and M# once called ambiguous: `F1(null)`
+    // is the string overload, `F2(short)` the int one
+    public string overloadNull;
+    public string overloadShort;
+    string F1(object x) => "object";
+    string F1(string x) => "string";
+    string F2(int x) => "int";
+    string F2(long x) => "long";
+
+    public void Overloads()
+    {
+        overloadNull = F1(null);
+        short x = 1;
+        overloadShort = F2(x);
+    }
+
+    // a user enum (byte-backed, even) set from the inspector: the proxy
+    // transfer must hand the M# heap an Int32, not the C# enum (issue: the
+    // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    [SerializeField] private InspectorEnumMode mode;
+    [SerializeField] private InspectorEnumMode[] modes;
+    public bool modeIsSecond;
+    public int modesSecondCount;
+
+    public void CheckMode()
+    {
+        modeIsSecond = mode == InspectorEnumMode.Second;
+        modesSecondCount = 0;
+        foreach (InspectorEnumMode each in modes)
+        {
+            if (each == InspectorEnumMode.Second)
+            {
+                modesSecondCount++;
+            }
+        }
+    }
+
     // IVRCImageDownload : IDisposable, and VRCSDK3.dll names IDisposable as
     // living in `netstandard` — an assembly the compiler is never given. The
     // inherited Dispose() must still resolve (by name, into the loaded
@@ -210,4 +247,11 @@ public static class GenericCache<T>
     // a constant-literal initializer: one per closed type (int and string
     // each start at 7), baked with no code
     public static int Seeded = 7;
+}
+
+// a byte-backed enum: an Int32 on the M# heap whatever its C# underlying type
+public enum InspectorEnumMode : byte
+{
+    First = 0,
+    Second
 }

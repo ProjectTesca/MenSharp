@@ -66,7 +66,15 @@ internal static class MenSharpTestScene
     /// into the Udon heap when play mode starts.
     public static void Assign(Component proxy, string field, object value)
     {
-        FieldInfo info = proxy.GetType().GetField(field);
+        // a [SerializeField] private field is set the way the inspector would
+        FieldInfo info = null;
+        for (Type type = proxy.GetType(); type != null && info == null; type = type.BaseType)
+        {
+            info = type.GetField(
+                field,
+                BindingFlags.Public | BindingFlags.NonPublic
+                    | BindingFlags.Instance | BindingFlags.DeclaredOnly);
+        }
         Assert.IsNotNull(info, $"{proxy.GetType().Name} has no field {field}");
         info.SetValue(proxy, value);
     }

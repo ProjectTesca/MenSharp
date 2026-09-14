@@ -388,14 +388,89 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         let Some(best) = viable.iter().map(rank).max() else {
             return AttemptOutcome::NoMatch { inference_failed };
         };
-        let mut winners = viable
+        let mut winners: Vec<Applicable> = viable
             .into_iter()
-            .filter(|applicable| rank(applicable) == best);
-        let selected = winners.next().unwrap().selected;
-        if winners.next().is_some() {
-            return AttemptOutcome::Ambiguous;
+            .filter(|applicable| rank(applicable) == best)
+            .collect();
+        if winners.len() == 1 {
+            return AttemptOutcome::Selected(winners.pop().unwrap().selected);
         }
-        AttemptOutcome::Selected(selected)
+        // still tied: the better function member, by the conversions the
+        // arguments underwent (§12.6.4.5) — `F(null)` is `F(string)` over
+        // `F(object)`, `F(short)` is `F(int)` over `F(long)`. One candidate
+        // must be at least as good on every argument and better on some;
+        // otherwise the call really is ambiguous
+        let best = (0..winners.len()).find(|&a| {
+            (0..winners.len())
+                .filter(|&b| b != a)
+                .all(|b| self.better_function_member(&winners[a], &winners[b]))
+        });
+        match best {
+            Some(index) => AttemptOutcome::Selected(winners.swap_remove(index).selected),
+            None => AttemptOutcome::Ambiguous,
+        }
+    }
+
+    /// Is `first` the better function member than `second` (§12.6.4.5): no
+    /// argument converts worse to its parameter, and at least one converts
+    /// better? Only value arguments take part; lambdas and `out var` are
+    /// weighed elsewhere.
+    fn better_function_member(&self, first: &Applicable, second: &Applicable) -> bool {
+        let mut any_better = false;
+        for (mine, theirs) in first
+            .argument_parameters
+            .iter()
+            .zip(&second.argument_parameters)
+        {
+            let (Some(mine), Some(theirs)) = (mine, theirs) else {
+                continue;
+            };
+            if mine == theirs {
+                continue;
+            }
+            if self.better_conversion_target(theirs, mine) {
+                return false;
+            }
+            if self.better_conversion_target(mine, theirs) {
+                any_better = true;
+            }
+        }
+        any_better
+    }
+
+    /// Is `first` the better conversion target than `second` (§12.6.4.6): an
+    /// implicit conversion runs from `first` to `second` but not back
+    /// (`string` over `object`, `int` over `long`), or `first` is the signed
+    /// integral type to `second`'s unsigned one of at least its size.
+    fn better_conversion_target(&self, first: &Type, second: &Type) -> bool {
+        use crate::types::conversions::NumericKind;
+        if first == second || matches!(first, Type::Error) || matches!(second, Type::Error) {
+            return false;
+        }
+        let system = self.system();
+        if system.is_implicitly_convertible(first, second)
+            && !system.is_implicitly_convertible(second, first)
+        {
+            return true;
+        }
+        matches!(
+            (system.numeric_kind(first), system.numeric_kind(second)),
+            (
+                Some(NumericKind::SByte),
+                Some(
+                    NumericKind::Byte
+                        | NumericKind::UInt16
+                        | NumericKind::UInt32
+                        | NumericKind::UInt64
+                )
+            ) | (
+                Some(NumericKind::Int16),
+                Some(NumericKind::UInt16 | NumericKind::UInt32 | NumericKind::UInt64)
+            ) | (
+                Some(NumericKind::Int32),
+                Some(NumericKind::UInt32 | NumericKind::UInt64)
+            ) | (Some(NumericKind::Int64), Some(NumericKind::UInt64))
+        )
     }
 
     /// One candidate against the arguments, in normal form or — with the
@@ -590,6 +665,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         // applicability
         let mut exact = 0usize;
+        let mut argument_parameters: Vec<Option<Type>> = vec![None; arguments.len()];
         for &(argument_index, parameter_index) in &pairs {
             let argument = &arguments[argument_index];
             let parameter = &working.parameters[parameter_index];
@@ -616,6 +692,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         // `out var x` matches any out parameter
                         continue;
                     }
+                    argument_parameters[argument_index] = Some(parameter.parameter_type.clone());
                     if *ty == parameter.parameter_type {
                         exact += 1;
                         continue;
@@ -674,6 +751,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 params_expansion: expanded.then_some(fixed),
             },
             exact,
+            argument_parameters,
             omitted,
             expanded,
         })

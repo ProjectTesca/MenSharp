@@ -479,6 +479,10 @@ struct Applicable {
     selected: SelectedOverload,
     /// Arguments whose type is exactly the parameter's.
     exact: usize,
+    /// Per written argument, the parameter type it was converted to — what
+    /// the better-function-member tie-break compares (§12.6.4.5). `None` for
+    /// a lambda or an `out var`, which that rule does not weigh.
+    argument_parameters: Vec<Option<Type>>,
     /// Optional parameters the call left out.
     omitted: usize,
     /// Applicable only with its `params` parameter expanded.

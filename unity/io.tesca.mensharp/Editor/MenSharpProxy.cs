@@ -318,6 +318,23 @@ public static class MenSharpProxy
         EditorUtility.SetDirty(holder);
     }
 
+    /// The type the compiled program declared a public variable with, from
+    /// its symbol table (retrieved on first use); null when there is no
+    /// program to ask or the program has no such variable.
+    private static Type DeclaredVariableType(UdonBehaviour udon, string name, ref IUdonSymbolTable symbols)
+    {
+        if (symbols == null)
+        {
+            var program = udon.programSource as MenSharpProgramAsset;
+            symbols = program?.SerializedProgramAsset?.RetrieveProgram()?.SymbolTable;
+            if (symbols == null)
+            {
+                return null;
+            }
+        }
+        return symbols.HasAddressForSymbol(name) ? symbols.GetSymbolType(name) : null;
+    }
+
     /// Sets one behaviour-typed public variable, the way TransferValues sets
     /// a proxy's fields.
     private static void SetBehaviourVariable(UdonBehaviour udon, string name, UdonBehaviour value)
@@ -740,6 +757,9 @@ public static class MenSharpProxy
         IUdonVariableTable table = udon.publicVariables;
         var summary = new System.Text.StringBuilder();
         var transferred = new HashSet<string>(StringComparer.Ordinal);
+        // the compiled program's symbol table, fetched once and only if a
+        // field needs it (see the enum case below)
+        IUdonSymbolTable declared = null;
         foreach (FieldInfo field in SerializedFields(proxy.GetType()))
         {
             transferred.Add(field.Name);
@@ -784,6 +804,46 @@ public static class MenSharpProxy
                 }
                 value = mapped;
                 valueType = typeof(UdonBehaviour[]);
+            }
+            // an enum the user declared is an Int32 on the M# heap (its
+            // arrays an object[] of Int32s) — the program's own symbol table
+            // says so. Handing over the C# enum instead left a slot the VM
+            // could not read as Int32 (`mode == Mode.Second` halted). An
+            // engine enum is declared as the boxed enum and passes as is.
+            else if (valueType.IsEnum
+                || (valueType.IsArray && valueType.GetElementType().IsEnum))
+            {
+                Type wanted = DeclaredVariableType(udon, field.Name, ref declared);
+                if (valueType.IsEnum && wanted == typeof(int))
+                {
+                    value = value == null ? 0 : unchecked((int)Convert.ToInt64(value));
+                    valueType = typeof(int);
+                }
+                else if (valueType.IsArray && (wanted == typeof(object[]) || wanted == typeof(int[])))
+                {
+                    var source = (Array)value;
+                    int length = source == null ? 0 : source.Length;
+                    if (wanted == typeof(int[]))
+                    {
+                        var mapped = new int[length];
+                        for (int index = 0; index < length; index++)
+                        {
+                            mapped[index] = unchecked((int)Convert.ToInt64(source.GetValue(index)));
+                        }
+                        value = mapped;
+                        valueType = typeof(int[]);
+                    }
+                    else
+                    {
+                        var mapped = new object[length];
+                        for (int index = 0; index < length; index++)
+                        {
+                            mapped[index] = unchecked((int)Convert.ToInt64(source.GetValue(index)));
+                        }
+                        value = mapped;
+                        valueType = typeof(object[]);
+                    }
+                }
             }
             table.RemoveVariable(field.Name);
             Type variableType = typeof(UdonVariable<>).MakeGenericType(valueType);
