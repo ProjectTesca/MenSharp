@@ -208,7 +208,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     }
 
     /// A bare `_`: a discard, wherever a value could have been named.
-    fn is_discard(expression: &Expression<'ast, 'ast>) -> bool {
+    pub(super) fn is_discard(expression: &Expression<'ast, 'ast>) -> bool {
         let Expression::Primary(primary) = expression else {
             return false;
         };

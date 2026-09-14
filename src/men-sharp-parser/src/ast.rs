@@ -1522,6 +1522,28 @@ impl LambdaParameters<'_, '_> {
             LambdaParameters::List(list) => list.span.clone(),
         }
     }
+
+    /// Each parameter's name, in order — `None` for a discard: `_`, when two
+    /// or more parameters are written so (C# 9, `(_, _) => 1`). A lone `_`
+    /// is a parameter named `_`, as before discards existed.
+    pub fn names(&self) -> Vec<Option<&str>> {
+        let names: Vec<Option<&str>> = match self {
+            LambdaParameters::Single(name) => vec![Some(name.value)],
+            LambdaParameters::List(list) => list
+                .parameters
+                .iter()
+                .map(|parameter| parameter.name.as_ref().ok().map(|name| name.value))
+                .collect(),
+        };
+        if names.iter().filter(|name| **name == Some("_")).count() >= 2 {
+            names
+                .into_iter()
+                .map(|name| if name == Some("_") { None } else { name })
+                .collect()
+        } else {
+            names
+        }
+    }
 }
 
 #[derive(Debug)]

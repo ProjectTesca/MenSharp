@@ -232,6 +232,34 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         catch (Exception e) { throwCaught = e.Message; }
     }
 
+    // `_` is a discard: `out _` (issue: "name does not exist"), `out var _`
+    // (issue: declared a variable `_`), `out int _`, `_ = F()`
+    public bool discardParsed;
+    public int discardGiven;
+    public int discardEvaluated;
+    public int discardLambda;
+    void Give(out int v) { discardGiven++; v = 7; }
+    int Evaluate() { discardEvaluated++; return discardEvaluated; }
+
+    public void Discards()
+    {
+        var isInteger = int.TryParse("12345", out _);
+        discardParsed = isInteger;
+        var isInteger2 = int.TryParse("12345", out var _);
+        discardParsed = discardParsed && isInteger2;
+        Give(out _);
+        Give(out var _);
+        Give(out int _);
+        _ = 1;
+        _ = Evaluate();
+        _ = Evaluate();
+        // lambda discards: two `_` parameters are discards, a lone `_` is
+        // a parameter named `_` — 1 + 2
+        Func<int, int, int> pair = (_, _) => 1;
+        Func<int, int> lone = _ => _ + 1;
+        discardLambda = pair(5, 6) + lone(1);
+    }
+
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.

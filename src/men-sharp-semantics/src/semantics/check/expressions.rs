@@ -45,6 +45,17 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 {
                     return self.check_deconstruction(assignment);
                 }
+                // `_ = F();` with no variable `_` in scope: a discard — the
+                // value is evaluated and dropped
+                if assignment.operator.value == AssignmentOperator::Assign
+                    && Self::is_discard(&assignment.target)
+                    && self.local("_").is_none()
+                {
+                    return match &assignment.value {
+                        Ok(value) => self.check_expression(value),
+                        Err(()) => Type::Error,
+                    };
+                }
                 let target = self.check_expression(&assignment.target);
                 let Ok(value) = &assignment.value else {
                     return target;

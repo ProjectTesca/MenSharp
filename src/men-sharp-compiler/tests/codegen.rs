@@ -1238,6 +1238,181 @@ fn a_throw_expression_leaves_the_other_operand_its_type() {
 }
 
 #[test]
+fn a_bare_underscore_is_a_discard() {
+    // `out _`, `out var _`, `out int _` and `_ = F()` declare nothing and
+    // drop the value (issue: `out _` was "name does not exist", `out var _`
+    // declared a variable `_`); a variable actually named `_` is still one
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public bool parsed;
+            public int given;
+            public int evaluated;
+            public int viaVariable;
+
+            void Give(out int v) { given++; v = 7; }
+            int Next() { evaluated++; return evaluated; }
+
+            public void Interact()
+            {
+                parsed = int.TryParse("12345", out _);   // an extern: true
+                Give(out _);
+                Give(out var _);
+                Give(out int _);                         // given: 3
+                _ = Next();
+                _ = Next();                              // evaluated: 2
+                WithVariable();
+            }
+
+            void WithVariable()
+            {
+                int _ = 3;
+                Give(out _);                             // the variable, written
+                _ = _ + 1;
+                viaVariable = _;                         // 8
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert!(matches!(
+        emulator.value_of("parsed"),
+        Some(Value::Boolean(true))
+    ));
+    assert_eq!(int_of(&emulator, "given"), 4);
+    assert_eq!(int_of(&emulator, "evaluated"), 2);
+    assert_eq!(int_of(&emulator, "viaVariable"), 8);
+}
+
+#[test]
+fn lambda_parameters_named_underscore_twice_are_discards() {
+    // `(_, _) => 1`: two or more `_` parameters are discards (C# 9); a lone
+    // `_` is a parameter named `_`
+    let Some(emulator) = run_behaviour(
+        r#"
+        using System;
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int pair;
+            public int middle;
+            public int typed;
+            public int single;
+
+            public void Interact()
+            {
+                Func<int, int, int> f = (_, _) => 1;
+                pair = f(5, 6);                              // 1
+                Func<int, int, int, int> k = (_, x, _) => x;
+                middle = k(1, 2, 3);                         // 2
+                Func<int, int, int> i = (int _, int _) => 2;
+                typed = i(5, 6);                             // 2
+                Func<int, int> h = _ => _ + 1;
+                single = h(1);                               // 2
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "pair"), 1);
+    assert_eq!(int_of(&emulator, "middle"), 2);
+    assert_eq!(int_of(&emulator, "typed"), 2);
+    assert_eq!(int_of(&emulator, "single"), 2);
+}
+
+#[test]
+fn a_lambda_discard_parameter_cannot_be_read() {
+    // `(_, _) => _`: CS0103 in C#, the discards being no variables
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using System;
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int leaked;
+            public void Interact()
+            {
+                Func<int, int, int> g = (_, _) => _;
+                leaked = g(1, 2);
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::UnknownIdentifier
+        )),
+        "{:#?}",
+        bodies.errors
+    );
+}
+
+#[test]
+fn an_out_var_discard_declares_no_variable() {
+    // `out var _` used to declare a variable `_` (issue: `$"{_}"` compiled);
+    // C# has no such variable
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int leaked;
+            public void Interact()
+            {
+                int.TryParse("1", out var _);
+                leaked = _;
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::UnknownIdentifier
+        )),
+        "{:#?}",
+        bodies.errors
+    );
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

@@ -787,14 +787,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             next += 1;
         }
-        let names: Vec<Option<&'ast str>> = match &node.parameters {
-            LambdaParameters::Single(name) => vec![Some(name.value)],
-            LambdaParameters::List(list) => list
-                .parameters
-                .iter()
-                .map(|parameter| parameter.name.as_ref().ok().map(|name| name.value))
-                .collect(),
-        };
+        // a discard parameter (`(_, _) => 1`) is `None`: its slot is filled
+        // by the caller and read by nobody
+        let names: Vec<Option<&'ast str>> = node.parameters.names();
         let by_ref: Vec<bool> = match &node.parameters {
             LambdaParameters::Single(_) => vec![false],
             LambdaParameters::List(list) => list

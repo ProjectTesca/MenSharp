@@ -103,6 +103,24 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         span: argument.span.clone(),
                     };
                 }
+                // `out _`: a discard when no variable `_` is in scope —
+                // matches any `out` parameter, as `out var _` does, and
+                // declares nothing
+                if argument.modifier.is_some()
+                    && Self::is_discard(expression)
+                    && self.local("_").is_none()
+                {
+                    return CallArgument {
+                        shape: ArgumentShape::Value(Type::Infer),
+                        name: argument.name.as_ref().map(|name| name.value),
+                        expression: None,
+                        modifier: argument.modifier.as_ref().map(|modifier| modifier.value),
+                        is_integer_literal: false,
+                        out_declaration: Some(("_", true)),
+                        is_receiver: false,
+                        span: argument.span.clone(),
+                    };
+                }
                 CallArgument {
                     shape: ArgumentShape::Value(self.check_expression(expression)),
                     name: argument.name.as_ref().map(|name| name.value),
@@ -121,7 +139,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             } => {
                 let declared = self.resolve_type(variable_type);
                 let infer = matches!(declared, Type::Infer);
-                if !infer {
+                // `out int _` / `out var _` declare nothing: `_` is a discard
+                if !infer && name.value != "_" {
                     self.declare_local(name.value, declared.clone());
                 }
                 CallArgument {
@@ -807,7 +826,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                 }
                 ArgumentShape::Value(_) => {
-                    if let Some((name, true)) = argument.out_declaration {
+                    if let Some((name, true)) = argument.out_declaration
+                        && name != "_"
+                    {
                         self.declare_local(name, parameter.parameter_type.clone());
                     }
                 }

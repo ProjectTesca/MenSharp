@@ -108,14 +108,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     fn lambda_parameter_names(
         lambda: &'ast LambdaExpression<'ast, 'ast>,
     ) -> Vec<Option<&'ast str>> {
-        match &lambda.parameters {
-            LambdaParameters::Single(name) => vec![Some(name.value)],
-            LambdaParameters::List(list) => list
-                .parameters
-                .iter()
-                .map(|parameter| parameter.name.as_ref().ok().map(|name| name.value))
-                .collect(),
-        }
+        lambda.parameters.names()
     }
 
     pub(super) fn lambda_shape_matches(

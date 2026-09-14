@@ -244,6 +244,13 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(2, smoke.GetProgramVariable("throwConditional"));
         Assert.AreEqual("absent", smoke.GetProgramVariable("throwCaught"));
 
+        // `_` discards: extern and source `out _`/`out var _`/`out int _`, `_ = F()`
+        smoke.RunProgram("Discards");
+        Assert.AreEqual(true, smoke.GetProgramVariable("discardParsed"));
+        Assert.AreEqual(3, smoke.GetProgramVariable("discardGiven"));
+        Assert.AreEqual(2, smoke.GetProgramVariable("discardEvaluated"));
+        Assert.AreEqual(3, smoke.GetProgramVariable("discardLambda"));
+
         // a user enum transferred from the inspector reaches the heap as Int32
         smoke.RunProgram("CheckMode");
         Assert.AreEqual(true, smoke.GetProgramVariable("modeIsSecond"));

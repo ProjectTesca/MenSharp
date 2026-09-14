@@ -2299,6 +2299,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             return self.lower_deconstruction(ctx, assignment);
         }
+        // `_ = F();` with no variable `_` in scope: evaluated, dropped
+        if assignment.operator.value == AssignmentOperator::Assign
+            && Self::is_discard_target(&assignment.target)
+            && ctx.lookup("_").is_none()
+        {
+            return self.lower_expression(ctx, value_expression);
+        }
         if assignment.operator.value == AssignmentOperator::Assign {
             // the target first (its index expressions run before the value,
             // as in C#), then the value converted to the target's type
@@ -4669,6 +4676,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// location without a slot of its own (a field, an array element, a
     /// property) gets a temporary instead: holding the current value for
     /// `ref`, left for the extern to fill for `out`, written home either way.
+    /// `out _`, `out var _`, `out int _`: a discard — a slot nothing reads
+    /// — when no variable `_` is in scope to be meant instead. `None` for
+    /// any other argument.
+    fn discard_argument_slot(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        argument: &'ast Argument<'ast, 'ast>,
+        parameter_type: &Type,
+    ) -> Option<DataId> {
+        let discard = match &argument.value {
+            ArgumentValue::Expression(expression) => {
+                Self::is_discard_target(expression) && ctx.lookup("_").is_none()
+            }
+            ArgumentValue::Declaration { name, .. } => name.value == "_",
+            ArgumentValue::Missing => false,
+        };
+        discard.then(|| self.temp_for(parameter_type))
+    }
+
     fn by_ref_argument(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -4676,6 +4702,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         modifier: ArgumentModifier,
         parameter_type: &Type,
     ) -> Option<(DataId, Option<Place>)> {
+        if let Some(slot) = self.discard_argument_slot(ctx, argument, parameter_type) {
+            return Some((slot, None));
+        }
         match &argument.value {
             ArgumentValue::Expression(expression) => {
                 let place = self.lower_place(ctx, expression);
@@ -4736,6 +4765,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         modifier: ArgumentModifier,
         parameter_type: &Type,
     ) -> Option<(DataId, Place)> {
+        if let Some(slot) = self.discard_argument_slot(ctx, argument, parameter_type) {
+            return Some((slot, Place::Slot(slot, parameter_type.clone())));
+        }
         match &argument.value {
             ArgumentValue::Expression(expression) => {
                 let place = self.lower_place(ctx, expression);
@@ -4802,7 +4834,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         scratches: &mut Vec<(DataId, DataId)>,
     ) -> Option<(DataId, Option<(DataId, Place)>)> {
         let span = argument.span.clone();
+        let discard = self.discard_argument_slot(ctx, argument, parameter_type);
         let place = match &argument.value {
+            // a discard: a slot of nobody's, named like any other
+            _ if discard.is_some() => Place::Slot(discard?, parameter_type.clone()),
             ArgumentValue::Expression(expression) => self.lower_place(ctx, expression),
             // `out var x`: the call site declares the variable, and the
             // callee writes it by name like any other

@@ -756,7 +756,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     /// A bare `_` — a discard, which takes no slot.
-    fn is_discard_target(target: &Expression<'ast, 'ast>) -> bool {
+    pub(super) fn is_discard_target(target: &Expression<'ast, 'ast>) -> bool {
         let Expression::Primary(primary) = target else {
             return false;
         };
