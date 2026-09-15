@@ -262,6 +262,10 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // a library in its own auto-referenced asmdef is read as a library
+        smoke.RunProgram("UseToolbox");
+        Assert.AreEqual(42, smoke.GetProgramVariable("toolboxTwice"));
+
         // the inspector string arrived; the fake-null TextAsset is null
         smoke.RunProgram("ReadText");
         Assert.AreEqual("hello", smoke.GetProgramVariable("readText"));

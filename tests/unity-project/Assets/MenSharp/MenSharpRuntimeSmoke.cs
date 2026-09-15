@@ -332,6 +332,16 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // a library in an auto-referenced assembly definition of its own is a
+    // library source (issue: a reference check compared "Toolbox.dll" with
+    // "Toolbox" and dropped every such library)
+    public int toolboxTwice;
+
+    public void UseToolbox()
+    {
+        toolboxTwice = Toolbox.Twice(21);
+    }
+
     // an unassigned (or destroyed) object reference is Unity's "fake null":
     // the editor transfer must not touch it (issue: TextAsset.ToString threw
     // UnassignedReferenceException while summarizing), and the program sees

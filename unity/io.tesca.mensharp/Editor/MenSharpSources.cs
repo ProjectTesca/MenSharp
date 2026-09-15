@@ -20,10 +20,8 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
 using UnityEditor;
 using UnityEditor.Compilation;
-using UnityEditorInternal;
 using PackageInfo = UnityEditor.PackageManager.PackageInfo;
 using UnityEngine;
 
@@ -49,8 +47,8 @@ public static class MenSharpSources
 
     public static SourceSet Collect()
     {
-        // clear PlayerAssemblySources cache
-        PlayerAssemblySources.Clear();
+        // what a behaviour can reach may have changed since the last collection
+        PlayerSources.Clear();
 
         var set = new SourceSet();
         var claimed = new HashSet<string>(StringComparer.Ordinal);
@@ -306,11 +304,17 @@ public static class MenSharpSources
         return assetPath;
     }
 
+    /// Editor-only, by Unity's own account rather than by an `Editor`
+    /// folder alone: a script that is a source of no Player assembly (an
+    /// asmdef whose platforms leave the build target out), or of one no
+    /// Player assembly references — a library only editor code uses, such
+    /// as an `autoReferenced: false` patcher an Editor-only asmdef pulls
+    /// in. A MenSharp behaviour could not use such a type under Unity's
+    /// compiler either, so nothing is lost by not reading it — and what it
+    /// contains (editor API, unsafe code) is nothing this compiler could.
     public static bool IsEditorScript(string path)
     {
-        var normalized = Normalize(path);
-
-        // by path
+        string normalized = Normalize(path);
         foreach (string segment in normalized.Split('/'))
         {
             if (segment == "Editor")
@@ -318,98 +322,55 @@ public static class MenSharpSources
                 return true;
             }
         }
-
-        // by asmdef
-        if (!IsSourceIncludedInTarget(normalized)) return true;
-
-        // by assembly & reference
-        if (!(IsSourceInPlayerAssembly(normalized) && IsSourceReferencedByPlayerAssembly(normalized))) return true;
-
-        return false;
+        return !PlayerSources.Reachable.Contains(normalized);
     }
 
-    private static bool IsSourceInPlayerAssembly(string path)
+    /// The sources a MenSharp behaviour can reach: those of the predefined
+    /// Player assemblies (Assembly-CSharp and friends) and of every Player
+    /// assembly some Player assembly references. Computed once per
+    /// collection — `Collect` clears it — and dropped with the domain.
+    private static class PlayerSources
     {
-        return PlayerAssemblySources.GetPlayerAssemblySources().Contains(path);;
-    }
+        private static HashSet<string> reachable;
 
-    private static bool IsSourceIncludedInTarget(string path)
-    {
-        // get asmdef data
-        var asmdefPath = CompilationPipeline.GetAssemblyDefinitionFilePathFromScriptPath(path);
-        if (string.IsNullOrEmpty(asmdefPath)) return true;
-        var asmdef = AssetDatabase.LoadAssetAtPath<AssemblyDefinitionAsset>(asmdefPath);
-        if (asmdef == null) return true;
-        var includePlatforms = JsonUtility.FromJson<AssemblyDefinitionData>(asmdef.text).includePlatforms ?? Array.Empty<string>();
+        public static HashSet<string> Reachable
+        {
+            get { return reachable ?? (reachable = Compute()); }
+        }
 
-        // empty = Any Platform
-        if (includePlatforms.Length == 0) return true;
-
-        var currentPlatForm = BuildPipeline.GetBuildTargetName(EditorUserBuildSettings.activeBuildTarget);
-        return includePlatforms.Any(platform => string.Equals(platform, currentPlatForm));
-    }
-
-    private static bool IsSourceReferencedByPlayerAssembly(string path)
-    {
-        var assemblyName = CompilationPipeline.GetAssemblyNameFromScriptPath(path);
-        if (string.IsNullOrEmpty(assemblyName)) return true;
-
-        // predefined assemblies are Player roots
-        if (assemblyName.StartsWith("Assembly-CSharp", StringComparison.Ordinal))  return true;
-
-        return CompilationPipeline.GetAssemblies(AssembliesType.PlayerWithoutTestAssemblies)
-            .SelectMany(assembly => assembly.assemblyReferences)
-            .Any(reference => reference.name == assemblyName);
-    }
-
-    /// <summary>
-    /// Caches source paths that belong to Unity player assemblies.
-    /// </summary>
-    private static class PlayerAssemblySources
-    {
-        private static HashSet<string> _playerAssemblySources;
-
-        /// <summary>
-        /// Clears the cached player assembly source paths.
-        /// </summary>
         public static void Clear()
         {
-            _playerAssemblySources = null;
+            reachable = null;
         }
 
-        /// <summary>
-        /// Gets the source paths that belong to Unity player assemblies.
-        /// </summary>
-        public static HashSet<string> GetPlayerAssemblySources()
+        private static HashSet<string> Compute()
         {
-            // return cached value if available
-            if (_playerAssemblySources != null) return _playerAssemblySources;
-
-            _playerAssemblySources = new HashSet<string>(StringComparer.Ordinal);
-
-            foreach (var assembly in CompilationPipeline.GetAssemblies(AssembliesType.PlayerWithoutTestAssemblies))
+            Assembly[] assemblies =
+                CompilationPipeline.GetAssemblies(AssembliesType.PlayerWithoutTestAssemblies);
+            // names, as `assemblyReferences` spells them (no extension)
+            var referenced = new HashSet<string>(StringComparer.Ordinal);
+            foreach (Assembly assembly in assemblies)
             {
-                foreach (var source in assembly.sourceFiles)
+                foreach (Assembly reference in assembly.assemblyReferences)
                 {
-                    _playerAssemblySources.Add(Normalize(source));
+                    referenced.Add(reference.name);
                 }
             }
-
-            return _playerAssemblySources;
+            var sources = new HashSet<string>(StringComparer.Ordinal);
+            foreach (Assembly assembly in assemblies)
+            {
+                bool root = assembly.name.StartsWith("Assembly-CSharp", StringComparison.Ordinal);
+                if (!root && !referenced.Contains(assembly.name))
+                {
+                    continue;
+                }
+                foreach (string source in assembly.sourceFiles)
+                {
+                    sources.Add(Normalize(source));
+                }
+            }
+            return sources;
         }
-    }
-
-    /// <summary>
-    /// Represents the includePlatforms value from an assembly definition file.
-    /// </summary>
-    [Serializable]
-    private struct AssemblyDefinitionData
-    {
-        /// <summary>
-        /// The build platform names listed in the assembly definition's
-        /// includePlatforms property.
-        /// </summary>
-        public string[] includePlatforms;
     }
 }
 #endif
