@@ -584,6 +584,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             ctx.loop_stack.push(BreakFrame::Try {
                 handler: dispose_handler,
                 finally: Some(action),
+                search: None,
             });
         }
 
@@ -655,7 +656,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let cleared = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
             self.copy(cleared, state.pending);
             self.emit_finally_action(ctx, &action);
-            self.emit_throw(ctx, saved, span.clone(), false);
+            self.emit_continue_unwind(ctx, saved);
             self.program.code.push(Op::Label(done));
         }
         ctx.locals.pop();

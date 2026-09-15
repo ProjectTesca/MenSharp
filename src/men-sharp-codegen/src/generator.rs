@@ -374,6 +374,10 @@ struct EventArgument {
 struct ExceptionState {
     exception: DataId,
     pending: DataId,
+    /// Where the second pass of a throw starts (see `exceptions`): the
+    /// innermost handler's address, kept while the first pass runs the
+    /// `catch` filters further out.
+    resume: DataId,
 }
 
 /// A synthesized virtual-call dispatcher: one per (root method, bindings).
@@ -678,6 +682,10 @@ enum BreakFrame<'ast> {
     Try {
         handler: LabelId,
         finally: Option<FinallyAction<'ast>>,
+        /// A region with `catch` clauses: where a throw's first pass tests
+        /// them (type and `when` filter) before any `finally` on the way
+        /// runs — C#'s two-pass order (see `exceptions`).
+        search: Option<LabelId>,
     },
 }
 

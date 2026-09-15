@@ -2023,6 +2023,88 @@ fn bool_operands_take_the_non_short_circuit_operators() {
 }
 
 #[test]
+fn exception_filters_run_before_inner_finally_blocks() {
+    // .NET throws in two passes (§21.4): first every `catch` is tested,
+    // `when` filters included, outward to the one that takes the exception;
+    // only then do the `finally` blocks on the way run. So the order is
+    // Filter, Finally, Catch (issue: Finally ran first). A filter that says
+    // no is followed by the next region's, still before any `finally`
+    let Some(emulator) = run_behaviour(
+        r#"
+        using System;
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public string order;
+            public string chain;
+            public string rethrown;
+
+            bool Note(string step, bool answer) { order += step + ","; return answer; }
+            bool Step(string step, bool answer) { chain += step + ","; return answer; }
+
+            public void Interact()
+            {
+                order = "";
+                try
+                {
+                    try { throw new Exception("x"); }
+                    finally { order += "Finally,"; }
+                }
+                catch (Exception) when (Note("Filter", true))
+                {
+                    order += "Catch";
+                }
+
+                chain = "";
+                try
+                {
+                    try
+                    {
+                        try { throw new InvalidOperationException("y"); }
+                        finally { chain += "Finally,"; }
+                    }
+                    catch (InvalidOperationException) when (Step("No", false))
+                    {
+                        chain += "Wrong,";
+                    }
+                }
+                catch (Exception e) when (Step("Yes", e.Message == "y"))
+                {
+                    chain += "Outer";
+                }
+
+                rethrown = "";
+                try
+                {
+                    try { throw new Exception("z"); }
+                    catch (Exception) { rethrown += "Inner,"; throw; }
+                    finally { rethrown += "Finally,"; }
+                }
+                catch (Exception) when (Rethrow("Filter"))
+                {
+                    rethrown += "Catch";
+                }
+            }
+
+            bool Rethrow(string step) { rethrown += step + ","; return true; }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(string_of(&emulator, "order"), "Filter,Finally,Catch");
+    assert_eq!(string_of(&emulator, "chain"), "No,Yes,Finally,Outer");
+    // `throw;` starts a new two-pass: the outer filter, then the finally
+    assert_eq!(
+        string_of(&emulator, "rethrown"),
+        "Inner,Filter,Finally,Catch"
+    );
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

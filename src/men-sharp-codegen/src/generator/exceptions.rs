@@ -51,7 +51,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             export: false,
             sync: None,
         });
-        let state = ExceptionState { exception, pending };
+        let resume = self.program.add_data(DataSymbol {
+            name: "__exception_resume".into(),
+            udon_type: "SystemUInt32".into(),
+            init: HeapInit::UInt32(0),
+            export: false,
+            sync: None,
+        });
+        let state = ExceptionState {
+            exception,
+            pending,
+            resume,
+        };
         self.exception_state = Some(state);
         state
     }
@@ -294,7 +305,58 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         })
     }
 
+    /// The nearest region with `catch` clauses: where a throw's first pass
+    /// starts testing them.
+    fn search_target(ctx: &Ctx<'ast>) -> Option<LabelId> {
+        ctx.loop_stack.iter().rev().find_map(|frame| match frame {
+            BreakFrame::Try {
+                search: Some(search),
+                ..
+            } => Some(*search),
+            _ => None,
+        })
+    }
+
+    /// A throw, as .NET runs one, in two passes (§21.4): first the `catch`
+    /// clauses from the innermost region outward are tested — type and
+    /// `when` filter — until one takes the exception; only then does the
+    /// second pass unwind, running every `finally` on the way, to the
+    /// handler that took it. So a filter runs *before* an inner `finally`.
+    /// Here: the innermost handler's address is kept in `resume`, the
+    /// search runs (each region's `search` block, which jumps outward or
+    /// back to `resume`), and the second pass goes handler to handler
+    /// (`emit_continue_unwind`). Regions in the calling functions get
+    /// their own first pass when the exception reaches them, after this
+    /// function's `finally` blocks — one function at a time is as far as
+    /// the addresses reach.
     fn emit_unwind(&mut self, ctx: &Ctx<'ast>) {
+        let Some(handler) = Self::unwind_target(ctx) else {
+            self.program.code.push(Op::JumpIndirect(ctx.return_slot));
+            return;
+        };
+        if let Some(search) = Self::search_target(ctx) {
+            let state = self.exception_state();
+            let address = self.constant(
+                "SystemUInt32",
+                &format!("resume:{}", handler.0),
+                HeapInit::CodeAddress(handler),
+            );
+            self.copy(address, state.resume);
+            self.program.code.push(Op::Jump(Target::Label(search)));
+        } else {
+            self.program.code.push(Op::Jump(Target::Label(handler)));
+        }
+    }
+
+    /// The second pass going on from a handler that is done with its part
+    /// — a `finally` that ran, a `catch` region the search passed over:
+    /// the exception is pending again and the next handler out takes over,
+    /// with no filter run twice.
+    pub(super) fn emit_continue_unwind(&mut self, ctx: &Ctx<'ast>, saved: DataId) {
+        let state = self.exception_state();
+        self.copy(saved, state.exception);
+        let raised = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
+        self.copy(raised, state.pending);
         match Self::unwind_target(ctx) {
             Some(handler) => self.program.code.push(Op::Jump(Target::Label(handler))),
             None => self.program.code.push(Op::JumpIndirect(ctx.return_slot)),
@@ -536,6 +598,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ctx.loop_stack.push(BreakFrame::Try {
             handler,
             finally: Some(FinallyAction::Block(finally)),
+            search: None,
         });
         self.lower_try_catch(ctx, statement);
         ctx.loop_stack.pop();
@@ -543,7 +606,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.lower_block(ctx, finally);
         self.program.code.push(Op::Jump(Target::Label(end)));
 
-        // left by an exception: run the block, then keep unwinding
+        // left by an exception (second pass): run the block, then keep
+        // unwinding to the handler the first pass chose
         self.program.code.push(Op::Label(handler));
         let state = self.exception_state();
         let saved = self.temp("SystemObject");
@@ -551,7 +615,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let cleared = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
         self.copy(cleared, state.pending);
         self.lower_block(ctx, finally);
-        self.emit_throw(ctx, saved, statement.span.clone(), false);
+        self.emit_continue_unwind(ctx, saved);
         self.program.code.push(Op::Label(end));
     }
 
@@ -565,59 +629,125 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
 
         let handler = self.fresh_label("catch_handler");
+        let search = self.fresh_label("catch_search");
         let end = self.fresh_label("try_end");
+        // which clause the first pass chose, -1 for none: allocated before
+        // the block so nothing inside it (a nested `finally`, which runs
+        // between the two passes) shares the slot
+        let selected = self.temp("SystemInt32");
+        let none = self.int_constant(-1);
+        self.copy(none, selected);
         ctx.loop_stack.push(BreakFrame::Try {
             handler,
             finally: None,
+            search: Some(search),
         });
         self.lower_block(ctx, block);
         ctx.loop_stack.pop();
         self.program.code.push(Op::Jump(Target::Label(end)));
 
-        self.program.code.push(Op::Label(handler));
-        let state = self.exception_state();
-        let saved = self.temp("SystemObject");
-        self.copy(state.exception, saved);
-        let cleared = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
-        self.copy(cleared, state.pending);
-
         let object = self.corlib_type("Object");
-        for clause in statement.catches {
-            let next = self.fresh_label("catch_next");
-            let caught_type = match &clause.exception_type {
-                Some(type_ref) => {
-                    let Some(ty) = self
+        // the clauses with a type the compiler could resolve; the others are
+        // skipped in both passes alike
+        let clauses: Vec<(usize, Type)> = statement
+            .catches
+            .iter()
+            .enumerate()
+            .filter_map(|(index, clause)| {
+                let ty = match &clause.exception_type {
+                    Some(type_ref) => self
                         .bodies
                         .resolved_types
                         .get(&EntityID::from(type_ref))
                         .cloned()
-                        .map(|ty| self.substitute(&ty, &ctx.key.bindings))
-                    else {
-                        continue;
-                    };
-                    let Some(fits) =
-                        self.lower_runtime_type_test(ctx, saved, &ty, clause.span.clone())
-                    else {
-                        continue;
-                    };
-                    self.program.code.push(Op::Push(fits));
-                    self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
-                    ty
-                }
-                None => object.clone(),
-            };
-            ctx.locals.push(HashMap::default());
-            if let Some(name) = &clause.name {
-                let local = self.temp_for(&caught_type);
-                self.copy(saved, local);
-                self.bind_local(ctx, name.value, local, caught_type);
+                        .map(|ty| self.substitute(&ty, &ctx.key.bindings))?,
+                    None => object.clone(),
+                };
+                Some((index, ty))
+            })
+            .collect();
+        let state = self.exception_state();
+
+        // ---- first pass: does a clause take the pending exception? Each
+        // is tested in turn — type, then `when` — and the first that does
+        // is remembered; nothing is run yet. The exception is not pending
+        // while this runs: a type test is a call, and so may a filter make
+        // one, and the check after a call would take the pending flag for
+        // a throw of its own
+        self.program.code.push(Op::Label(search));
+        let cleared = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
+        let raised = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
+        self.copy(cleared, state.pending);
+        for &(index, ref caught_type) in &clauses {
+            let clause = &statement.catches[index];
+            let next = self.fresh_label("search_next");
+            if clause.exception_type.is_some() {
+                let Some(fits) = self.lower_runtime_type_test(
+                    ctx,
+                    state.exception,
+                    caught_type,
+                    clause.span.clone(),
+                ) else {
+                    continue;
+                };
+                self.program.code.push(Op::Push(fits));
+                self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
             }
             if let Some(filter) = &clause.filter
                 && let Ok(condition) = &filter.condition
-                && let Some(passes) = self.lower_expression(ctx, condition)
             {
-                self.program.code.push(Op::Push(passes));
-                self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
+                ctx.locals.push(HashMap::default());
+                if let Some(name) = &clause.name {
+                    let local = self.temp_for(caught_type);
+                    self.copy(state.exception, local);
+                    self.bind_local(ctx, name.value, local, caught_type.clone());
+                }
+                let passes = self.lower_expression(ctx, condition);
+                ctx.locals.pop();
+                if let Some(passes) = passes {
+                    self.program.code.push(Op::Push(passes));
+                    self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
+                }
+            }
+            let chosen = self.int_constant(index as i32);
+            self.copy(chosen, selected);
+            self.copy(raised, state.pending);
+            self.program.code.push(Op::JumpIndirect(state.resume));
+            self.program.code.push(Op::Label(next));
+        }
+        // none here: the search goes on outward, or the second pass starts
+        match Self::search_target(ctx) {
+            Some(outer) => self.program.code.push(Op::Jump(Target::Label(outer))),
+            None => {
+                self.copy(raised, state.pending);
+                self.program.code.push(Op::JumpIndirect(state.resume));
+            }
+        }
+
+        // ---- second pass: the handler runs the clause the search chose,
+        // or passes the exception on when it chose none here
+        self.program.code.push(Op::Label(handler));
+        let saved = self.temp("SystemObject");
+        self.copy(state.exception, saved);
+        self.copy(cleared, state.pending);
+        for &(index, ref caught_type) in &clauses {
+            let clause = &statement.catches[index];
+            let next = self.fresh_label("catch_next");
+            let wanted = self.int_constant(index as i32);
+            let chosen = self.temp("SystemBoolean");
+            self.call_extern(
+                ctx,
+                "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
+                &[selected, wanted, chosen],
+                clause.span.clone(),
+            );
+            self.program.code.push(Op::Push(chosen));
+            self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
+            ctx.locals.push(HashMap::default());
+            if let Some(name) = &clause.name {
+                let local = self.temp_for(caught_type);
+                self.copy(saved, local);
+                self.bind_local(ctx, name.value, local, caught_type.clone());
             }
             ctx.caught.push(saved);
             if let Ok(body) = &clause.block {
@@ -629,8 +759,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.program.code.push(Op::Label(next));
         }
 
-        // no clause took it
-        self.emit_throw(ctx, saved, statement.span.clone(), false);
+        // no clause of this region's: on to the one the search chose
+        self.emit_continue_unwind(ctx, saved);
         self.program.code.push(Op::Label(end));
     }
 

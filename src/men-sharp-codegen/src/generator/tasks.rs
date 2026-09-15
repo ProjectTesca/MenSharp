@@ -143,6 +143,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             ctx.loop_stack.push(BreakFrame::Try {
                 handler: label,
                 finally: None,
+                search: None,
             });
             label
         });

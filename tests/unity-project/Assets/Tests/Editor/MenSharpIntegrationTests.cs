@@ -262,6 +262,10 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // two-pass exception handling: filter before the inner finally
+        smoke.RunProgram("ExceptionOrder");
+        Assert.AreEqual("Filter,Finally,Catch", smoke.GetProgramVariable("exceptionOrder"));
+
         // non-short-circuit bool operators
         smoke.RunProgram("BoolOperators");
         Assert.AreEqual(1, smoke.GetProgramVariable("boolCalls"));

@@ -332,6 +332,29 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // a `when` filter runs before an inner `finally` (issue: after it)
+    public string exceptionOrder;
+
+    bool ExceptionFilter()
+    {
+        exceptionOrder += "Filter,";
+        return true;
+    }
+
+    public void ExceptionOrder()
+    {
+        exceptionOrder = "";
+        try
+        {
+            try { throw new Exception(); }
+            finally { exceptionOrder += "Finally,"; }
+        }
+        catch (Exception) when (ExceptionFilter())
+        {
+            exceptionOrder += "Catch";
+        }
+    }
+
     // `&`, `|`, `^` on bools evaluate both sides (issue: a compile error)
     public int boolCalls;
     public bool boolOrCall;
