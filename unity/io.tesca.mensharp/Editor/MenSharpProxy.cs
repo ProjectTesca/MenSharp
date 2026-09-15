@@ -640,6 +640,19 @@ public static class MenSharpProxy
 
     /// The UdonBehaviour behind a referenced proxy. A null here means the
     /// reference will do nothing at runtime, which is worth saying out loud.
+    /// An enum value's underlying bits as a long: a ulong past
+    /// `long.MaxValue` keeps its bit pattern, which is what the M# heap
+    /// holds for it.
+    private static long EnumBits(object value)
+    {
+        Type underlying = Enum.GetUnderlyingType(value.GetType());
+        if (underlying == typeof(ulong))
+        {
+            return unchecked((long)Convert.ToUInt64(value));
+        }
+        return Convert.ToInt64(value);
+    }
+
     /// A value for the transfer summary that never asks a Unity object to
     /// describe itself: `TextAsset.ToString` reads the asset's text, which
     /// throws on an unassigned or destroyed reference.
@@ -842,31 +855,53 @@ public static class MenSharpProxy
                 || (valueType.IsArray && valueType.GetElementType().IsEnum))
             {
                 Type wanted = DeclaredVariableType(udon, field.Name, ref declared);
+                // an enum past what an Int32 holds (uint, long, ulong
+                // underlying) is an Int64 on the M# heap — a ulong as its
+                // bit pattern
                 if (valueType.IsEnum && wanted == typeof(int))
                 {
-                    value = value == null ? 0 : unchecked((int)Convert.ToInt64(value));
+                    value = value == null ? 0 : unchecked((int)EnumBits(value));
                     valueType = typeof(int);
                 }
-                else if (valueType.IsArray && (wanted == typeof(object[]) || wanted == typeof(int[])))
+                else if (valueType.IsEnum && wanted == typeof(long))
+                {
+                    value = value == null ? 0L : EnumBits(value);
+                    valueType = typeof(long);
+                }
+                else if (valueType.IsArray
+                    && (wanted == typeof(object[]) || wanted == typeof(int[]) || wanted == typeof(long[])))
                 {
                     var source = (Array)value;
                     int length = source == null ? 0 : source.Length;
+                    bool wide = Enum.GetUnderlyingType(valueType.GetElementType()) is Type underlying
+                        && (underlying == typeof(uint) || underlying == typeof(long) || underlying == typeof(ulong));
                     if (wanted == typeof(int[]))
                     {
                         var mapped = new int[length];
                         for (int index = 0; index < length; index++)
                         {
-                            mapped[index] = unchecked((int)Convert.ToInt64(source.GetValue(index)));
+                            mapped[index] = unchecked((int)EnumBits(source.GetValue(index)));
                         }
                         value = mapped;
                         valueType = typeof(int[]);
+                    }
+                    else if (wanted == typeof(long[]))
+                    {
+                        var mapped = new long[length];
+                        for (int index = 0; index < length; index++)
+                        {
+                            mapped[index] = EnumBits(source.GetValue(index));
+                        }
+                        value = mapped;
+                        valueType = typeof(long[]);
                     }
                     else
                     {
                         var mapped = new object[length];
                         for (int index = 0; index < length; index++)
                         {
-                            mapped[index] = unchecked((int)Convert.ToInt64(source.GetValue(index)));
+                            long bits = EnumBits(source.GetValue(index));
+                            mapped[index] = wide ? (object)bits : unchecked((int)bits);
                         }
                         value = mapped;
                         valueType = typeof(object[]);

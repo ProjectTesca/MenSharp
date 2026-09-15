@@ -173,8 +173,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 target: TypeTarget::Source(symbol),
                 ..
             } if self.declarations.table.symbol(*symbol).kind == SymbolKind::Enum => {
-                // an enum of the user's is an Int32 on the heap
-                Some("System.Int32".into())
+                // an enum of the user's is an Int32 (or Int64) on the heap
+                Some(match self.enum_storage(*symbol) {
+                    "SystemInt64" => "System.Int64".into(),
+                    _ => "System.Int32".into(),
+                })
             }
             Type::Array { element, rank: 1 } => {
                 Some(format!("{}[]", self.serializable_type_name(element)?))

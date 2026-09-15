@@ -1878,6 +1878,91 @@ fn a_struct_method_on_a_value_works_on_a_copy() {
 }
 
 #[test]
+fn an_enum_keeps_to_its_underlying_type() {
+    // `enum ByteEnum : byte { Max = 255 }`: `value++` at Max is Zero (issue:
+    // it was 256 in the Int32 the enum lives in), `(ByteEnum)300` is 44, and
+    // a `: long`/`: ulong` enum — whose members do not fit an Int32 — lives
+    // in an Int64 (issue: `Big = 9223372036854775808UL` did not compile)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public enum ByteEnum : byte { Zero = 0, One = 1, Max = 255 }
+        public enum SByteEnum : sbyte { Low = -128, High = 127 }
+        public enum ULongEnum : ulong { Small = 1, Big = 9223372036854775808UL }
+        public enum LongEnum : long { Wide = 4000000000L }
+        [System.Flags] public enum Bits : byte { A = 0x01, B = 0x02, C = 0x04 }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public bool wrapsToZero;
+            public int cast;
+            public int sbyteWrapped;
+            public bool bigIsBig;
+            public long bigBits;
+            public string bigName;
+            public long wide;
+            public long widePlusOne;
+            public string flagsName;
+            public int flagsBits;
+
+            public void Interact()
+            {
+                ByteEnum value = ByteEnum.Max;
+                value++;
+                wrapsToZero = value == ByteEnum.Zero;         // true
+                int outside = 300;
+                cast = (int)(ByteEnum)outside;                // 44
+                SByteEnum s = SByteEnum.High;
+                s++;
+                sbyteWrapped = (int)s;                        // -128
+                ULongEnum big = ULongEnum.Big;
+                bigIsBig = big == ULongEnum.Big;              // true
+                bigBits = (long)big;                          // long.MinValue: the bit pattern
+                bigName = big.ToString();                     // "Big"
+                LongEnum w = LongEnum.Wide;
+                wide = (long)w;                               // 4000000000
+                w++;
+                widePlusOne = (long)w;                        // 4000000001
+                Bits flags = Bits.A | Bits.C;
+                flagsName = flags.ToString();                 // "A, C"
+                flagsBits = (int)(~flags);                    // 250: within the byte
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert!(matches!(
+        emulator.value_of("wrapsToZero"),
+        Some(Value::Boolean(true))
+    ));
+    assert_eq!(int_of(&emulator, "cast"), 44);
+    assert_eq!(int_of(&emulator, "sbyteWrapped"), -128);
+    assert!(matches!(
+        emulator.value_of("bigIsBig"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("bigBits"),
+        Some(Value::Int64(i64::MIN))
+    ));
+    assert_eq!(string_of(&emulator, "bigName"), "Big");
+    assert!(matches!(
+        emulator.value_of("wide"),
+        Some(Value::Int64(4_000_000_000))
+    ));
+    assert!(matches!(
+        emulator.value_of("widePlusOne"),
+        Some(Value::Int64(4_000_000_001))
+    ));
+    assert_eq!(string_of(&emulator, "flagsName"), "A, C");
+    assert_eq!(int_of(&emulator, "flagsBits"), 250);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

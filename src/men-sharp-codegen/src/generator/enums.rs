@@ -1,6 +1,7 @@
 //! `ToString` of a source enum — the member's name, as in C#.
 //!
-//! A source enum is an Int32 on the heap and nothing more: Udon has no
+//! A source enum is an Int32 (or, past what one holds, an Int64) on the
+//! heap and nothing more: Udon has no
 //! `System.Enum` extern that could look its name up, and a boxed one is a
 //! boxed int. So each enum gets a function of its own, synthesized from
 //! its declaration: `string (int value)` that compares the value with every
@@ -39,9 +40,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// The members of a source enum as (name, value), in declaration
     /// order; a value declared twice keeps its first name, as .NET's lookup
     /// does.
-    fn enum_names(&mut self, symbol: SymbolId) -> Vec<(String, i32)> {
+    fn enum_names(&mut self, symbol: SymbolId) -> Vec<(String, i64)> {
         let members: Vec<SymbolId> = self.declarations.table.symbol(symbol).members.to_vec();
-        let mut names: Vec<(String, i32)> = Vec::new();
+        let mut names: Vec<(String, i64)> = Vec::new();
         for member in members {
             let entry = self.declarations.table.symbol(member);
             if entry.kind != SymbolKind::EnumMember {
@@ -51,7 +52,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let Some(value) = self.enum_member_value(member) else {
                 continue;
             };
-            let value = value as i32;
             if names.iter().any(|(_, seen)| *seen == value) {
                 continue;
             }
@@ -79,20 +79,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let names = self.enum_names(symbol);
         let span = 0..0;
         let end = self.fresh_label("enum_tostring_end");
+        let storage = self.enum_storage(symbol);
+        let equality = format!("{storage}.__op_Equality__{storage}_{storage}__SystemBoolean");
 
         if self.is_flags_enum(symbol) {
             self.emit_flags_to_string(ctx, value, result, &names, end);
         } else {
             for (name, constant) in &names {
                 let next = self.fresh_label("enum_tostring_next");
-                let expected = self.int_constant(*constant);
+                let expected = self.enum_constant(symbol, *constant);
                 let equal = self.temp("SystemBoolean");
-                self.call_extern(
-                    ctx,
-                    "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
-                    &[value, expected, equal],
-                    span.clone(),
-                );
+                self.call_extern(ctx, &equality, &[value, expected, equal], span.clone());
                 self.program.code.push(Op::Push(equal));
                 self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
                 let text = self.string_constant(name);
@@ -105,7 +102,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // no member has this value: the number
         self.call_extern(
             ctx,
-            "SystemInt32.__ToString__SystemString",
+            &format!("{storage}.__ToString__SystemString"),
             &[value, result],
             span,
         );
@@ -120,21 +117,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ctx: &mut Ctx<'ast>,
         value: DataId,
         result: DataId,
-        names: &[(String, i32)],
+        names: &[(String, i64)],
         end: LabelId,
     ) {
         let span = 0..0;
-        let zero = self.int_constant(0);
+        let symbol = ctx.key.symbol;
+        let storage = self.enum_storage(symbol);
+        let equality = format!("{storage}.__op_Equality__{storage}_{storage}__SystemBoolean");
+        let and = format!("{storage}.__op_LogicalAnd__{storage}_{storage}__{storage}");
+        let zero = self.enum_constant(symbol, 0);
         let equal = self.temp("SystemBoolean");
 
         // zero: the member that is zero, or "0"
         let not_zero = self.fresh_label("flags_not_zero");
-        self.call_extern(
-            ctx,
-            "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
-            &[value, zero, equal],
-            span.clone(),
-        );
+        self.call_extern(ctx, &equality, &[value, zero, equal], span.clone());
         self.program.code.push(Op::Push(equal));
         self.program
             .code
@@ -149,34 +145,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::Jump(Target::Label(end)));
         self.program.code.push(Op::Label(not_zero));
 
-        let remaining = self.temp("SystemInt32");
+        let remaining = self.temp(storage);
         self.copy(value, remaining);
         let joined = self.temp("SystemString");
         let empty = self.string_constant("");
         self.copy(empty, joined);
         let separator = self.string_constant(", ");
-        let masked = self.temp("SystemInt32");
-        let mut descending: Vec<&(String, i32)> = names
+        let masked = self.temp(storage);
+        let mut descending: Vec<&(String, i64)> = names
             .iter()
             .filter(|(_, constant)| *constant != 0)
             .collect();
         // by unsigned value, as .NET sorts the underlying values
-        descending.sort_by_key(|entry| std::cmp::Reverse(entry.1 as u32));
+        descending.sort_by_key(|entry| std::cmp::Reverse(entry.1 as u64));
         for (name, constant) in descending {
             let skip = self.fresh_label("flags_skip");
-            let bits = self.int_constant(*constant);
-            self.call_extern(
-                ctx,
-                "SystemInt32.__op_LogicalAnd__SystemInt32_SystemInt32__SystemInt32",
-                &[remaining, bits, masked],
-                span.clone(),
-            );
-            self.call_extern(
-                ctx,
-                "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
-                &[masked, bits, equal],
-                span.clone(),
-            );
+            let bits = self.enum_constant(symbol, *constant);
+            self.call_extern(ctx, &and, &[remaining, bits, masked], span.clone());
+            self.call_extern(ctx, &equality, &[masked, bits, equal], span.clone());
             self.program.code.push(Op::Push(equal));
             self.program.code.push(Op::JumpIfFalse(Target::Label(skip)));
             // this name goes in front of what is joined so far
@@ -211,24 +197,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 span.clone(),
             );
             self.program.code.push(Op::Label(appended));
-            let cleared = self.int_constant(!*constant);
-            self.call_extern(
-                ctx,
-                "SystemInt32.__op_LogicalAnd__SystemInt32_SystemInt32__SystemInt32",
-                &[remaining, cleared, remaining],
-                span.clone(),
-            );
+            let cleared = self.enum_constant(symbol, !*constant);
+            self.call_extern(ctx, &and, &[remaining, cleared, remaining], span.clone());
             self.program.code.push(Op::Label(skip));
         }
 
         // every bit accounted for: the names; otherwise the number
         let leftover = self.fresh_label("flags_leftover");
-        self.call_extern(
-            ctx,
-            "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
-            &[remaining, zero, equal],
-            span,
-        );
+        self.call_extern(ctx, &equality, &[remaining, zero, equal], span);
         self.program.code.push(Op::Push(equal));
         self.program
             .code

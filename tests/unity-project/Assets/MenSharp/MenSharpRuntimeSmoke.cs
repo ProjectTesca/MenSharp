@@ -332,6 +332,25 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // an enum keeps to its underlying type: a byte enum wraps at 255, a
+    // ulong enum holds a member past long.MaxValue (issue: both were Int32)
+    public bool enumByteWraps;
+    public int enumByteCast;
+    public bool enumULongBig;
+    public string enumULongName;
+
+    public void EnumUnderlying()
+    {
+        ByteEnum value = ByteEnum.Max;
+        value++;
+        enumByteWraps = value == ByteEnum.Zero;
+        int outside = 300;                        // a constant would be CS0221 in C#
+        enumByteCast = (int)(ByteEnum)outside;
+        ULongEnum big = ULongEnum.Big;
+        enumULongBig = big == ULongEnum.Big;
+        enumULongName = big.ToString();
+    }
+
     // a struct method on a value — a readonly field, an `in` parameter —
     // runs on a copy, as in C# (issue: the readonly field went 3 → 4);
     // on a variable — a plain field, an array element — in place
@@ -517,6 +536,17 @@ public static class GenericCache<T>
     // a constant-literal initializer: one per closed type (int and string
     // each start at 7), baked with no code
     public static int Seeded = 7;
+}
+
+// what `EnumUnderlying` uses: the issue's enums
+public enum ByteEnum : byte
+{
+    Zero = 0, Max = 255
+}
+
+public enum ULongEnum : ulong
+{
+    Big = 9223372036854775808UL
 }
 
 // what `DefensiveCopies` mutates: the issue's struct and holder

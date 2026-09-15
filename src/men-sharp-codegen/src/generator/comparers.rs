@@ -96,16 +96,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) {
         // a number, string, char, bool, ...: the type's own extern. A
-        // source enum is its underlying int on the heap.
-        let extern_name = if self.type_system().is_enum_type(element)
-            && matches!(
-                element,
-                Type::Named {
-                    target: TypeTarget::Source(_),
-                    ..
-                }
-            ) {
-            Some("SystemInt32".to_string())
+        // source enum is its storage int on the heap.
+        let extern_name = if let Some(symbol) = self.source_enum(element) {
+            Some(self.enum_storage(symbol).to_string())
         } else {
             self.extern_type_name(element)
         };

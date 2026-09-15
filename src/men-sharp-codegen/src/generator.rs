@@ -2949,12 +2949,71 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
-    /// A source enum member's underlying value: an explicit integer literal,
-    /// or counting up from the previous member, as C# does.
+    /// The Udon type of a source enum's underlying type: `SystemByte`,
+    /// `SystemInt32`, `SystemUInt64`, … — `SystemInt32` when none is
+    /// written, as C# has it.
+    pub(super) fn enum_underlying(&self, symbol: SymbolId) -> String {
+        self.signatures
+            .base_types
+            .get(&symbol)
+            .and_then(|bases| bases.first())
+            .and_then(|ty| self.extern_type_name(ty))
+            .unwrap_or_else(|| "SystemInt32".into())
+    }
+
+    /// The heap type a source enum's values live in: an Int32 for every
+    /// underlying type that fits one (byte, sbyte, short, ushort, int), an
+    /// Int64 for uint, long and ulong — a ulong as its bit pattern, so
+    /// members above `long.MaxValue` compare equal but order as negatives.
+    pub(super) fn enum_storage(&self, symbol: SymbolId) -> &'static str {
+        match self.enum_underlying(symbol).as_str() {
+            "SystemUInt32" | "SystemInt64" | "SystemUInt64" => "SystemInt64",
+            _ => "SystemInt32",
+        }
+    }
+
+    /// [`Self::enum_storage`] as a type.
+    pub(super) fn enum_storage_type(&self, symbol: SymbolId) -> Type {
+        match self.enum_storage(symbol) {
+            "SystemInt64" => self.corlib_type("Int64"),
+            _ => self.corlib_type("Int32"),
+        }
+    }
+
+    /// A constant of a source enum's storage type holding `value`.
+    pub(super) fn enum_constant(&mut self, symbol: SymbolId, value: i64) -> DataId {
+        match self.enum_storage(symbol) {
+            "SystemInt64" => {
+                self.constant("SystemInt64", &value.to_string(), HeapInit::Int64(value))
+            }
+            _ => self.int_constant(value as i32),
+        }
+    }
+
+    /// The values a source enum's underlying type holds, inclusive; a ulong
+    /// counts up to `u64::MAX`, which is kept as its bit pattern.
+    fn enum_value_range(&self, symbol: SymbolId) -> (i128, i128) {
+        match self.enum_underlying(symbol).as_str() {
+            "SystemByte" => (0, i128::from(u8::MAX)),
+            "SystemSByte" => (i128::from(i8::MIN), i128::from(i8::MAX)),
+            "SystemInt16" => (i128::from(i16::MIN), i128::from(i16::MAX)),
+            "SystemUInt16" => (0, i128::from(u16::MAX)),
+            "SystemUInt32" => (0, i128::from(u32::MAX)),
+            "SystemInt64" => (i128::from(i64::MIN), i128::from(i64::MAX)),
+            "SystemUInt64" => (0, i128::from(u64::MAX)),
+            _ => (i128::from(i32::MIN), i128::from(i32::MAX)),
+        }
+    }
+
+    /// A source enum member's underlying value: an explicit integer literal
+    /// (decimal, hex or binary, negated or not), or counting up from the
+    /// previous member, as C# does. Reported and `None` when the literal
+    /// is something else or does not fit the underlying type.
     fn enum_member_value(&mut self, member: SymbolId) -> Option<i64> {
         let parent = self.declarations.table.symbol(member).parent?;
         let members: Vec<SymbolId> = self.declarations.table.symbol(parent).members.to_vec();
-        let mut value: i64 = 0;
+        let (low, high) = self.enum_value_range(parent);
+        let mut value: i128 = 0;
         for candidate in members {
             let symbol = self.declarations.table.symbol(candidate);
             if symbol.kind != SymbolKind::EnumMember {
@@ -2968,9 +3027,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     _ => None,
                 });
             if let Some(expression) = initializer {
-                match literal_heap_init(expression, "SystemInt32") {
-                    Some(HeapInit::Int32(explicit)) => value = explicit as i64,
-                    _ => {
+                match integer_literal_of(expression) {
+                    Some(explicit) if (low..=high).contains(&explicit) => value = explicit,
+                    Some(explicit) => {
+                        let (file, span) = self.declaration_site(candidate);
+                        let underlying = self.enum_underlying(parent);
+                        self.errors.push(CodegenError {
+                            message: format!(
+                                "the value {explicit} does not fit the enum's underlying \
+                                 type `{underlying}`"
+                            )
+                            .into(),
+                            file,
+                            span,
+                        });
+                        return None;
+                    }
+                    None => {
                         let (file, span) = self.declaration_site(candidate);
                         self.errors.push(CodegenError {
                             message: "an enum member's value must be an integer literal \
@@ -2984,7 +3057,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             }
             if candidate == member {
-                return Some(value);
+                // a ulong above long.MaxValue travels as its bit pattern
+                return Some(value as u64 as i64)
+                    .map(|bits| if value < 0 { value as i64 } else { bits });
             }
             value += 1;
         }
@@ -3001,7 +3076,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     return None;
                 }
                 let value = self.enum_member_value(*symbol)?;
-                Some((self.int_constant(value as i32), member.member_type.clone()))
+                let parent = self.declarations.table.symbol(*symbol).parent?;
+                Some((
+                    self.enum_constant(parent, value),
+                    member.member_type.clone(),
+                ))
             }
             MemberOrigin::External {
                 member: external, ..
@@ -3641,7 +3720,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 target: TypeTarget::Source(symbol),
                 ..
             } => match self.declarations.table.symbol(*symbol).kind {
-                SymbolKind::Enum => "SystemInt32".into(),
+                SymbolKind::Enum => self.enum_storage(*symbol).into(),
                 _ => "SystemObjectArray".into(),
             },
             // a tuple is an `object[]`, like a struct — and so is a
@@ -4449,6 +4528,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 /// A literal (possibly negated) initializer as a heap default, when its kind
 /// matches the slot's declared Udon type. Anything else returns `None` and
 /// stays runtime-initialized.
+/// An integer literal — decimal, hex or binary, `_` separators and `u`/`l`
+/// suffixes allowed, negated or not — as the number it spells.
+fn integer_literal_of(expression: &Expression) -> Option<i128> {
+    match expression {
+        Expression::Primary(primary) if primary.chain.is_empty() => match &primary.left {
+            PrimaryLeft::Literal(LiteralExpression::Integer(text)) => {
+                let raw: String = text
+                    .value
+                    .chars()
+                    .filter(|c| *c != '_')
+                    .collect::<String>()
+                    .to_ascii_lowercase();
+                let digits = raw.trim_end_matches(['u', 'l']);
+                if let Some(hex) = digits.strip_prefix("0x") {
+                    i128::from_str_radix(hex, 16).ok()
+                } else if let Some(bin) = digits.strip_prefix("0b") {
+                    i128::from_str_radix(bin, 2).ok()
+                } else {
+                    digits.parse::<i128>().ok()
+                }
+            }
+            _ => None,
+        },
+        Expression::Unary(unary) if unary.operator.value == UnaryOperator::Minus => {
+            let operand = unary.operand.as_ref().ok()?;
+            integer_literal_of(operand).map(|value| -value)
+        }
+        _ => None,
+    }
+}
+
 fn literal_heap_init(expression: &Expression, udon_type: &str) -> Option<HeapInit> {
     fn literal_of<'e>(expression: &'e Expression) -> Option<(&'e LiteralExpression<'e, 'e>, bool)> {
         match expression {

@@ -262,6 +262,13 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // enums keep to their underlying type
+        smoke.RunProgram("EnumUnderlying");
+        Assert.AreEqual(true, smoke.GetProgramVariable("enumByteWraps"));
+        Assert.AreEqual(44, smoke.GetProgramVariable("enumByteCast"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("enumULongBig"));
+        Assert.AreEqual("Big", smoke.GetProgramVariable("enumULongName"));
+
         // struct methods on values work on a copy; on variables in place
         smoke.RunProgram("DefensiveCopies");
         Assert.AreEqual(3, smoke.GetProgramVariable("copyReadonly"));

@@ -1050,17 +1050,63 @@ impl Emulator {
                 self.heap[args[2]] = Value::Int64(value);
                 Ok(())
             }
-            "SystemInt64.__op_Equality__SystemInt64_SystemInt64__SystemBoolean"
-            | "SystemInt64.__op_Inequality__SystemInt64_SystemInt64__SystemBoolean"
-            | "SystemInt64.__op_LessThan__SystemInt64_SystemInt64__SystemBoolean"
-            | "SystemInt64.__op_GreaterThan__SystemInt64_SystemInt64__SystemBoolean" => {
+            "SystemInt64.__op_Division__SystemInt64_SystemInt64__SystemInt64"
+            | "SystemInt64.__op_Remainder__SystemInt64_SystemInt64__SystemInt64"
+            | "SystemInt64.__op_LogicalAnd__SystemInt64_SystemInt64__SystemInt64"
+            | "SystemInt64.__op_LogicalOr__SystemInt64_SystemInt64__SystemInt64"
+            | "SystemInt64.__op_LogicalXor__SystemInt64_SystemInt64__SystemInt64" => {
                 let args = self.pop_arguments(3)?;
                 let a = self.heap[args[0]].as_i64()?;
                 let b = self.heap[args[1]].as_i64()?;
-                let value = if signature.contains("Equality") {
-                    a == b
-                } else if signature.contains("Inequality") {
+                if b == 0 && (signature.contains("Division") || signature.contains("Remainder")) {
+                    return Err(EmulatorError::Exception(
+                        "DivideByZeroException: Attempted to divide by zero.".to_string(),
+                    ));
+                }
+                let value = if signature.contains("Division") {
+                    a.wrapping_div(b)
+                } else if signature.contains("Remainder") {
+                    a.wrapping_rem(b)
+                } else if signature.contains("LogicalAnd") {
+                    a & b
+                } else if signature.contains("LogicalOr") {
+                    a | b
+                } else {
+                    a ^ b
+                };
+                self.heap[args[2]] = Value::Int64(value);
+                Ok(())
+            }
+            "SystemInt64.__op_LeftShift__SystemInt64_SystemInt32__SystemInt64"
+            | "SystemInt64.__op_RightShift__SystemInt64_SystemInt32__SystemInt64" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_i64()?;
+                let b = self.heap[args[1]].as_i32()? & 63;
+                let value = if signature.contains("LeftShift") {
+                    a.wrapping_shl(b as u32)
+                } else {
+                    a.wrapping_shr(b as u32)
+                };
+                self.heap[args[2]] = Value::Int64(value);
+                Ok(())
+            }
+            "SystemInt64.__op_Equality__SystemInt64_SystemInt64__SystemBoolean"
+            | "SystemInt64.__op_Inequality__SystemInt64_SystemInt64__SystemBoolean"
+            | "SystemInt64.__op_LessThan__SystemInt64_SystemInt64__SystemBoolean"
+            | "SystemInt64.__op_GreaterThan__SystemInt64_SystemInt64__SystemBoolean"
+            | "SystemInt64.__op_LessThanOrEqual__SystemInt64_SystemInt64__SystemBoolean"
+            | "SystemInt64.__op_GreaterThanOrEqual__SystemInt64_SystemInt64__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_i64()?;
+                let b = self.heap[args[1]].as_i64()?;
+                let value = if signature.contains("Inequality") {
                     a != b
+                } else if signature.contains("Equality") {
+                    a == b
+                } else if signature.contains("LessThanOrEqual") {
+                    a <= b
+                } else if signature.contains("GreaterThanOrEqual") {
+                    a >= b
                 } else if signature.contains("LessThan") {
                     a < b
                 } else {

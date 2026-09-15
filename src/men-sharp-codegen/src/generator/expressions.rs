@@ -1050,6 +1050,42 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             return self.unbox_as_external_enum(ctx, source, to, id, span);
         }
+        // a source enum is its storage type to every conversion: `(byte)mode`
+        // narrows the Int32, `(long)flags` widens it — and into an enum, the
+        // number is brought to the storage type, then to the underlying
+        // type's range (`(ByteEnum)300` is 44)
+        if let Some(symbol) = self.source_enum(from)
+            && self.source_enum(to) != Some(symbol)
+        {
+            let storage = self.enum_storage_type(symbol);
+            let as_storage = self.convert(ctx, source, &storage, to, span.clone());
+            if let Some(target) = self.source_enum(to) {
+                return self.wrap_enum_value(ctx, as_storage, target, span);
+            }
+            return as_storage;
+        }
+        if let Some(symbol) = self.source_enum(to)
+            && self.source_enum(from).is_none()
+        {
+            let storage = self.enum_storage_type(symbol);
+            if self.numeric_rank(from).is_some() {
+                let widened = self.convert(ctx, source, from, &storage, span.clone());
+                return self.wrap_enum_value(ctx, widened, symbol, span);
+            }
+            // `(T)(object)n`: a boxed number of any integral type unboxes
+            // into the storage
+            if self.is_reference_type(from) && self.enum_storage(symbol) == "SystemInt64" {
+                let out = self.temp("SystemInt64");
+                self.call_extern(
+                    ctx,
+                    "SystemConvert.__ToInt64__SystemObject__SystemInt64",
+                    &[source, out],
+                    span,
+                );
+                return out;
+            }
+            return source;
+        }
         let from_name = self.extern_type_name(from);
         let to_name = self.extern_type_name(to);
         match (from_name, to_name) {
@@ -1205,38 +1241,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             "SystemUInt16" => (0xFFFF, 0, "ToUInt16"),
             _ => (0xFFFF, 0, "ToChar"),
         };
-        let mut value = source;
-        if bias != 0 {
-            let biased = self.temp("SystemInt32");
-            let bias_slot = self.int_constant(bias);
-            self.call_extern(
-                ctx,
-                "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32",
-                &[value, bias_slot, biased],
-                span.clone(),
-            );
-            value = biased;
-        }
-        let masked = self.temp("SystemInt32");
-        let mask_slot = self.int_constant(mask);
-        self.call_extern(
-            ctx,
-            "SystemInt32.__op_LogicalAnd__SystemInt32_SystemInt32__SystemInt32",
-            &[value, mask_slot, masked],
-            span.clone(),
-        );
-        value = masked;
-        if bias != 0 {
-            let unbiased = self.temp("SystemInt32");
-            let bias_slot = self.int_constant(bias);
-            self.call_extern(
-                ctx,
-                "SystemInt32.__op_Subtraction__SystemInt32_SystemInt32__SystemInt32",
-                &[value, bias_slot, unbiased],
-                span.clone(),
-            );
-            value = unbiased;
-        }
+        let value = self.wrap_int32_bits(ctx, source, mask, bias, span.clone());
         let out = self.temp(to_name);
         self.call_extern(
             ctx,
@@ -1894,13 +1899,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
         }
 
+        // a source enum computes as its storage type: an int against an
+        // Int64-stored enum (`flags | 1`) widens first
+        let (left_widened, right_widened) =
+            self.widen_enum_operands(ctx, left, right, span.clone());
+        let left = (left_widened.0, &left_widened.1);
+        let right = (right_widened.0, &right_widened.1);
+
         let out = self.temp_for(result_type);
         let mut result_name = self
             .extern_type_name(result_type)
             .unwrap_or_else(|| "SystemBoolean".into());
-        // a source enum result (`Flags.A | Flags.B`) lives in an Int32 slot
-        if self.source_enum(result_type).is_some() {
-            result_name = "SystemInt32".into();
+        // a source enum result (`Flags.A | Flags.B`) lives in its storage slot
+        if let Some(symbol) = self.source_enum(result_type) {
+            result_name = self.enum_storage(symbol).into();
         }
 
         // Udon names a primitive's operators its own way (`op_Multiplication`,
@@ -1957,9 +1969,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         // a source enum compares (and, for flags, combines) as its
         // underlying Int32 — its slots hold plain ints
-        if self.source_enum(&operand_type).is_some() {
+        if let Some(symbol) = self.source_enum(&operand_type) {
+            let storage = self.enum_storage(symbol);
             candidates.push(format!(
-                "SystemInt32.__{name}__SystemInt32_SystemInt32__{result_name}"
+                "{storage}.__{name}__{storage}_{storage}__{result_name}"
             ));
         }
         let signature = candidates
@@ -1967,7 +1980,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .find(|signature| self.nodes.has_signature(signature));
         match signature {
             Some(signature) => {
-                self.call_extern(ctx, &signature, &[left.0, right.0, out], span);
+                self.call_extern(ctx, &signature, &[left.0, right.0, out], span.clone());
+                // `value++` past a byte enum's 255 is its 0, as in C#
+                if let Some(symbol) = self.source_enum(result_type) {
+                    return Some(self.wrap_enum_value(ctx, out, symbol, span));
+                }
                 Some(out)
             }
             None => {
@@ -2291,8 +2308,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     );
                     return self.box_external_enum(ctx, flipped, operand_type, id, span);
                 }
-                let name = if self.source_enum(result_type).is_some() {
-                    "SystemInt32".to_string()
+                let name = if let Some(symbol) = self.source_enum(result_type) {
+                    self.enum_storage(symbol).to_string()
                 } else {
                     self.extern_type_name(result_type)?
                 };
@@ -2316,8 +2333,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     ctx,
                     &format!("{name}.__op_LogicalXor__{name}_{name}__{name}"),
                     &[operand, ones, out],
-                    span,
+                    span.clone(),
                 );
+                if let Some(symbol) = self.source_enum(result_type) {
+                    return Some(self.wrap_enum_value(ctx, out, symbol, span));
+                }
                 Some(out)
             }
             _ => {
@@ -2426,12 +2446,125 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     fn unit_step(&mut self, ctx: &mut Ctx<'ast>, ty: &Type, span: Range<usize>) -> DataId {
         let one = self.int_constant(1);
         let int = self.corlib_type("Int32");
+        // a source enum steps in its storage type
+        if let Some(symbol) = self.source_enum(ty) {
+            return self.enum_constant(symbol, 1);
+        }
         // a small integral type (byte, short, char) steps in int too: that
         // is what `compound_result` computes in
         if *ty == int || self.type_system().is_enum_type(ty) || self.numeric_rank(ty) == Some(0) {
             return one;
         }
         self.convert(ctx, one, &int, ty, span)
+    }
+
+    /// A source enum's operands as its storage type: the other side of
+    /// `flags | 1` or `mode < 3` on an Int64-stored enum is an Int32 that
+    /// has to widen, as the extern takes two of its own type.
+    fn widen_enum_operands(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        left: (DataId, &Type),
+        right: (DataId, &Type),
+        span: Range<usize>,
+    ) -> ((DataId, Type), (DataId, Type)) {
+        let mut sides = [(left.0, left.1.clone()), (right.0, right.1.clone())];
+        for index in 0..2 {
+            let other = 1 - index;
+            let Some(symbol) = self.source_enum(&sides[other].1) else {
+                continue;
+            };
+            let storage = self.enum_storage_type(symbol);
+            let side = sides[index].1.clone();
+            if self.source_enum(&side).is_some() || self.numeric_rank(&side).is_none() {
+                continue;
+            }
+            if self.extern_type_name(&side) == self.extern_type_name(&storage) {
+                continue;
+            }
+            let widened = self.convert(ctx, sides[index].0, &side, &storage, span.clone());
+            sides[index] = (widened, storage);
+        }
+        let [left, right] = sides;
+        (left, right)
+    }
+
+    /// A value of a source enum brought back into its underlying type's
+    /// range: a byte enum's 256 is its 0, as an unchecked C# cast has it.
+    /// The storage slot stays an Int32 (or Int64); only the bits change.
+    pub(super) fn wrap_enum_value(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        value: DataId,
+        symbol: SymbolId,
+        span: Range<usize>,
+    ) -> DataId {
+        let underlying = self.enum_underlying(symbol);
+        let (mask, bias) = match underlying.as_str() {
+            "SystemByte" => (0xFF, 0),
+            "SystemSByte" => (0xFF, 0x80),
+            "SystemInt16" => (0xFFFF, 0x8000),
+            "SystemUInt16" => (0xFFFF, 0),
+            "SystemUInt32" => {
+                // stored as an Int64: the low 32 bits
+                let out = self.temp("SystemInt64");
+                let mask = self.constant("SystemInt64", "4294967295", HeapInit::Int64(0xFFFF_FFFF));
+                self.call_extern(
+                    ctx,
+                    "SystemInt64.__op_LogicalAnd__SystemInt64_SystemInt64__SystemInt64",
+                    &[value, mask, out],
+                    span,
+                );
+                return out;
+            }
+            _ => return value,
+        };
+        self.wrap_int32_bits(ctx, value, mask, bias, span)
+    }
+
+    /// `((value + bias) & mask) - bias` on Int32s: the bits of a narrower
+    /// type, sign restored for the signed ones.
+    fn wrap_int32_bits(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        source: DataId,
+        mask: i32,
+        bias: i32,
+        span: Range<usize>,
+    ) -> DataId {
+        let mut value = source;
+        if bias != 0 {
+            let biased = self.temp("SystemInt32");
+            let bias_slot = self.int_constant(bias);
+            self.call_extern(
+                ctx,
+                "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32",
+                &[value, bias_slot, biased],
+                span.clone(),
+            );
+            value = biased;
+        }
+        let masked = self.temp("SystemInt32");
+        let mask_slot = self.int_constant(mask);
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_LogicalAnd__SystemInt32_SystemInt32__SystemInt32",
+            &[value, mask_slot, masked],
+            span.clone(),
+        );
+        value = masked;
+        if bias != 0 {
+            let unbiased = self.temp("SystemInt32");
+            let bias_slot = self.int_constant(bias);
+            self.call_extern(
+                ctx,
+                "SystemInt32.__op_Subtraction__SystemInt32_SystemInt32__SystemInt32",
+                &[value, bias_slot, unbiased],
+                span,
+            );
+            value = unbiased;
+        }
+        value
     }
 
     /// `x op= y`, `x++`, `x--`: the new value of `x`. On a small integral
@@ -3887,9 +4020,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 
     pub(super) fn default_value(&mut self, ty: &Type) -> DataId {
-        // a source enum is its underlying Int32
-        if self.source_enum(ty).is_some() {
-            return self.int_constant(0);
+        // a source enum is its storage type's zero
+        if let Some(symbol) = self.source_enum(ty) {
+            return self.enum_constant(symbol, 0);
         }
         // an external enum's default is the real boxed zero
         if let Some(id) = self.external_enum(ty) {
