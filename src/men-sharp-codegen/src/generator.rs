@@ -588,6 +588,10 @@ struct Ctx<'ast> {
     boxed: Vec<String>,
     this_slot: Option<DataId>,
     this_type: Option<Type>,
+    /// Locals that are values, not variables (C# §12.8.7): `in` parameters
+    /// and `foreach` iteration variables. A struct method called on one
+    /// works on a copy (`defensive_copy_receiver`).
+    value_locals: Vec<String>,
     /// What `break`/`continue` bind to, innermost last — and the `try`
     /// regions in between, which exceptions unwind to.
     loop_stack: Vec<BreakFrame<'ast>>,
@@ -1099,6 +1103,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         boxed: Vec::new(),
                         this_slot: None,
                         this_type: None,
+                        value_locals: Vec::new(),
                         loop_stack: Vec::new(),
                         result: None,
                         return_slot: init_return, // unused
@@ -1568,6 +1573,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 boxed: Vec::new(),
                 this_slot: None,
                 this_type: None,
+                value_locals: Vec::new(),
                 loop_stack: Vec::new(),
                 result: None,
                 return_slot: init_return, // unused
@@ -1659,6 +1665,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             boxed: Vec::new(),
             this_slot: None,
             this_type: None,
+            value_locals: Vec::new(),
             loop_stack: Vec::new(),
             result: None,
             return_slot: DataId(0), // unused
@@ -2204,6 +2211,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             boxed: Vec::new(),
             this_slot: None,
             this_type: None,
+            value_locals: Vec::new(),
             loop_stack: Vec::new(),
             result: None,
             return_slot: DataId(0), // unused

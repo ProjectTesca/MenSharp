@@ -364,6 +364,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .unwrap_or_default(),
             this_slot: has_this.then(|| parameters[0]),
             this_type: has_this.then(|| self.this_type_of(key)),
+            value_locals: Vec::new(),
             loop_stack: Vec::new(),
             result,
             return_slot,
@@ -588,6 +589,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     self.bind_local_by_ref(ctx, name.value, slot, ty.clone());
                 } else {
                     self.bind_local(ctx, name.value, slot, ty.clone());
+                    // an `in` parameter is a value: a struct method called
+                    // on it works on a copy, as C# does
+                    if parameter.modifiers.iter().any(|modifier| {
+                        matches!(modifier.value, men_sharp_parser::ast::ParameterModifier::In)
+                    }) {
+                        ctx.value_locals.push(name.value.to_string());
+                    }
                 }
             }
         }
@@ -1748,6 +1756,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             boxed: Vec::new(),
             this_slot: None,
             this_type: None,
+            value_locals: Vec::new(),
             loop_stack: Vec::new(),
             result: function.result,
             return_slot: function.return_slot,
@@ -1802,6 +1811,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 boxed: Vec::new(),
                 this_slot: Some(this_slot),
                 this_type: None,
+                value_locals: Vec::new(),
                 loop_stack: Vec::new(),
                 result,
                 return_slot,

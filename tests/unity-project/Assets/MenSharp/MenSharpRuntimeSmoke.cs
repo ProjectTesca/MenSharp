@@ -332,6 +332,31 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // a struct method on a value — a readonly field, an `in` parameter —
+    // runs on a copy, as in C# (issue: the readonly field went 3 → 4);
+    // on a variable — a plain field, an array element — in place
+    public int copyReadonly;
+    public int copyPlain;
+    public int copyElement;
+    public int copyIn;
+
+    void BumpIn(in SmokeCounter c) { c.Increment(); }
+
+    public void DefensiveCopies()
+    {
+        var holder = new SmokeHolder();
+        holder.Counter.Increment();
+        copyReadonly = holder.Counter.Value;    // 3
+        holder.Plain.Increment();
+        copyPlain = holder.Plain.Value;         // 4
+        var items = new SmokeCounter[] { new SmokeCounter { Value = 3 } };
+        items[0].Increment();
+        copyElement = items[0].Value;           // 4
+        var local = new SmokeCounter { Value = 3 };
+        BumpIn(in local);
+        copyIn = local.Value;                   // 3
+    }
+
     // compound assignment and ++/-- on the small integral types compute in
     // int and cast back, wrapping as unchecked C# does (issue: "operator
     // `op_Addition` is not available on Udon" for `b += 2`, `sh++`, `c++`)
@@ -492,6 +517,19 @@ public static class GenericCache<T>
     // a constant-literal initializer: one per closed type (int and string
     // each start at 7), baked with no code
     public static int Seeded = 7;
+}
+
+// what `DefensiveCopies` mutates: the issue's struct and holder
+public struct SmokeCounter
+{
+    public int Value;
+    public void Increment() { Value++; }
+}
+
+public class SmokeHolder
+{
+    public readonly SmokeCounter Counter = new SmokeCounter { Value = 3 };
+    public SmokeCounter Plain = new SmokeCounter { Value = 3 };
 }
 
 // what `JsonIgnored` reads: the issue's class, and one that forgot the attribute

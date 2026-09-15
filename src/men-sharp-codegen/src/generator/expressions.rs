@@ -437,6 +437,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             &None,
             statement.span.clone(),
         );
+        // the iteration variable is a value: a struct method called on it
+        // works on a copy, as C# does (§12.8.7)
+        Self::note_value_local(ctx, name);
 
         ctx.loop_stack.push(BreakFrame::Loop {
             continue_target: continue_label,
@@ -510,6 +513,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             span.clone(),
         );
         self.bind_designation(ctx, name, child, &transform_type, &None, span.clone());
+        // the iteration variable is a value: a struct method called on it
+        // works on a copy, as C# does (§12.8.7)
+        Self::note_value_local(ctx, name);
 
         ctx.loop_stack.push(BreakFrame::Loop {
             continue_target: continue_label,
@@ -616,6 +622,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let variable = self.temp_for(&element_type);
         self.copy(current, variable);
         self.bind_designation(ctx, name, variable, &element_type, &None, span.clone());
+        // the iteration variable is a value: a struct method called on it
+        // works on a copy, as C# does (§12.8.7)
+        Self::note_value_local(ctx, name);
 
         // `continue` goes straight back to `MoveNext()`
         ctx.loop_stack.push(BreakFrame::Loop {
@@ -3629,10 +3638,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
 
         let mut piece = self.lower_left(ctx, &primary.left);
+        // whether the piece so far is a value rather than a variable (C#
+        // §12.8.7) — a struct method called on a value mutates a copy
+        let mut is_value = self.left_is_value(ctx, &primary.left);
         // `a?.b`, `a?[i]`: a null `a` makes the whole chain null (or does
         // nothing, for a call), instead of dereferencing it
         let mut null_label: Option<LabelId> = None;
-        for right in primary.chain {
+        for (index, right) in primary.chain.iter().enumerate() {
             let conditional = match right {
                 PrimaryRight::Member { separator, .. } => {
                     separator.value == men_sharp_parser::ast::MemberSeparator::NullConditionalDot
@@ -3655,7 +3667,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 );
                 self.jump_if(is_null, label);
             }
+            let receiver_was_array = matches!(&piece, Piece::Value(_, Type::Array { .. }));
+            if is_value {
+                piece =
+                    self.defensive_copy_receiver(ctx, piece, right, primary.chain.get(index + 1));
+            }
             piece = self.apply_right(ctx, piece, right);
+            is_value = self.step_yields_value(ctx, right, is_value, receiver_was_array);
         }
         let Some(null_label) = null_label else {
             return piece;
@@ -3909,6 +3927,142 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             _ => self.constant("SystemObject", "null", HeapInit::Null),
         }
+    }
+
+    /// Records a `foreach` variable (or any single-name designation) as a
+    /// value local — see `Ctx::value_locals`.
+    pub(super) fn note_value_local(
+        ctx: &mut Ctx<'ast>,
+        designation: &'ast men_sharp_parser::ast::VariableDesignation<'ast, 'ast>,
+    ) {
+        if let men_sharp_parser::ast::VariableDesignation::Single(name) = designation {
+            ctx.value_locals.push(name.value.to_string());
+        }
+    }
+
+    /// Is the start of a chain a value rather than a variable? An `in`
+    /// parameter or `foreach` variable, or a `readonly` field read outside
+    /// its constructor.
+    fn left_is_value(&self, ctx: &Ctx<'ast>, left: &'ast PrimaryLeft<'ast, 'ast>) -> bool {
+        let PrimaryLeft::Identifier { name, .. } = left else {
+            return false;
+        };
+        match self.bodies.targets.get(&EntityID::from(left)) {
+            Some(ResolvedTarget::Local) => ctx.value_locals.iter().any(|local| local == name.value),
+            Some(ResolvedTarget::Member(member)) => self.member_is_value(ctx, member),
+            _ => false,
+        }
+    }
+
+    /// After `right` is applied to a piece that was (or was not) a value:
+    /// is the result one? A field of a value is a value, a `readonly`
+    /// field is one outside its constructor, a property, indexer or call
+    /// result always is, an array element never.
+    fn step_yields_value(
+        &self,
+        ctx: &Ctx<'ast>,
+        right: &'ast PrimaryRight<'ast, 'ast>,
+        was_value: bool,
+        receiver_was_array: bool,
+    ) -> bool {
+        match right {
+            PrimaryRight::Member { .. } => match self.bodies.targets.get(&EntityID::from(right)) {
+                Some(ResolvedTarget::Member(member)) => match member.kind {
+                    SymbolKind::Field => was_value || self.member_is_value(ctx, member),
+                    SymbolKind::Method => was_value,
+                    _ => true,
+                },
+                _ => was_value,
+            },
+            PrimaryRight::Invocation { .. } => true,
+            PrimaryRight::ElementAccess { .. } => !receiver_was_array,
+            PrimaryRight::Postfix { .. } => false,
+        }
+    }
+
+    /// A `readonly` field, read anywhere but the constructor of its type.
+    fn member_is_value(&self, ctx: &Ctx<'ast>, member: &ResolvedMember) -> bool {
+        let MemberOrigin::Source(symbol) = member.origin else {
+            return false;
+        };
+        if member.kind != SymbolKind::Field || !self.has_modifier(symbol, Modifier::Readonly) {
+            return false;
+        }
+        let owner = self.declarations.table.symbol(symbol).parent;
+        let constructing = match ctx.key.role {
+            Role::Constructor => self.declarations.table.symbol(ctx.key.symbol).parent == owner,
+            Role::DefaultConstructor => Some(ctx.key.symbol) == owner,
+            _ => false,
+        };
+        !constructing
+    }
+
+    /// Is `modifier` written on the declaration of `symbol`?
+    fn has_modifier(&self, symbol: SymbolId, modifier: Modifier) -> bool {
+        let modifiers: &[men_sharp_parser::ast::Spanned<Modifier>] = match self
+            .declarations
+            .table
+            .symbol(symbol)
+            .declarations
+            .first()
+            .map(|site| &site.syntax)
+        {
+            Some(SyntaxRef::Field { field, .. }) => field.modifiers,
+            Some(SyntaxRef::Method(method)) => method.modifiers,
+            Some(SyntaxRef::Class(class)) => class.modifiers,
+            _ => &[],
+        };
+        modifiers.iter().any(|written| written.value == modifier)
+    }
+
+    /// `value.Mutate()` where `value` is a struct that is a value, not a
+    /// variable (a `readonly` field, an `in` parameter, a property's
+    /// result…): C# calls the method on a temporary copy (§12.8.10), so the
+    /// original stays as it was — the "defensive copy". The piece comes
+    /// back as that copy when `right` names such a method; as it was
+    /// otherwise. A `readonly struct`, or a `readonly` method, cannot
+    /// change anything and is called in place. The method is known from
+    /// the invocation that follows the member (`next`): the checker records
+    /// the call there, not on the method group.
+    fn defensive_copy_receiver(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        piece: Piece,
+        right: &'ast PrimaryRight<'ast, 'ast>,
+        next: Option<&'ast PrimaryRight<'ast, 'ast>>,
+    ) -> Piece {
+        let Piece::Value(slot, ty) = &piece else {
+            return piece;
+        };
+        if !self.is_source_struct(ty) || !matches!(right, PrimaryRight::Member { .. }) {
+            return piece;
+        }
+        let Some(invocation @ PrimaryRight::Invocation { .. }) = next else {
+            return piece;
+        };
+        let Some(ResolvedTarget::Call(call)) = self.bodies.targets.get(&EntityID::from(invocation))
+        else {
+            return piece;
+        };
+        let MemberOrigin::Source(method) = call.origin else {
+            return piece;
+        };
+        if call.is_static || call.is_extension {
+            return piece;
+        }
+        let harmless = self.has_modifier(method, Modifier::Readonly)
+            || self
+                .declarations
+                .table
+                .symbol(method)
+                .parent
+                .is_some_and(|owner| self.has_modifier(owner, Modifier::Readonly));
+        if harmless {
+            return piece;
+        }
+        let (slot, ty) = (*slot, ty.clone());
+        let copy = self.clone_struct(ctx, slot, &ty, right.span());
+        Piece::Value(copy, ty)
     }
 
     fn apply_right(

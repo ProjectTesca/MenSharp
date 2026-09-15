@@ -262,6 +262,13 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // struct methods on values work on a copy; on variables in place
+        smoke.RunProgram("DefensiveCopies");
+        Assert.AreEqual(3, smoke.GetProgramVariable("copyReadonly"));
+        Assert.AreEqual(4, smoke.GetProgramVariable("copyPlain"));
+        Assert.AreEqual(4, smoke.GetProgramVariable("copyElement"));
+        Assert.AreEqual(3, smoke.GetProgramVariable("copyIn"));
+
         // small integral types: compound ops compute in int, cast back, wrap
         smoke.RunProgram("SmallIntegers");
         Assert.AreEqual(3, smoke.GetProgramVariable("smallByte"));

@@ -1800,6 +1800,84 @@ fn small_integer_compound_assignment_computes_in_int_and_casts_back() {
 }
 
 #[test]
+fn a_struct_method_on_a_value_works_on_a_copy() {
+    // C# §12.8.7/§12.8.10: a `readonly` field, an `in` parameter, a
+    // `foreach` variable or a property's result is a value, not a
+    // variable, and a struct method called on it runs on a temporary copy
+    // — the original keeps its state (issue: `holder.Counter.Increment()`
+    // on a readonly field gave 4 where C# gives 3). Variables (a local, a
+    // plain field, an array element, the readonly field inside its own
+    // constructor) are changed in place
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public struct Counter
+        {
+            public int Value;
+            public void Increment() { Value++; }
+        }
+
+        public class Holder
+        {
+            public readonly Counter Counter = new Counter { Value = 3 };
+            public Counter Plain = new Counter { Value = 3 };
+            public Counter Prop { get { return Plain; } }
+            public Holder() { Counter.Increment(); }   // a variable here: 4
+        }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int viaCtor;
+            public int viaReadonly;
+            public int viaPlain;
+            public int viaProperty;
+            public int viaIn;
+            public int viaForeach;
+            public int viaElement;
+            public int viaLocal;
+
+            void Bump(in Counter c) { c.Increment(); }
+
+            public void Interact()
+            {
+                var holder = new Holder();
+                viaCtor = holder.Counter.Value;          // 4
+                holder.Counter.Increment();
+                viaReadonly = holder.Counter.Value;      // 4: a copy was incremented
+                holder.Plain.Increment();
+                viaPlain = holder.Plain.Value;           // 4: in place
+                holder.Prop.Increment();
+                viaProperty = holder.Plain.Value;        // 4: the getter's copy
+                var local = new Counter { Value = 3 };
+                Bump(in local);
+                viaIn = local.Value;                     // 3
+                var items = new Counter[] { new Counter { Value = 3 } };
+                foreach (var item in items) { item.Increment(); }
+                viaForeach = items[0].Value;             // 3
+                items[0].Increment();
+                viaElement = items[0].Value;             // 4: an element is a variable
+                local.Increment();
+                viaLocal = local.Value;                  // 4
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "viaCtor"), 4);
+    assert_eq!(int_of(&emulator, "viaReadonly"), 4);
+    assert_eq!(int_of(&emulator, "viaPlain"), 4);
+    assert_eq!(int_of(&emulator, "viaProperty"), 4);
+    assert_eq!(int_of(&emulator, "viaIn"), 3);
+    assert_eq!(int_of(&emulator, "viaForeach"), 3);
+    assert_eq!(int_of(&emulator, "viaElement"), 4);
+    assert_eq!(int_of(&emulator, "viaLocal"), 4);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at
