@@ -1727,6 +1727,79 @@ fn decimal_literals_are_decimals() {
 }
 
 #[test]
+fn small_integer_compound_assignment_computes_in_int_and_casts_back() {
+    // `b += 2`, `sh++`, `c++` on byte/short/char: C# computes in int and
+    // casts back (§12.21.4); Udon has no operators on the small types
+    // (issue: "operator `op_Addition` is not available on Udon"). The
+    // emulator holds no byte or short, so those only compile here; char runs
+    let Some(messages) = codegen_messages(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int b2;
+            public int sh2;
+            public int c2;
+
+            public void Interact()
+            {
+                byte b = 1;
+                b += 2;
+                b2 = b;
+                short sh = 1;
+                sh++;
+                sh2 = sh;
+                char c = 'A';
+                c++;
+                c2 = c;
+                sbyte sb = 127;
+                sb++;                       // wraps to -128
+                ushort us = 1;
+                us <<= 3;
+                --us;
+            }
+        }
+        "#,
+        "Probe",
+    ) else {
+        return;
+    };
+    assert!(messages.is_empty(), "{messages:?}");
+
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public string after;
+            public int code;
+            public string wrapped;
+
+            public void Interact()
+            {
+                char c = 'A';
+                c++;
+                after = c.ToString();       // "B"
+                c += 1;
+                code = c;                   // 67
+                char w = (char)65601;       // 65601 & 0xFFFF = 65: an unchecked cast wraps
+                wrapped = w.ToString();     // "A"
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(string_of(&emulator, "after"), "B");
+    assert_eq!(int_of(&emulator, "code"), 67);
+    assert_eq!(string_of(&emulator, "wrapped"), "A");
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

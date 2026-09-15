@@ -1044,6 +1044,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let from_name = self.extern_type_name(from);
         let to_name = self.extern_type_name(to);
         match (from_name, to_name) {
+            // `(byte)n`, `b += 2` past 255: C# wraps (unchecked, the
+            // default), where `Convert.ToByte` would throw — the bits are
+            // masked to the target's width first, sign restored
+            (Some(from_name), Some(to_name))
+                if from_name == "SystemInt32"
+                    && matches!(
+                        to_name.as_str(),
+                        "SystemByte"
+                            | "SystemSByte"
+                            | "SystemInt16"
+                            | "SystemUInt16"
+                            | "SystemChar"
+                    ) =>
+            {
+                self.wrap_int32_to_small(ctx, source, &to_name, span)
+            }
             (Some(from_name), Some(to_name)) if from_name != to_name => {
                 let method = match to_name.as_str() {
                     "SystemInt32" => Some("ToInt32"),
@@ -1161,6 +1177,65 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let index = self.convert(ctx, source, from, &int32, span.clone());
         self.box_external_enum(ctx, index, to, id, span)
             .unwrap_or(source)
+    }
+
+    /// An Int32 as a byte, sbyte, short, ushort or char, wrapping as an
+    /// unchecked C# cast does: masked to the width, the sign put back for
+    /// the signed ones, then converted (which cannot overflow any more).
+    fn wrap_int32_to_small(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        source: DataId,
+        to_name: &str,
+        span: Range<usize>,
+    ) -> DataId {
+        let (mask, bias, method) = match to_name {
+            "SystemByte" => (0xFF, 0, "ToByte"),
+            "SystemSByte" => (0xFF, 0x80, "ToSByte"),
+            "SystemInt16" => (0xFFFF, 0x8000, "ToInt16"),
+            "SystemUInt16" => (0xFFFF, 0, "ToUInt16"),
+            _ => (0xFFFF, 0, "ToChar"),
+        };
+        let mut value = source;
+        if bias != 0 {
+            let biased = self.temp("SystemInt32");
+            let bias_slot = self.int_constant(bias);
+            self.call_extern(
+                ctx,
+                "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32",
+                &[value, bias_slot, biased],
+                span.clone(),
+            );
+            value = biased;
+        }
+        let masked = self.temp("SystemInt32");
+        let mask_slot = self.int_constant(mask);
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_LogicalAnd__SystemInt32_SystemInt32__SystemInt32",
+            &[value, mask_slot, masked],
+            span.clone(),
+        );
+        value = masked;
+        if bias != 0 {
+            let unbiased = self.temp("SystemInt32");
+            let bias_slot = self.int_constant(bias);
+            self.call_extern(
+                ctx,
+                "SystemInt32.__op_Subtraction__SystemInt32_SystemInt32__SystemInt32",
+                &[value, bias_slot, unbiased],
+                span.clone(),
+            );
+            value = unbiased;
+        }
+        let out = self.temp(to_name);
+        self.call_extern(
+            ctx,
+            &format!("SystemConvert.__{method}__SystemInt32__{to_name}"),
+            &[value, out],
+            span,
+        );
+        out
     }
 
     /// An `object` as a value of the external enum `to`: a boxed Int32 is
@@ -2308,12 +2383,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let place = self.lower_place(ctx, operand_expression);
                 let (value, ty) = self.read_place(ctx, place.clone(), unary.span.clone())?;
                 let one = self.unit_step(ctx, &ty, unary.span.clone());
-                let updated = self.emit_binary_operator(
+                let int = self.corlib_type("Int32");
+                let step_type = if self.numeric_rank(&ty) == Some(0) {
+                    &int
+                } else {
+                    &ty
+                };
+                let updated = self.compound_result(
                     ctx,
                     operator,
                     (value, &ty),
-                    (one, &ty),
-                    &ty,
+                    (one, step_type),
                     unary.span.clone(),
                     Some(EntityID::from(unary)),
                 )?;
@@ -2337,10 +2417,51 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     fn unit_step(&mut self, ctx: &mut Ctx<'ast>, ty: &Type, span: Range<usize>) -> DataId {
         let one = self.int_constant(1);
         let int = self.corlib_type("Int32");
-        if *ty == int || self.type_system().is_enum_type(ty) {
+        // a small integral type (byte, short, char) steps in int too: that
+        // is what `compound_result` computes in
+        if *ty == int || self.type_system().is_enum_type(ty) || self.numeric_rank(ty) == Some(0) {
             return one;
         }
         self.convert(ctx, one, &int, ty, span)
+    }
+
+    /// `x op= y`, `x++`, `x--`: the new value of `x`. On a small integral
+    /// `x` (byte, sbyte, short, ushort, char) C# computes in `int` — or in
+    /// `y`'s wider type — and casts back, `x = (byte)(x + y)`; Udon has no
+    /// operators on the small types, so this is also the only way to
+    /// compute it. Anything else computes in `x`'s own type.
+    #[allow(clippy::too_many_arguments)]
+    fn compound_result(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        operator: BinaryOperator,
+        current: (DataId, &Type),
+        value: (DataId, &Type),
+        span: Range<usize>,
+        node: Option<EntityID>,
+    ) -> Option<DataId> {
+        let target = current.1.clone();
+        let computed = if self.numeric_rank(&target) == Some(0) {
+            match self.numeric_rank(value.1) {
+                Some(rank) if rank > 1 => value.1.clone(),
+                _ => self.corlib_type("Int32"),
+            }
+        } else {
+            target.clone()
+        };
+        let result = self.emit_binary_operator(
+            ctx,
+            operator,
+            current,
+            value,
+            &computed,
+            span.clone(),
+            node,
+        )?;
+        if computed == target {
+            return Some(result);
+        }
+        Some(self.convert(ctx, result, &computed, &target, span))
     }
 
     fn lower_assignment(
@@ -2413,12 +2534,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         let value = self.owned_value(ctx, value_expression)?;
         let value_type = self.type_of(ctx, value_expression);
-        let final_value = self.emit_binary_operator(
+        let final_value = self.compound_result(
             ctx,
             operator,
             (previous, &target_type),
             (value, &value_type),
-            &target_type,
             assignment.span.clone(),
             Some(EntityID::from(assignment)),
         )?;
@@ -3484,17 +3604,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let old = self.temp_for(&ty);
             self.copy(value, old);
             let one = self.unit_step(ctx, &ty, span.clone());
+            let int = self.corlib_type("Int32");
+            let step_type = if self.numeric_rank(&ty) == Some(0) {
+                &int
+            } else {
+                &ty
+            };
             let op = if operator.value == PostfixOperator::Increment {
                 BinaryOperator::Add
             } else {
                 BinaryOperator::Subtract
             };
-            if let Some(updated) = self.emit_binary_operator(
+            if let Some(updated) = self.compound_result(
                 ctx,
                 op,
                 (value, &ty),
-                (one, &ty),
-                &ty,
+                (one, step_type),
                 span.clone(),
                 Some(EntityID::from(last)),
             ) {
@@ -3931,17 +4056,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     let old = self.temp_for(&ty);
                     self.copy(slot, old);
                     let one = self.unit_step(ctx, &ty, span.clone());
+                    let int = self.corlib_type("Int32");
+                    let step_type = if self.numeric_rank(&ty) == Some(0) {
+                        &int
+                    } else {
+                        &ty
+                    };
                     let op = if operator.value == PostfixOperator::Increment {
                         BinaryOperator::Add
                     } else {
                         BinaryOperator::Subtract
                     };
-                    if let Some(updated) = self.emit_binary_operator(
+                    if let Some(updated) = self.compound_result(
                         ctx,
                         op,
                         (slot, &ty),
-                        (one, &ty),
-                        &ty,
+                        (one, step_type),
                         span.clone(),
                         Some(EntityID::from(right)),
                     ) {

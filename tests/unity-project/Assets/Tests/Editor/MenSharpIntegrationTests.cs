@@ -262,6 +262,16 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // small integral types: compound ops compute in int, cast back, wrap
+        smoke.RunProgram("SmallIntegers");
+        Assert.AreEqual(3, smoke.GetProgramVariable("smallByte"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("smallByteWrapped"));
+        Assert.AreEqual(2, smoke.GetProgramVariable("smallShort"));
+        Assert.AreEqual(-32768, smoke.GetProgramVariable("smallShortWrapped"));
+        Assert.AreEqual(-128, smoke.GetProgramVariable("smallSByte"));
+        Assert.AreEqual(0, smoke.GetProgramVariable("smallUShort"));
+        Assert.AreEqual("B", smoke.GetProgramVariable("smallChar"));
+
         // decimal literals are decimals, exactly
         smoke.RunProgram("Decimals");
         Assert.AreEqual(true, smoke.GetProgramVariable("decimalIsDecimal"));

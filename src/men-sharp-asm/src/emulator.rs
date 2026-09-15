@@ -833,6 +833,28 @@ impl Emulator {
                 self.heap[args[1]] = Value::Int64(a.truncate() as i64);
                 Ok(())
             }
+            "SystemConvert.__ToChar__SystemInt32__SystemChar" => {
+                let args = self.pop_arguments(2)?;
+                let value = self.heap[args[0]].as_i32()?;
+                let Some(character) = u32::try_from(value)
+                    .ok()
+                    .filter(|value| *value <= 0xFFFF)
+                    .and_then(char::from_u32)
+                else {
+                    return Err(EmulatorError::Exception(
+                        "OverflowException: Value was either too large or too small for a character."
+                            .to_string(),
+                    ));
+                };
+                self.heap[args[1]] = Value::Char(character);
+                Ok(())
+            }
+            "SystemConvert.__ToInt32__SystemChar__SystemInt32" => {
+                let args = self.pop_arguments(2)?;
+                let value = self.heap[args[0]].as_char()?;
+                self.heap[args[1]] = Value::Int32(value as i32);
+                Ok(())
+            }
             "SystemDecimal.__Parse__SystemString__SystemDecimal" => {
                 let args = self.pop_arguments(2)?;
                 let text = self.string_or_empty(args[0]);

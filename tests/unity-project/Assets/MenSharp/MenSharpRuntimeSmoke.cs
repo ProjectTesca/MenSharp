@@ -332,6 +332,42 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // compound assignment and ++/-- on the small integral types compute in
+    // int and cast back, wrapping as unchecked C# does (issue: "operator
+    // `op_Addition` is not available on Udon" for `b += 2`, `sh++`, `c++`)
+    public int smallByte;
+    public int smallByteWrapped;
+    public int smallShort;
+    public int smallShortWrapped;
+    public int smallSByte;
+    public int smallUShort;
+    public string smallChar;
+
+    public void SmallIntegers()
+    {
+        byte b = 1;
+        b += 2;
+        smallByte = b;                    // 3
+        byte w = 255;
+        w += 2;
+        smallByteWrapped = w;             // 1
+        short sh = 1;
+        sh++;
+        smallShort = sh;                  // 2
+        short top = 32767;
+        top++;
+        smallShortWrapped = top;          // -32768
+        sbyte sb = 127;
+        sb++;
+        smallSByte = sb;                  // -128
+        ushort us = 65535;
+        us++;
+        smallUShort = us;                 // 0
+        char c = 'A';
+        c++;
+        smallChar = c.ToString();         // "B"
+    }
+
     // a decimal literal is a Decimal on the heap (issue: `0.1m` was a Double,
     // `value is decimal` false and decimal addition halted the VM)
     public bool decimalIsDecimal;
