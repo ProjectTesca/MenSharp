@@ -262,6 +262,10 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // a LINQ field initializer needs the interface dispatchers it calls
+        smoke.RunProgram("LinqInitializer");
+        Assert.AreEqual(40, smoke.GetProgramVariable("linqThird"));
+
         // a ulong literal past long.MaxValue
         smoke.RunProgram("ULongLiteral");
         Assert.AreEqual("ulong value: 9223372036854775808", smoke.GetProgramVariable("ulongText"));

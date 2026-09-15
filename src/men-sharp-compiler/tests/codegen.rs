@@ -2162,6 +2162,40 @@ fn ulong_literals_and_values_work() {
 }
 
 #[test]
+fn a_field_initializer_may_dispatch_through_an_interface() {
+    // `Enumerable.Range(1, 4).Select(x => x * 10).ToArray()` in a field
+    // initializer calls `IEnumerable<int>.GetEnumerator` through a
+    // dispatcher; the initializer phase compiled the functions it queued
+    // but gave no dispatcher a body (issue: assembly error UnplacedLabel)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using System.Linq;
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            private readonly int[] values = Enumerable.Range(1, 4).Select(x => x * 10).ToArray();
+            private static readonly int[] doubled = Enumerable.Range(1, 3).Select(x => x * 2).ToArray();
+            public int third;
+            public int sum;
+
+            public void Interact()
+            {
+                third = values[3];                // 40
+                sum = doubled.Sum();              // 12
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "third"), 40);
+    assert_eq!(int_of(&emulator, "sum"), 12);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

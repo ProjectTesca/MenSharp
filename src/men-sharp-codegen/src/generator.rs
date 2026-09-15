@@ -120,6 +120,7 @@ pub fn generate(
         emitted_dispatchers: HashSet::default(),
         export_layouts: HashMap::default(),
         call_edges: HashMap::default(),
+        defer_dispatcher_bodies: true,
         field_visits: HashSet::default(),
         deferred_unsupported: Vec::new(),
         temp_counter: 0,
@@ -495,6 +496,13 @@ struct Generator<'a, 'ast> {
     /// and accessors — the names UdonSharp would use. See `programs`.
     export_layouts: HashMap<SymbolId, HashMap<programs::LayoutKey, programs::ExportLayout>>,
     call_edges: HashMap<FunctionKey, HashSet<FunctionKey>>,
+    /// While set, `compile_fixpoint` queues dispatcher implementations but
+    /// emits no dispatcher (or type test) body: a body enumerates the
+    /// types known when it is written, and the static initializer — lowered
+    /// after the events — can still instantiate one (`Enumerable.Range(…)`
+    /// in a field initializer makes an `Iterator<int>`). Cleared before the
+    /// final drain, which writes every body once everything is known.
+    defer_dispatcher_bodies: bool,
     /// The `Visit<F>` instances `Reflect.VisitFields` calls, one per field.
     /// Whether the visitor takes a field is its own decision at run time
     /// (`[JsonIgnore]`), so what is unsupported behind one of these is
@@ -1221,11 +1229,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
         // the shared static initializer body
         self.emit_static_initializer(init_label, init_return, initialized);
-        // a static initializer's expression may call functions scheduled here
-        while let Some(key) = self.queue.pop_front() {
-            self.compile_function(&key);
+        // an initializer's expression may call functions scheduled here —
+        // and, through an interface (`Enumerable.Range(…).Select(…)` walks
+        // an `IEnumerable<int>`), dispatchers. Every type is known now, so
+        // this is where dispatcher and type-test bodies are written (issue:
+        // an UnplacedLabel for a dispatcher first met here; a body written
+        // earlier would miss the types this phase instantiates)
+        self.defer_dispatcher_bodies = false;
+        loop {
+            loop {
+                while let Some(key) = self.queue.pop_front() {
+                    self.compile_function(&key);
+                }
+                self.emit_thunks();
+                if !self.ensure_dispatcher_impls() {
+                    break;
+                }
+            }
+            if !self.emit_dispatcher_bodies() && self.queue.is_empty() {
+                break;
+            }
         }
-        self.emit_thunks();
         // ... but not ones that would need the scheduler: the stubs above
         // were emitted without its drain, and its own statics missed the
         // initializer. Said plainly rather than left to fail at run time.
@@ -1307,7 +1331,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if self.add_std_event_handlers(entries, claimed) {
                 continue;
             }
-            if !self.emit_dispatcher_bodies() && self.queue.is_empty() {
+            let emitted = !self.defer_dispatcher_bodies && self.emit_dispatcher_bodies();
+            if !emitted && self.queue.is_empty() {
                 break;
             }
         }

@@ -332,6 +332,16 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // a field initializer that walks an IEnumerable<int> (issue: assembly
+    // error UnplacedLabel for the GetEnumerator dispatcher)
+    private readonly int[] linqValues = Enumerable.Range(1, 4).Select(x => x * 10).ToArray();
+    public int linqThird;
+
+    public void LinqInitializer()
+    {
+        linqThird = linqValues[3];
+    }
+
     // a ulong literal past long.MaxValue is a UInt64 on the heap (issue:
     // "does not fit in `long`")
     public string ulongText;
