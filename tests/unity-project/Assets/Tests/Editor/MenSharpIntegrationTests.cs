@@ -136,6 +136,18 @@ public class MenSharpIntegrationTests
 
         UdonBehaviour smoke = FindUdon("MenSharpRuntimeSmoke");
         Assert.IsTrue(smoke.IsInitialized, "the SDK did not initialise the smoke UdonBehaviour");
+
+        // A cached token is canceled by the generated pre-hook before OnDestroy.
+        UdonBehaviour uncached = FindUdon("MenSharpRuntimeSmoke2");
+        smoke.RunProgram("Start");
+        uncached.RunProgram("Start");
+        smoke.RunProgram("OnDestroy");
+        uncached.RunProgram("OnDestroy");
+        Assert.AreEqual(true, smoke.GetProgramVariable("destroyTokenCached"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("destroyTokenCanceled"));
+        Assert.AreEqual(false, uncached.GetProgramVariable("destroyTokenCached"));
+        Assert.AreEqual(false, uncached.GetProgramVariable("destroyTokenCanceled"));
+
         smoke.RunProgram("Greet");
         Assert.AreEqual("Start: Hello", smoke.GetProgramVariable("greeted"));
 
@@ -378,6 +390,11 @@ public class MenSharpIntegrationTests
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
         GameObject smokeObject = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke", "MenSharpRuntimeSmoke", Vector3.zero);
+        // cacheDestroyToken = true
+        MenSharpTestScene.Assign(
+            MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke"),
+            "cacheDestroyToken",
+            true);
         MenSharpTestScene.Assign(
             MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke"),
             "items",
@@ -404,6 +421,11 @@ public class MenSharpIntegrationTests
             MenSharpTestScene.Assign(smokeProxy, "textAsset", dead);
         }
         GameObject secondSmoke = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke2", "MenSharpRuntimeSmoke", Vector3.up * 4);
+        // cacheDestroyToken = false
+        MenSharpTestScene.Assign(
+            MenSharpTestScene.Proxy(secondSmoke, "MenSharpRuntimeSmoke"),
+            "cacheDestroyToken",
+            false);
         GameObject targetObject = MenSharpTestScene.AddProxy("MenSharpRuntimeTarget", "MenSharpRuntimeTarget", Vector3.right * 4);
         GameObject callerObject = MenSharpTestScene.AddProxy("MenSharpRuntimeCaller", "MenSharpRuntimeCaller", Vector3.right * 8);
         MenSharpTestScene.Assign(

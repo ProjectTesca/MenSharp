@@ -262,6 +262,26 @@ impl<'ast> Symbol<'ast> {
         self.member_map.get(name).map(Vec::as_slice).unwrap_or(&[])
     }
 
+    /// Whether this source symbol declares an auto-property whose accessors
+    /// have no bodies, such as `{ get; }` or `{ get; set; }`.
+    pub fn is_auto_property(&self) -> bool {
+        self.kind == SymbolKind::Property
+            && self.declarations.iter().all(|declaration| {
+                matches!(
+                    &declaration.syntax,
+                    SyntaxRef::Property(property)
+                        if matches!(
+                            &property.body,
+                            FunctionBody::Accessors(accessors)
+                                if accessors.accessors.iter().all(|accessor| matches!(
+                                    accessor.body,
+                                    FunctionBody::None { .. }
+                                ))
+                        )
+                )
+            })
+    }
+
     pub fn member_names(&self) -> impl Iterator<Item = (&'ast str, &[SymbolId])> {
         self.member_map
             .iter()

@@ -25,6 +25,30 @@ namespace MenSharp
 
         public UnityEngine.Transform transform { get; }
 
+        private System.Threading.CancellationTokenSource destroyTokenSource;
+
+        public System.Threading.CancellationToken destroyCancellationToken
+        {
+            get
+            {
+                // Allocate the source lazily, as Unity does.
+                if (destroyTokenSource == null)
+                {
+                    destroyTokenSource = new System.Threading.CancellationTokenSource();
+                }
+                return destroyTokenSource.Token;
+            }
+        }
+
+        // Called before the user's OnDestroy by generated code.
+        internal void __CancelDestroyToken()
+        {
+            if (destroyTokenSource != null)
+            {
+                destroyTokenSource.Cancel();
+            }
+        }
+
         // The program itself. Declared as UdonBehaviour rather than as the
         // interface its methods live on, because a `this` heap reference may
         // only be a GameObject, a Transform or an UdonBehaviour — Udon refuses
