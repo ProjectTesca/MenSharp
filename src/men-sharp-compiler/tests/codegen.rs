@@ -10823,6 +10823,112 @@ fn cancellation_stops_a_waiting_method_at_its_await() {
 }
 
 #[test]
+fn destroy_cancellation_token_is_lazy_and_cancelled_before_the_user_handler() {
+    let mut sources = vec![SourceCode::new(
+        "base.cs",
+        r#"
+        namespace MenSharp
+        {
+            public class MenSharpBehaviour
+            {
+                private System.Threading.CancellationTokenSource destroyTokenSource;
+                public bool destroyTokenSourceCreated;
+                public System.Threading.CancellationToken destroyCancellationToken
+                {
+                    get
+                    {
+                        if (destroyTokenSource == null)
+                        {
+                            destroyTokenSource = new System.Threading.CancellationTokenSource();
+                            destroyTokenSourceCreated = true;
+                        }
+                        return destroyTokenSource.Token;
+                    }
+                }
+                internal void __CancelDestroyToken()
+                {
+                    if (destroyTokenSource != null)
+                        destroyTokenSource.Cancel();
+                }
+            }
+        }
+        "#,
+    )];
+    sources.push(SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Probe : MenSharpBehaviour
+        {
+            public bool cancelled;
+            public bool observedBeforeDestroy;
+            public bool cached;
+            public void Observe() { observedBeforeDestroy = destroyTokenSourceCreated; }
+            public void Cache() { cached = destroyCancellationToken.CanBeCanceled; }
+            public void OnDestroy() { cancelled = destroyCancellationToken.IsCancellationRequested; }
+        }
+        "#,
+    ));
+    sources.extend(
+        Compiler::corlib_sources()
+            .into_iter()
+            .filter(|source| source.name.as_ref() != "corlib/MenSharpBehaviour.cs"),
+    );
+    let Some(program) = compile_behaviour(sources, "Probe") else {
+        eprintln!("skipped: no .NET runtime");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    assert!(
+        !program
+            .output
+            .program
+            .data
+            .iter()
+            .any(|symbol| symbol.name == "__this_destroyCancellationToken")
+    );
+
+    let assembled = program.output.program.assemble().unwrap();
+    // An uncached token is created by OnDestroy itself, after the pre-hook.
+    let mut uncached = Emulator::new(&program.output.program, &assembled);
+    uncached.run(&assembled, "_onDestroy").unwrap();
+    assert!(matches!(
+        uncached.value_of("cancelled"),
+        Some(Value::Boolean(false))
+    ));
+    assert!(matches!(
+        uncached.value_of("destroyTokenSourceCreated"),
+        Some(Value::Boolean(true))
+    ));
+
+    // A cached token is canceled by the pre-hook before OnDestroy runs.
+    let mut emulator = Emulator::new(&program.output.program, &assembled);
+    emulator.run(&assembled, "_observe").unwrap();
+    assert!(matches!(
+        emulator.value_of("observedBeforeDestroy"),
+        Some(Value::Boolean(false))
+    ));
+    emulator.run(&assembled, "_cache").unwrap();
+    assert!(matches!(
+        emulator.value_of("cached"),
+        Some(Value::Boolean(true))
+    ));
+    emulator.run(&assembled, "_onDestroy").unwrap();
+    assert!(matches!(
+        emulator.value_of("cancelled"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("destroyTokenSourceCreated"),
+        Some(Value::Boolean(true))
+    ));
+}
+
+#[test]
 fn iterator_misuse_is_rejected_by_the_checker() {
     let Some(errors) = body_errors(
         r#"
