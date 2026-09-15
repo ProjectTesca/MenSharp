@@ -1669,6 +1669,64 @@ fn an_unsupported_type_reached_directly_is_still_an_error() {
 }
 
 #[test]
+fn decimal_literals_are_decimals() {
+    // `0.1m` was lowered as a Double constant (issue: `value is decimal`
+    // false, and `SystemDecimal.__op_Addition` halted the VM reading a
+    // Double as Decimal). A decimal literal is a Decimal on the heap now,
+    // carried as its exact digits; and decimal arithmetic is exact
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public bool isDecimal;
+            public bool exact;
+            public string sum;
+            public string negated;
+            public string fromInt;
+            public string scaled;
+            public int truncated;
+
+            public void Interact()
+            {
+                object value = 0.1m;
+                isDecimal = value is decimal;              // true
+                decimal a = 0.1m;
+                decimal b = 0.2m;
+                exact = a + b == 0.3m;                     // true, unlike double
+                sum = (a + b).ToString();                  // "0.3"
+                decimal minus = -0.5m;
+                negated = minus.ToString();                // "-0.5"
+                decimal c = 1;
+                c += 0.25m;
+                fromInt = c.ToString();                    // "1.25"
+                scaled = (1.50m * 2).ToString();           // "3.00": the scale is kept
+                truncated = (int)(7.9m / 2);               // 3
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert!(matches!(
+        emulator.value_of("isDecimal"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("exact"),
+        Some(Value::Boolean(true))
+    ));
+    assert_eq!(string_of(&emulator, "sum"), "0.3");
+    assert_eq!(string_of(&emulator, "negated"), "-0.5");
+    assert_eq!(string_of(&emulator, "fromInt"), "1.25");
+    assert_eq!(string_of(&emulator, "scaled"), "3.00");
+    assert_eq!(int_of(&emulator, "truncated"), 3);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

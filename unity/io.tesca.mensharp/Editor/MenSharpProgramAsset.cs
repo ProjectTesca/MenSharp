@@ -535,6 +535,7 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
             case "Boolean": return bool.Parse(entry.value);
             case "Single": return float.Parse(entry.value, System.Globalization.CultureInfo.InvariantCulture);
             case "Double": return double.Parse(entry.value, System.Globalization.CultureInfo.InvariantCulture);
+            case "Decimal": return decimal.Parse(entry.value, System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture);
             case "Char": return (char)uint.Parse(entry.value);
             case "String": return entry.value;
             case "Type": return ResolveType(entry.value);

@@ -11,6 +11,7 @@
 //! to add one. Whether a signature exists in the real whitelist is a separate
 //! question, checked against the SDK dump by the codegen crate's tests.
 
+use crate::decimal::Decimal;
 use rustc_hash::FxHashMap as HashMap;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -29,6 +30,7 @@ pub enum Value {
     UInt32(u32),
     Single(f32),
     Double(f64),
+    Decimal(Decimal),
     Char(char),
     Str(Rc<str>),
     Array(Rc<RefCell<Vec<Value>>>),
@@ -79,6 +81,15 @@ impl Value {
             Value::Double(v) => Ok(*v),
             other => Err(EmulatorError::TypeError(format!(
                 "expected Double, found {other:?}"
+            ))),
+        }
+    }
+
+    pub fn as_decimal(&self) -> Result<Decimal, EmulatorError> {
+        match self {
+            Value::Decimal(v) => Ok(*v),
+            other => Err(EmulatorError::TypeError(format!(
+                "expected Decimal, found {other:?}"
             ))),
         }
     }
@@ -144,6 +155,7 @@ impl Value {
             Value::UInt32(v) => v.to_string(),
             Value::Single(v) => v.to_string(),
             Value::Double(v) => v.to_string(),
+            Value::Decimal(v) => v.to_string(),
             Value::Char(v) => v.to_string(),
             Value::Str(v) => v.to_string(),
             Value::Array(_) => "System.Object[]".into(),
@@ -285,6 +297,9 @@ impl Emulator {
                 HeapInit::UInt32(v) => Value::UInt32(*v),
                 HeapInit::Single(v) => Value::Single(*v),
                 HeapInit::Double(v) => Value::Double(*v),
+                HeapInit::Decimal(v) => Value::Decimal(
+                    Decimal::parse(v).expect("the compiler wrote a well-formed decimal"),
+                ),
                 HeapInit::Char(v) => Value::Char(*v),
                 HeapInit::Str(v) => Value::Str(Rc::from(v.as_str())),
                 HeapInit::TypeOf(v) => Value::Type(Rc::from(v.as_str())),
@@ -670,6 +685,166 @@ impl Emulator {
                 };
                 self.heap[args[2]] = Value::Boolean(value);
                 Ok(())
+            }
+            // ---- Decimal: exact, see `decimal` ----
+            "SystemDecimal.__op_Addition__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__Add__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__op_Subtraction__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__Subtract__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__op_Multiply__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__Multiply__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__op_Division__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__Divide__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__op_Modulus__SystemDecimal_SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__Remainder__SystemDecimal_SystemDecimal__SystemDecimal" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_decimal()?;
+                let b = self.heap[args[1]].as_decimal()?;
+                let value = if signature.contains("Addition") || signature.contains("Add_") {
+                    a.checked_add(b)
+                } else if signature.contains("Subtract") {
+                    a.checked_sub(b)
+                } else if signature.contains("Multiply") {
+                    a.checked_mul(b)
+                } else if signature.contains("Divi") {
+                    a.checked_div(b)
+                } else {
+                    a.checked_rem(b)
+                };
+                let Some(value) = value else {
+                    return Err(EmulatorError::Exception(if b == Decimal::ZERO {
+                        "DivideByZeroException: Attempted to divide by zero.".to_string()
+                    } else {
+                        "OverflowException: Value was either too large or too small for a Decimal."
+                            .to_string()
+                    }));
+                };
+                self.heap[args[2]] = Value::Decimal(value);
+                Ok(())
+            }
+            "SystemDecimal.__op_UnaryNegation__SystemDecimal__SystemDecimal"
+            | "SystemDecimal.__Negate__SystemDecimal__SystemDecimal" => {
+                let args = self.pop_arguments(2)?;
+                let a = self.heap[args[0]].as_decimal()?;
+                self.heap[args[1]] = Value::Decimal(a.negated());
+                Ok(())
+            }
+            "SystemDecimal.__op_Equality__SystemDecimal_SystemDecimal__SystemBoolean"
+            | "SystemDecimal.__op_Inequality__SystemDecimal_SystemDecimal__SystemBoolean"
+            | "SystemDecimal.__op_LessThan__SystemDecimal_SystemDecimal__SystemBoolean"
+            | "SystemDecimal.__op_GreaterThan__SystemDecimal_SystemDecimal__SystemBoolean"
+            | "SystemDecimal.__op_LessThanOrEqual__SystemDecimal_SystemDecimal__SystemBoolean"
+            | "SystemDecimal.__op_GreaterThanOrEqual__SystemDecimal_SystemDecimal__SystemBoolean"
+            | "SystemDecimal.__Equals__SystemDecimal_SystemDecimal__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_decimal()?;
+                let b = self.heap[args[1]].as_decimal()?;
+                let order = a.compare(b);
+                let value = if signature.contains("Inequality") {
+                    order.is_ne()
+                } else if signature.contains("Equal") && !signature.contains("Than") {
+                    order.is_eq()
+                } else if signature.contains("LessThanOrEqual") {
+                    order.is_le()
+                } else if signature.contains("GreaterThanOrEqual") {
+                    order.is_ge()
+                } else if signature.contains("LessThan") {
+                    order.is_lt()
+                } else {
+                    order.is_gt()
+                };
+                self.heap[args[2]] = Value::Boolean(value);
+                Ok(())
+            }
+            "SystemDecimal.__CompareTo__SystemDecimal__SystemInt32"
+            | "SystemDecimal.__Compare__SystemDecimal_SystemDecimal__SystemInt32" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_decimal()?;
+                let b = self.heap[args[1]].as_decimal()?;
+                self.heap[args[2]] = Value::Int32(a.compare(b) as i32);
+                Ok(())
+            }
+            "SystemConvert.__ToDecimal__SystemInt32__SystemDecimal"
+            | "SystemConvert.__ToDecimal__SystemInt64__SystemDecimal"
+            | "SystemConvert.__ToDecimal__SystemUInt32__SystemDecimal"
+            | "SystemConvert.__ToDecimal__SystemSingle__SystemDecimal"
+            | "SystemConvert.__ToDecimal__SystemDouble__SystemDecimal"
+            | "SystemConvert.__ToDecimal__SystemDecimal__SystemDecimal"
+            | "SystemConvert.__ToDecimal__SystemObject__SystemDecimal"
+            | "SystemDecimal.__op_Implicit__SystemInt32__SystemDecimal"
+            | "SystemDecimal.__op_Implicit__SystemInt64__SystemDecimal"
+            | "SystemDecimal.__op_Implicit__SystemUInt32__SystemDecimal"
+            | "SystemDecimal.__op_Explicit__SystemDouble__SystemDecimal"
+            | "SystemDecimal.__op_Explicit__SystemSingle__SystemDecimal"
+            | "SystemDecimal.__ctor__SystemInt32__SystemDecimal"
+            | "SystemDecimal.__ctor__SystemInt64__SystemDecimal"
+            | "SystemDecimal.__ctor__SystemDouble__SystemDecimal"
+            | "SystemDecimal.__ctor__SystemSingle__SystemDecimal" => {
+                let args = self.pop_arguments(2)?;
+                let value = match &self.heap[args[0]] {
+                    Value::Int32(v) => Some(Decimal::from_i64(i64::from(*v))),
+                    Value::Int64(v) => Some(Decimal::from_i64(*v)),
+                    Value::UInt32(v) => Some(Decimal::from_i64(i64::from(*v))),
+                    Value::Single(v) => Decimal::from_f64(f64::from(*v)),
+                    Value::Double(v) => Decimal::from_f64(*v),
+                    Value::Decimal(v) => Some(*v),
+                    other => {
+                        return Err(EmulatorError::TypeError(format!("ToDecimal of {other:?}")));
+                    }
+                };
+                let Some(value) = value else {
+                    return Err(EmulatorError::Exception(
+                        "OverflowException: Value was either too large or too small for a Decimal."
+                            .to_string(),
+                    ));
+                };
+                self.heap[args[1]] = Value::Decimal(value);
+                Ok(())
+            }
+            "SystemDecimal.__ToDouble__SystemDecimal__SystemDouble"
+            | "SystemDecimal.__op_Explicit__SystemDecimal__SystemDouble"
+            | "SystemConvert.__ToDouble__SystemDecimal__SystemDouble" => {
+                let args = self.pop_arguments(2)?;
+                let a = self.heap[args[0]].as_decimal()?;
+                self.heap[args[1]] = Value::Double(a.to_f64());
+                Ok(())
+            }
+            "SystemDecimal.__ToSingle__SystemDecimal__SystemSingle"
+            | "SystemDecimal.__op_Explicit__SystemDecimal__SystemSingle"
+            | "SystemConvert.__ToSingle__SystemDecimal__SystemSingle" => {
+                let args = self.pop_arguments(2)?;
+                let a = self.heap[args[0]].as_decimal()?;
+                self.heap[args[1]] = Value::Single(a.to_f64() as f32);
+                Ok(())
+            }
+            "SystemDecimal.__ToInt32__SystemDecimal__SystemInt32"
+            | "SystemDecimal.__op_Explicit__SystemDecimal__SystemInt32"
+            | "SystemConvert.__ToInt32__SystemDecimal__SystemInt32" => {
+                let args = self.pop_arguments(2)?;
+                let a = self.heap[args[0]].as_decimal()?;
+                self.heap[args[1]] = Value::Int32(a.truncate() as i32);
+                Ok(())
+            }
+            "SystemDecimal.__ToInt64__SystemDecimal__SystemInt64"
+            | "SystemDecimal.__op_Explicit__SystemDecimal__SystemInt64"
+            | "SystemConvert.__ToInt64__SystemDecimal__SystemInt64" => {
+                let args = self.pop_arguments(2)?;
+                let a = self.heap[args[0]].as_decimal()?;
+                self.heap[args[1]] = Value::Int64(a.truncate() as i64);
+                Ok(())
+            }
+            "SystemDecimal.__Parse__SystemString__SystemDecimal" => {
+                let args = self.pop_arguments(2)?;
+                let text = self.string_or_empty(args[0]);
+                match Decimal::parse(&text) {
+                    Some(value) => {
+                        self.heap[args[1]] = Value::Decimal(value);
+                        Ok(())
+                    }
+                    None => Err(EmulatorError::Exception(format!(
+                        "FormatException: The input string '{text}' was not in a correct format."
+                    ))),
+                }
             }
             "SystemDouble.__op_Addition__SystemDouble_SystemDouble__SystemDouble"
             | "SystemDouble.__op_Subtraction__SystemDouble_SystemDouble__SystemDouble"
@@ -1218,6 +1393,7 @@ impl Emulator {
             | "SystemInt64.__ToString__SystemString"
             | "SystemSingle.__ToString__SystemString"
             | "SystemDouble.__ToString__SystemString"
+            | "SystemDecimal.__ToString__SystemString"
             | "SystemConvert.__ToString__SystemObject__SystemString" => {
                 let args = self.pop_arguments(2)?;
                 let value = self.heap[args[0]].display();
@@ -1251,6 +1427,7 @@ impl Emulator {
                     Value::UInt32(_) => "System.UInt32",
                     Value::Single(_) => "System.Single",
                     Value::Double(_) => "System.Double",
+                    Value::Decimal(_) => "System.Decimal",
                     Value::Char(_) => "System.Char",
                     Value::Str(_) => "System.String",
                     // the emulator's arrays are untyped: every one reads as
@@ -1282,6 +1459,7 @@ impl Emulator {
                     Value::UInt32(_) => Some("System.UInt32"),
                     Value::Single(_) => Some("System.Single"),
                     Value::Double(_) => Some("System.Double"),
+                    Value::Decimal(_) => Some("System.Decimal"),
                     Value::Char(_) => Some("System.Char"),
                     Value::Str(_) => Some("System.String"),
                     Value::Array(_) => Some("System.Object[]"),
@@ -1714,6 +1892,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::UInt32(x), Value::UInt32(y)) => x == y,
         (Value::Single(x), Value::Single(y)) => x == y,
         (Value::Double(x), Value::Double(y)) => x == y,
+        (Value::Decimal(x), Value::Decimal(y)) => x.equals(*y),
         (Value::Char(x), Value::Char(y)) => x == y,
         (Value::Str(x), Value::Str(y)) => x == y,
         (Value::Type(x), Value::Type(y)) => x == y,

@@ -262,6 +262,12 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // decimal literals are decimals, exactly
+        smoke.RunProgram("Decimals");
+        Assert.AreEqual(true, smoke.GetProgramVariable("decimalIsDecimal"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("decimalExact"));
+        Assert.AreEqual("0.3", smoke.GetProgramVariable("decimalSum"));
+
         // a library in its own auto-referenced asmdef is read as a library
         smoke.RunProgram("UseToolbox");
         Assert.AreEqual(42, smoke.GetProgramVariable("toolboxTwice"));

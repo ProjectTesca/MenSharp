@@ -4500,6 +4500,14 @@ fn literal_heap_init(expression: &Expression, udon_type: &str) -> Option<HeapIni
             let value = trimmed.parse::<f64>().ok()?;
             Some(HeapInit::Double(if negated { -value } else { value }))
         }
+        // `0.1m`, or an integer literal a decimal slot takes implicitly
+        (LiteralExpression::Real(text) | LiteralExpression::Integer(text), "SystemDecimal") => {
+            let raw: String = text.value.chars().filter(|c| *c != '_').collect();
+            let trimmed = raw.trim_end_matches(['m', 'M']);
+            let value = men_sharp_asm::decimal::Decimal::parse(trimmed)?;
+            let value = if negated { value.negated() } else { value };
+            Some(HeapInit::Decimal(value.to_string()))
+        }
         (LiteralExpression::True(_), "SystemBoolean") if !negated => Some(HeapInit::Boolean(true)),
         (LiteralExpression::False(_), "SystemBoolean") if !negated => {
             Some(HeapInit::Boolean(false))

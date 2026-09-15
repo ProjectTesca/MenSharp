@@ -1909,6 +1909,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             "SystemUInt64" => 4,
             "SystemSingle" => 5,
             "SystemDouble" => 6,
+            // above every other: `1.5m * 2` computes in decimal (the checker
+            // refuses decimal against float or double, as C# does)
+            "SystemDecimal" => 7,
             _ => return None,
         })
     }
@@ -3768,6 +3771,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             Some("SystemSingle") => self.constant("SystemSingle", "0", HeapInit::Single(0.0)),
             Some("SystemDouble") => self.constant("SystemDouble", "0", HeapInit::Double(0.0)),
+            Some("SystemDecimal") => {
+                self.constant("SystemDecimal", "0", HeapInit::Decimal("0".to_string()))
+            }
             // any other value type (`Vector3`, `Color`, ...): a slot declared
             // with the struct's own type and no value — the Udon heap
             // initialises such a slot to `default(T)`, whereas a null
@@ -5747,8 +5753,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         }
                         Err(_) => Piece::Error,
                     }
+                } else if let Some(decimal) = raw.strip_suffix(['m', 'M']) {
+                    // `0.1m` is a decimal, exactly: its digits travel as text
+                    // for the importer to parse (a Double in a Decimal slot
+                    // halted the VM at the first extern)
+                    match men_sharp_asm::decimal::Decimal::parse(decimal) {
+                        Some(value) => {
+                            let text = value.to_string();
+                            let slot = self.constant(
+                                "SystemDecimal",
+                                &text,
+                                HeapInit::Decimal(text.clone()),
+                            );
+                            Piece::Value(slot, self.corlib_type("Decimal"))
+                        }
+                        None => Piece::Error,
+                    }
                 } else {
-                    let trimmed = raw.trim_end_matches(['d', 'D', 'm', 'M']);
+                    let trimmed = raw.trim_end_matches(['d', 'D']);
                     match trimmed.parse::<f64>() {
                         Ok(value) => {
                             let slot = self.constant(

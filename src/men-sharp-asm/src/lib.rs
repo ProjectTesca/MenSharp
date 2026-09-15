@@ -6,6 +6,7 @@
 //! lowers checked M# programs into this model; hand-written programs work just
 //! as well, which is how the emulator itself is tested.
 
+pub mod decimal;
 pub mod emulator;
 pub mod program;
 pub mod world;

@@ -55,6 +55,9 @@ pub enum HeapInit {
     UInt32(u32),
     Single(f32),
     Double(f64),
+    /// A `System.Decimal`, as decimal text (`0.1`, `-2.50`): the importer
+    /// parses it, since only .NET can build the value exactly.
+    Decimal(String),
     Char(char),
     Str(String),
     /// The mangled Udon name of a type, for `System.Type` constants.
@@ -642,6 +645,10 @@ impl Program {
                 }
                 HeapInit::Double(v) => {
                     let _ = write!(out, "Double\", \"value\": \"{v:?}\"");
+                }
+                HeapInit::Decimal(v) => {
+                    out.push_str("Decimal\", \"value\": ");
+                    write_json_string(&mut out, v);
                 }
                 HeapInit::Char(v) => {
                     let _ = write!(out, "Char\", \"value\": \"{}\"", *v as u32);
