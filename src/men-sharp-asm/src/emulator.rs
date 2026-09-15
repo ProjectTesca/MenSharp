@@ -28,6 +28,7 @@ pub enum Value {
     Int32(i32),
     Int64(i64),
     UInt32(u32),
+    UInt64(u64),
     Single(f32),
     Double(f64),
     Decimal(Decimal),
@@ -81,6 +82,15 @@ impl Value {
             Value::Double(v) => Ok(*v),
             other => Err(EmulatorError::TypeError(format!(
                 "expected Double, found {other:?}"
+            ))),
+        }
+    }
+
+    pub fn as_u64(&self) -> Result<u64, EmulatorError> {
+        match self {
+            Value::UInt64(v) => Ok(*v),
+            other => Err(EmulatorError::TypeError(format!(
+                "expected UInt64, found {other:?}"
             ))),
         }
     }
@@ -153,6 +163,7 @@ impl Value {
             Value::Int32(v) => v.to_string(),
             Value::Int64(v) => v.to_string(),
             Value::UInt32(v) => v.to_string(),
+            Value::UInt64(v) => v.to_string(),
             Value::Single(v) => v.to_string(),
             Value::Double(v) => v.to_string(),
             Value::Decimal(v) => v.to_string(),
@@ -295,6 +306,7 @@ impl Emulator {
                 HeapInit::Int32(v) => Value::Int32(*v),
                 HeapInit::Int64(v) => Value::Int64(*v),
                 HeapInit::UInt32(v) => Value::UInt32(*v),
+                HeapInit::UInt64(v) => Value::UInt64(*v),
                 HeapInit::Single(v) => Value::Single(*v),
                 HeapInit::Double(v) => Value::Double(*v),
                 HeapInit::Decimal(v) => Value::Decimal(
@@ -662,6 +674,125 @@ impl Emulator {
                 let a = self.heap[args[0]].as_u32()?;
                 let b = self.heap[args[1]].as_u32()?;
                 self.heap[args[2]] = Value::UInt32(a.wrapping_add(b));
+                Ok(())
+            }
+            // ---- UInt64 ----
+            "SystemUInt64.__op_Addition__SystemUInt64_SystemUInt64__SystemUInt64"
+            | "SystemUInt64.__op_Subtraction__SystemUInt64_SystemUInt64__SystemUInt64"
+            | "SystemUInt64.__op_Multiplication__SystemUInt64_SystemUInt64__SystemUInt64"
+            | "SystemUInt64.__op_Division__SystemUInt64_SystemUInt64__SystemUInt64"
+            | "SystemUInt64.__op_Remainder__SystemUInt64_SystemUInt64__SystemUInt64"
+            | "SystemUInt64.__op_LogicalAnd__SystemUInt64_SystemUInt64__SystemUInt64"
+            | "SystemUInt64.__op_LogicalOr__SystemUInt64_SystemUInt64__SystemUInt64"
+            | "SystemUInt64.__op_LogicalXor__SystemUInt64_SystemUInt64__SystemUInt64" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_u64()?;
+                let b = self.heap[args[1]].as_u64()?;
+                if b == 0 && (signature.contains("Division") || signature.contains("Remainder")) {
+                    return Err(EmulatorError::Exception(
+                        "DivideByZeroException: Attempted to divide by zero.".to_string(),
+                    ));
+                }
+                let value = if signature.contains("Addition") {
+                    a.wrapping_add(b)
+                } else if signature.contains("Subtraction") {
+                    a.wrapping_sub(b)
+                } else if signature.contains("Multiplication") {
+                    a.wrapping_mul(b)
+                } else if signature.contains("Division") {
+                    a / b
+                } else if signature.contains("Remainder") {
+                    a % b
+                } else if signature.contains("LogicalAnd") {
+                    a & b
+                } else if signature.contains("LogicalOr") {
+                    a | b
+                } else {
+                    a ^ b
+                };
+                self.heap[args[2]] = Value::UInt64(value);
+                Ok(())
+            }
+            "SystemUInt64.__op_LeftShift__SystemUInt64_SystemInt32__SystemUInt64"
+            | "SystemUInt64.__op_RightShift__SystemUInt64_SystemInt32__SystemUInt64" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_u64()?;
+                let b = (self.heap[args[1]].as_i32()? & 63) as u32;
+                let value = if signature.contains("LeftShift") {
+                    a.wrapping_shl(b)
+                } else {
+                    a.wrapping_shr(b)
+                };
+                self.heap[args[2]] = Value::UInt64(value);
+                Ok(())
+            }
+            "SystemUInt64.__op_Equality__SystemUInt64_SystemUInt64__SystemBoolean"
+            | "SystemUInt64.__op_Inequality__SystemUInt64_SystemUInt64__SystemBoolean"
+            | "SystemUInt64.__op_LessThan__SystemUInt64_SystemUInt64__SystemBoolean"
+            | "SystemUInt64.__op_GreaterThan__SystemUInt64_SystemUInt64__SystemBoolean"
+            | "SystemUInt64.__op_LessThanOrEqual__SystemUInt64_SystemUInt64__SystemBoolean"
+            | "SystemUInt64.__op_GreaterThanOrEqual__SystemUInt64_SystemUInt64__SystemBoolean" => {
+                let args = self.pop_arguments(3)?;
+                let a = self.heap[args[0]].as_u64()?;
+                let b = self.heap[args[1]].as_u64()?;
+                let value = if signature.contains("Inequality") {
+                    a != b
+                } else if signature.contains("Equality") {
+                    a == b
+                } else if signature.contains("LessThanOrEqual") {
+                    a <= b
+                } else if signature.contains("GreaterThanOrEqual") {
+                    a >= b
+                } else if signature.contains("LessThan") {
+                    a < b
+                } else {
+                    a > b
+                };
+                self.heap[args[2]] = Value::Boolean(value);
+                Ok(())
+            }
+            "SystemConvert.__ToUInt64__SystemInt32__SystemUInt64"
+            | "SystemConvert.__ToUInt64__SystemInt64__SystemUInt64"
+            | "SystemConvert.__ToUInt64__SystemUInt32__SystemUInt64"
+            | "SystemConvert.__ToUInt64__SystemUInt64__SystemUInt64"
+            | "SystemConvert.__ToUInt64__SystemObject__SystemUInt64" => {
+                let args = self.pop_arguments(2)?;
+                let value = match &self.heap[args[0]] {
+                    Value::UInt64(value) => Some(*value),
+                    Value::UInt32(value) => Some(u64::from(*value)),
+                    Value::Int32(value) => u64::try_from(*value).ok(),
+                    Value::Int64(value) => u64::try_from(*value).ok(),
+                    other => {
+                        return Err(EmulatorError::TypeError(format!("ToUInt64 of {other:?}")));
+                    }
+                };
+                let Some(value) = value else {
+                    return Err(EmulatorError::Exception(
+                        "OverflowException: Value was either too large or too small for a UInt64."
+                            .to_string(),
+                    ));
+                };
+                self.heap[args[1]] = Value::UInt64(value);
+                Ok(())
+            }
+            "SystemConvert.__ToInt64__SystemUInt64__SystemInt64"
+            | "SystemConvert.__ToInt32__SystemUInt64__SystemInt32"
+            | "SystemConvert.__ToDouble__SystemUInt64__SystemDouble" => {
+                let args = self.pop_arguments(2)?;
+                let value = self.heap[args[0]].as_u64()?;
+                let converted = if signature.contains("ToDouble") {
+                    Some(Value::Double(value as f64))
+                } else if signature.contains("ToInt64") {
+                    i64::try_from(value).ok().map(Value::Int64)
+                } else {
+                    i32::try_from(value).ok().map(Value::Int32)
+                };
+                let Some(converted) = converted else {
+                    return Err(EmulatorError::Exception(
+                        "OverflowException: Value was either too large or too small.".to_string(),
+                    ));
+                };
+                self.heap[args[1]] = converted;
                 Ok(())
             }
             "SystemUInt32.__op_Equality__SystemUInt32_SystemUInt32__SystemBoolean"
@@ -1465,6 +1596,8 @@ impl Emulator {
             | "SystemSingle.__ToString__SystemString"
             | "SystemDouble.__ToString__SystemString"
             | "SystemDecimal.__ToString__SystemString"
+            | "SystemUInt32.__ToString__SystemString"
+            | "SystemUInt64.__ToString__SystemString"
             | "SystemConvert.__ToString__SystemObject__SystemString" => {
                 let args = self.pop_arguments(2)?;
                 let value = self.heap[args[0]].display();
@@ -1496,6 +1629,7 @@ impl Emulator {
                     Value::Int32(_) => "System.Int32",
                     Value::Int64(_) => "System.Int64",
                     Value::UInt32(_) => "System.UInt32",
+                    Value::UInt64(_) => "System.UInt64",
                     Value::Single(_) => "System.Single",
                     Value::Double(_) => "System.Double",
                     Value::Decimal(_) => "System.Decimal",
@@ -1528,6 +1662,7 @@ impl Emulator {
                     Value::Int32(_) => Some("System.Int32"),
                     Value::Int64(_) => Some("System.Int64"),
                     Value::UInt32(_) => Some("System.UInt32"),
+                    Value::UInt64(_) => Some("System.UInt64"),
                     Value::Single(_) => Some("System.Single"),
                     Value::Double(_) => Some("System.Double"),
                     Value::Decimal(_) => Some("System.Decimal"),
@@ -1961,6 +2096,7 @@ fn values_equal(a: &Value, b: &Value) -> bool {
         (Value::Int32(x), Value::Int32(y)) => x == y,
         (Value::Int64(x), Value::Int64(y)) => x == y,
         (Value::UInt32(x), Value::UInt32(y)) => x == y,
+        (Value::UInt64(x), Value::UInt64(y)) => x == y,
         (Value::Single(x), Value::Single(y)) => x == y,
         (Value::Double(x), Value::Double(y)) => x == y,
         (Value::Decimal(x), Value::Decimal(y)) => x.equals(*y),

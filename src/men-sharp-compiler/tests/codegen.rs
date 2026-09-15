@@ -2105,6 +2105,63 @@ fn exception_filters_run_before_inner_finally_blocks() {
 }
 
 #[test]
+fn ulong_literals_and_values_work() {
+    // `9223372036854775808UL` (issue: "does not fit in `long`", and ulong
+    // literals were refused altogether): a UInt64 on the heap, computed and
+    // printed with the UInt64 externs; an unsuffixed literal takes the first
+    // of int, uint, long, ulong it fits (§6.4.5.3)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public string text;
+            public ulong value;
+            public string max;
+            public bool bigger;
+            public string halved;
+            public string unsuffixed;
+            public int minInt;
+
+            public void Interact()
+            {
+                ulong uL = 9223372036854775808UL;
+                text = $"ulong value: {uL}";
+                value = uL + 1UL;
+                max = ulong.MaxValue.ToString();
+                bigger = uL > 1UL;
+                halved = (uL / 2).ToString();
+                var wide = 3000000000;                  // a uint: past int, within uint
+                unsuffixed = wide.ToString();
+                minInt = -2147483648;                   // int.MinValue, not -(uint)
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(
+        string_of(&emulator, "text"),
+        "ulong value: 9223372036854775808"
+    );
+    assert!(matches!(
+        emulator.value_of("value"),
+        Some(Value::UInt64(9_223_372_036_854_775_809))
+    ));
+    assert_eq!(string_of(&emulator, "max"), "18446744073709551615");
+    assert!(matches!(
+        emulator.value_of("bigger"),
+        Some(Value::Boolean(true))
+    ));
+    assert_eq!(string_of(&emulator, "halved"), "4611686018427387904");
+    assert_eq!(string_of(&emulator, "unsuffixed"), "3000000000");
+    assert_eq!(int_of(&emulator, "minInt"), i32::MIN);
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

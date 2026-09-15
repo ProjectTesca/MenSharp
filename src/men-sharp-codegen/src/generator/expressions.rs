@@ -2359,6 +2359,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         whole: &'ast Expression<'ast, 'ast>,
     ) -> Option<DataId> {
         let operand_expression = unary.operand.as_ref().ok()?;
+        // `-2147483648`, `-9223372036854775808` (§6.4.5.3): the literal
+        // alone is a uint / ulong, the whole is int.MinValue / long.MinValue
+        // — folded here, as the checker typed it, since the extern would
+        // negate the unsigned value
+        if unary.operator.value == UnaryOperator::Minus
+            && let Expression::Primary(primary) = operand_expression
+            && primary.chain.is_empty()
+            && let PrimaryLeft::Literal(LiteralExpression::Integer(text)) = &primary.left
+        {
+            let digits: String = text.value.chars().filter(|c| *c != '_').collect();
+            match digits.parse::<u64>().ok() {
+                Some(2_147_483_648) => return Some(self.int_constant(i32::MIN)),
+                Some(9_223_372_036_854_775_808) => {
+                    return Some(self.constant(
+                        "SystemInt64",
+                        &i64::MIN.to_string(),
+                        HeapInit::Int64(i64::MIN),
+                    ));
+                }
+                _ => {}
+            }
+        }
         // (`!`, `-`, `+` bind their user operators in apply_unary)
         if matches!(unary.operator.value, UnaryOperator::BitwiseNot)
             && self.bodies.targets.contains_key(&EntityID::from(unary))
@@ -6108,30 +6130,43 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .strip_prefix("0x")
                     .or_else(|| trimmed.strip_prefix("0X"))
                 {
-                    i64::from_str_radix(hex, 16)
+                    u64::from_str_radix(hex, 16)
                 } else if let Some(bin) = trimmed
                     .strip_prefix("0b")
                     .or_else(|| trimmed.strip_prefix("0B"))
                 {
-                    i64::from_str_radix(bin, 2)
+                    u64::from_str_radix(bin, 2)
                 } else {
-                    trimmed.parse::<i64>()
+                    trimmed.parse::<u64>()
                 };
-                // the suffix picks the type, exactly as the checker read it;
-                // without one, C# takes the first of `int`, `long` that fits
-                match (parsed, suffix.contains('u'), suffix.contains('l')) {
-                    (Ok(value), false, false) if i32::try_from(value).is_ok() => {
+                let Ok(value) = parsed else {
+                    self.error(
+                        ctx,
+                        Message::key("codegen.this_integer_literal_does_not_fit_in"),
+                        text.span.clone(),
+                    );
+                    return Piece::Error;
+                };
+                // the suffix picks the type, exactly as the checker read it
+                // (§6.4.5.3): without one, the first of int, uint, long,
+                // ulong the value fits; `u` the first of uint, ulong; `l`
+                // the first of long, ulong; `ul` a ulong
+                let fits_i32 = i32::try_from(value).is_ok();
+                let fits_u32 = u32::try_from(value).is_ok();
+                let fits_i64 = i64::try_from(value).is_ok();
+                let kind = match (suffix.contains('u'), suffix.contains('l')) {
+                    (false, false) if fits_i32 => "SystemInt32",
+                    (false, false) if fits_u32 => "SystemUInt32",
+                    (false, false) if fits_i64 => "SystemInt64",
+                    (true, false) if fits_u32 => "SystemUInt32",
+                    (false, true) if fits_i64 => "SystemInt64",
+                    _ => "SystemUInt64",
+                };
+                match kind {
+                    "SystemInt32" => {
                         Piece::Value(self.int_constant(value as i32), self.corlib_type("Int32"))
                     }
-                    (Ok(value), false, _) => {
-                        let slot = self.constant(
-                            "SystemInt64",
-                            &value.to_string(),
-                            HeapInit::Int64(value),
-                        );
-                        Piece::Value(slot, self.corlib_type("Int64"))
-                    }
-                    (Ok(value), true, false) if u32::try_from(value).is_ok() => {
+                    "SystemUInt32" => {
                         let slot = self.constant(
                             "SystemUInt32",
                             &value.to_string(),
@@ -6139,21 +6174,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         );
                         Piece::Value(slot, self.corlib_type("UInt32"))
                     }
-                    (Ok(_), true, _) => {
-                        self.error(
-                            ctx,
-                            Message::key("codegen.ulong_literals_are_not_supported_by_the"),
-                            text.span.clone(),
+                    "SystemInt64" => {
+                        let slot = self.constant(
+                            "SystemInt64",
+                            &value.to_string(),
+                            HeapInit::Int64(value as i64),
                         );
-                        Piece::Error
+                        Piece::Value(slot, self.corlib_type("Int64"))
                     }
                     _ => {
-                        self.error(
-                            ctx,
-                            Message::key("codegen.this_integer_literal_does_not_fit_in"),
-                            text.span.clone(),
+                        let slot = self.constant(
+                            "SystemUInt64",
+                            &value.to_string(),
+                            HeapInit::UInt64(value),
                         );
-                        Piece::Error
+                        Piece::Value(slot, self.corlib_type("UInt64"))
                     }
                 }
             }

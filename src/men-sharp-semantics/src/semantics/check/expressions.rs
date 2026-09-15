@@ -218,6 +218,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 )
             }
             Expression::Unary(unary) => {
+                // `-2147483648` and `-9223372036854775808` (§6.4.5.3): the
+                // literal alone would be a uint / ulong, but under unary
+                // minus the whole is int.MinValue / long.MinValue
+                if unary.operator.value == men_sharp_parser::ast::UnaryOperator::Minus
+                    && let Ok(operand) = &unary.operand
+                    && let Some(magnitude) = Self::unsuffixed_integer_literal(operand)
+                    && (magnitude == 2_147_483_648 || magnitude == 9_223_372_036_854_775_808)
+                {
+                    self.check_expression(operand);
+                    return self.corlib(if magnitude == 2_147_483_648 {
+                        "Int32"
+                    } else {
+                        "Int64"
+                    });
+                }
                 let operand = match &unary.operand {
                     Ok(operand) => self.check_expression(operand),
                     Err(()) => Type::Error,
@@ -728,37 +743,54 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
+    /// The value of a decimal integer literal written without a suffix.
+    fn unsuffixed_integer_literal(expression: &Expression) -> Option<u128> {
+        let Expression::Primary(primary) = expression else {
+            return None;
+        };
+        if !primary.chain.is_empty() {
+            return None;
+        }
+        let PrimaryLeft::Literal(LiteralExpression::Integer(text)) = &primary.left else {
+            return None;
+        };
+        let digits: String = text.value.chars().filter(|c| *c != '_').collect();
+        digits.parse::<u128>().ok()
+    }
+
     fn check_literal(&mut self, literal: &'ast LiteralExpression<'ast, 'ast>) -> Meaning<'ast> {
         let ty = match literal {
             LiteralExpression::Integer(text) => {
                 let stripped = text.value.trim_end_matches(['u', 'U', 'l', 'L']);
                 let suffix = &text.value[stripped.len()..].to_ascii_lowercase();
+                let digits: String = stripped.chars().filter(|c| *c != '_').collect();
+                let value = if let Some(hex) = digits
+                    .strip_prefix("0x")
+                    .or_else(|| digits.strip_prefix("0X"))
+                {
+                    u128::from_str_radix(hex, 16)
+                } else if let Some(bits) = digits
+                    .strip_prefix("0b")
+                    .or_else(|| digits.strip_prefix("0B"))
+                {
+                    u128::from_str_radix(bits, 2)
+                } else {
+                    digits.parse::<u128>()
+                }
+                .unwrap_or(u128::MAX);
+                // §6.4.5.3: the first type the value fits — int, uint, long,
+                // ulong without a suffix; uint, ulong with `u`; long, ulong
+                // with `l`; ulong with `ul`
+                let fits_i32 = i32::try_from(value).is_ok();
+                let fits_u32 = u32::try_from(value).is_ok();
+                let fits_i64 = i64::try_from(value).is_ok();
                 let name = match (suffix.contains('u'), suffix.contains('l')) {
-                    (true, true) => "UInt64",
-                    (true, false) => "UInt32",
-                    (false, true) => "Int64",
-                    // without a suffix C# takes the first type the value
-                    // fits: `int`, then `long`
-                    (false, false) => {
-                        let digits: String = stripped.chars().filter(|c| *c != '_').collect();
-                        let value = if let Some(hex) = digits
-                            .strip_prefix("0x")
-                            .or_else(|| digits.strip_prefix("0X"))
-                        {
-                            i64::from_str_radix(hex, 16)
-                        } else if let Some(bits) = digits
-                            .strip_prefix("0b")
-                            .or_else(|| digits.strip_prefix("0B"))
-                        {
-                            i64::from_str_radix(bits, 2)
-                        } else {
-                            digits.parse::<i64>()
-                        };
-                        match value {
-                            Ok(value) if i32::try_from(value).is_err() => "Int64",
-                            _ => "Int32",
-                        }
-                    }
+                    (false, false) if fits_i32 => "Int32",
+                    (false, false) if fits_u32 => "UInt32",
+                    (false, false) if fits_i64 => "Int64",
+                    (true, false) if fits_u32 => "UInt32",
+                    (false, true) if fits_i64 => "Int64",
+                    _ => "UInt64",
                 };
                 self.corlib(name)
             }

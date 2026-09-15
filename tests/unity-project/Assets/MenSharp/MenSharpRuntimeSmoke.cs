@@ -332,6 +332,18 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // a ulong literal past long.MaxValue is a UInt64 on the heap (issue:
+    // "does not fit in `long`")
+    public string ulongText;
+    public ulong ulongValue;
+
+    public void ULongLiteral()
+    {
+        ulong uL = 9223372036854775808UL;
+        ulongText = $"ulong value: {uL}";
+        ulongValue = uL;
+    }
+
     // a `when` filter runs before an inner `finally` (issue: after it)
     public string exceptionOrder;
 

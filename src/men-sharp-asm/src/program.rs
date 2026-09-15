@@ -53,6 +53,7 @@ pub enum HeapInit {
     Int32(i32),
     Int64(i64),
     UInt32(u32),
+    UInt64(u64),
     Single(f32),
     Double(f64),
     /// A `System.Decimal`, as decimal text (`0.1`, `-2.50`): the importer
@@ -639,6 +640,9 @@ impl Program {
                 }
                 HeapInit::UInt32(v) => {
                     let _ = write!(out, "UInt32\", \"value\": \"{v}\"");
+                }
+                HeapInit::UInt64(v) => {
+                    let _ = write!(out, "UInt64\", \"value\": \"{v}\"");
                 }
                 HeapInit::Single(v) => {
                     let _ = write!(out, "Single\", \"value\": \"{v:?}\"");

@@ -531,6 +531,7 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         {
             case "Int32": return int.Parse(entry.value);
             case "UInt32": return uint.Parse(entry.value);
+            case "UInt64": return ulong.Parse(entry.value);
             case "Int64": return long.Parse(entry.value);
             case "Boolean": return bool.Parse(entry.value);
             case "Single": return float.Parse(entry.value, System.Globalization.CultureInfo.InvariantCulture);

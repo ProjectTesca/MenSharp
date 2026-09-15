@@ -262,6 +262,11 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // a ulong literal past long.MaxValue
+        smoke.RunProgram("ULongLiteral");
+        Assert.AreEqual("ulong value: 9223372036854775808", smoke.GetProgramVariable("ulongText"));
+        Assert.AreEqual(9223372036854775808UL, smoke.GetProgramVariable("ulongValue"));
+
         // two-pass exception handling: filter before the inner finally
         smoke.RunProgram("ExceptionOrder");
         Assert.AreEqual("Filter,Finally,Catch", smoke.GetProgramVariable("exceptionOrder"));

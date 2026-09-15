@@ -3138,6 +3138,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             &value.to_string(),
                             HeapInit::Int64(*value),
                         ),
+                        "SystemUInt64" => self.constant(
+                            "SystemUInt64",
+                            &(*value as u64).to_string(),
+                            HeapInit::UInt64(*value as u64),
+                        ),
                         _ => self.int_constant(*value as i32),
                     },
                     ExternalConstant::UInt(value) => match self.heap_type(ty).as_str() {
@@ -3145,6 +3150,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             "SystemUInt32",
                             &value.to_string(),
                             HeapInit::UInt32(*value as u32),
+                        ),
+                        "SystemUInt64" => self.constant(
+                            "SystemUInt64",
+                            &value.to_string(),
+                            HeapInit::UInt64(*value),
+                        ),
+                        "SystemInt64" => self.constant(
+                            "SystemInt64",
+                            &(*value as i64).to_string(),
+                            HeapInit::Int64(*value as i64),
                         ),
                         _ => self.int_constant(*value as i32),
                     },
@@ -4601,6 +4616,18 @@ fn literal_heap_init(expression: &Expression, udon_type: &str) -> Option<HeapIni
         (LiteralExpression::Integer(text), "SystemUInt32") if !negated => {
             let raw: String = text.value.chars().filter(|c| *c != '_').collect();
             raw.parse::<u32>().ok().map(HeapInit::UInt32)
+        }
+        (LiteralExpression::Integer(text), "SystemUInt64") if !negated => {
+            let raw: String = text
+                .value
+                .chars()
+                .filter(|c| *c != '_')
+                .collect::<String>()
+                .to_ascii_lowercase();
+            raw.trim_end_matches(['u', 'l'])
+                .parse::<u64>()
+                .ok()
+                .map(HeapInit::UInt64)
         }
         (LiteralExpression::Integer(text), "SystemSingle") => {
             let raw: String = text.value.chars().filter(|c| *c != '_').collect();
