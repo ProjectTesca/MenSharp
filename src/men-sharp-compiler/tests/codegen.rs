@@ -10863,8 +10863,11 @@ fn destroy_cancellation_token_is_lazy_and_cancelled_before_the_user_handler() {
             public bool cancelled;
             public bool observedBeforeDestroy;
             public bool cached;
-            public void Observe() { observedBeforeDestroy = destroyTokenSourceCreated; }
-            public void Cache() { cached = destroyCancellationToken.CanBeCanceled; }
+            public void Start()
+            {
+                observedBeforeDestroy = destroyTokenSourceCreated;
+                cached = destroyCancellationToken.CanBeCanceled;
+            }
             public void OnDestroy() { cancelled = destroyCancellationToken.IsCancellationRequested; }
         }
         "#,
@@ -10907,12 +10910,12 @@ fn destroy_cancellation_token_is_lazy_and_cancelled_before_the_user_handler() {
 
     // A cached token is canceled by the pre-hook before OnDestroy runs.
     let mut emulator = Emulator::new(&program.output.program, &assembled);
-    emulator.run(&assembled, "_observe").unwrap();
+    // Start is a built-in Udon entry point; arbitrary public methods are not.
+    emulator.run(&assembled, "_start").unwrap();
     assert!(matches!(
         emulator.value_of("observedBeforeDestroy"),
         Some(Value::Boolean(false))
     ));
-    emulator.run(&assembled, "_cache").unwrap();
     assert!(matches!(
         emulator.value_of("cached"),
         Some(Value::Boolean(true))
