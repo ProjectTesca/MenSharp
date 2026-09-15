@@ -1963,6 +1963,66 @@ fn an_enum_keeps_to_its_underlying_type() {
 }
 
 #[test]
+fn bool_operands_take_the_non_short_circuit_operators() {
+    // `a & b`, `a | b`, `a ^ b`, `a &= b` on bools (issue: "this operator is
+    // not defined for `bool` and `bool`"): both sides run, unlike `&&`/`||`
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int calls;
+            public bool orCall;
+            public bool and;
+            public bool or;
+            public bool xor;
+            public bool compound;
+
+            bool Check() { calls++; return true; }
+
+            public void Interact()
+            {
+                bool a = true;
+                bool b = false;
+                orCall = a | Check();      // true, and Check ran (calls: 1)
+                and = a & b;               // false
+                or = a | b;                // true
+                xor = a ^ b;               // true
+                a &= b;
+                compound = a;              // false
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "calls"), 1);
+    assert!(matches!(
+        emulator.value_of("orCall"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("and"),
+        Some(Value::Boolean(false))
+    ));
+    assert!(matches!(
+        emulator.value_of("or"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("xor"),
+        Some(Value::Boolean(true))
+    ));
+    assert!(matches!(
+        emulator.value_of("compound"),
+        Some(Value::Boolean(false))
+    ));
+}
+
+#[test]
 fn is_null_binds_tighter_than_logical_or() {
     // `values is null || values.Length == 0` is `(values is null) || (...)`,
     // not `values is (null || ...)` — the `is` pattern's constant is parsed at

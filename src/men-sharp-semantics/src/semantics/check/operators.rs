@@ -183,6 +183,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     return self.corlib("Boolean");
                 }
             }
+            // `a & b`, `a | b`, `a ^ b` on bools (§12.13.4): both sides
+            // evaluated, unlike `&&`/`||` — Udon's `op_LogicalAnd` and
+            // friends on Boolean are exactly these
+            BitwiseAnd | BitwiseOr | BitwiseXor
+                if system.is_bool(&left) && system.is_bool(&right) =>
+            {
+                return self.corlib("Boolean");
+            }
             Coalesce => {
                 return match left {
                     Type::Null => right,

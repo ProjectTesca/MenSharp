@@ -262,6 +262,14 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // non-short-circuit bool operators
+        smoke.RunProgram("BoolOperators");
+        Assert.AreEqual(1, smoke.GetProgramVariable("boolCalls"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("boolOrCall"));
+        Assert.AreEqual(false, smoke.GetProgramVariable("boolAnd"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("boolXor"));
+        Assert.AreEqual(false, smoke.GetProgramVariable("boolCompound"));
+
         // enums keep to their underlying type
         smoke.RunProgram("EnumUnderlying");
         Assert.AreEqual(true, smoke.GetProgramVariable("enumByteWraps"));

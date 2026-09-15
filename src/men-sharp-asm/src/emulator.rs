@@ -674,14 +674,17 @@ impl Emulator {
                 Ok(())
             }
             "SystemBoolean.__op_LogicalAnd__SystemBoolean_SystemBoolean__SystemBoolean"
-            | "SystemBoolean.__op_LogicalOr__SystemBoolean_SystemBoolean__SystemBoolean" => {
+            | "SystemBoolean.__op_LogicalOr__SystemBoolean_SystemBoolean__SystemBoolean"
+            | "SystemBoolean.__op_LogicalXor__SystemBoolean_SystemBoolean__SystemBoolean" => {
                 let args = self.pop_arguments(3)?;
                 let a = self.heap[args[0]].as_bool()?;
                 let b = self.heap[args[1]].as_bool()?;
                 let value = if signature.contains("LogicalAnd") {
                     a && b
-                } else {
+                } else if signature.contains("LogicalOr") {
                     a || b
+                } else {
+                    a ^ b
                 };
                 self.heap[args[2]] = Value::Boolean(value);
                 Ok(())

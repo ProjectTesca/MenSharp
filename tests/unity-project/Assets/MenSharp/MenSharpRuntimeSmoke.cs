@@ -332,6 +332,26 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // `&`, `|`, `^` on bools evaluate both sides (issue: a compile error)
+    public int boolCalls;
+    public bool boolOrCall;
+    public bool boolAnd;
+    public bool boolXor;
+    public bool boolCompound;
+
+    bool BoolCheck() { boolCalls++; return true; }
+
+    public void BoolOperators()
+    {
+        bool a = true;
+        bool b = false;
+        boolOrCall = a | BoolCheck();
+        boolAnd = a & b;
+        boolXor = a ^ b;
+        a &= b;
+        boolCompound = a;
+    }
+
     // an enum keeps to its underlying type: a byte enum wraps at 255, a
     // ulong enum holds a member past long.MaxValue (issue: both were Int32)
     public bool enumByteWraps;
