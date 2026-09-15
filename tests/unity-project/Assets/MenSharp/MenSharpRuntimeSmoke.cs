@@ -15,6 +15,24 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     public int syncResult;
     public string syncText;
 
+    // OnDestroy cancels a token that was requested before destruction.
+    public bool cacheDestroyToken;
+    public bool destroyTokenCached;
+    public bool destroyTokenCanceled;
+
+    public void Start()
+    {
+        if (cacheDestroyToken)
+        {
+            destroyTokenCached = destroyCancellationToken.CanBeCanceled;
+        }
+    }
+
+    public void OnDestroy()
+    {
+        destroyTokenCanceled = destroyCancellationToken.IsCancellationRequested;
+    }
+
     public bool asyncDone;
     public int asyncResult;
 
