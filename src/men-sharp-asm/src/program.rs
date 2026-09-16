@@ -50,6 +50,10 @@ pub type UdonType = String;
 pub enum HeapInit {
     Null,
     Boolean(bool),
+    SByte(i8),
+    Byte(u8),
+    Int16(i16),
+    UInt16(u16),
     Int32(i32),
     Int64(i64),
     UInt32(u32),
@@ -631,6 +635,18 @@ impl Program {
                 HeapInit::Null | HeapInit::SelfReference => unreachable!(),
                 HeapInit::Boolean(v) => {
                     let _ = write!(out, "Boolean\", \"value\": \"{v}\"");
+                }
+                HeapInit::SByte(v) => {
+                    let _ = write!(out, "SByte\", \"value\": \"{v}\"");
+                }
+                HeapInit::Byte(v) => {
+                    let _ = write!(out, "Byte\", \"value\": \"{v}\"");
+                }
+                HeapInit::Int16(v) => {
+                    let _ = write!(out, "Int16\", \"value\": \"{v}\"");
+                }
+                HeapInit::UInt16(v) => {
+                    let _ = write!(out, "UInt16\", \"value\": \"{v}\"");
                 }
                 HeapInit::Int32(v) => {
                     let _ = write!(out, "Int32\", \"value\": \"{v}\"");

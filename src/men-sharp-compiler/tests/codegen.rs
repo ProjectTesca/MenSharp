@@ -14210,3 +14210,41 @@ fn wide_remainder_handles_boundaries() {
 
     assert_eq!(int_of(&emulator, "caught"), 1);
 }
+
+#[test]
+fn small_integer_metadata_constants_keep_their_heap_types() {
+    // The emulator represents small integers as Int32, so checking its values
+    // would miss an initializer with the right value but the wrong boxed type.
+    // Inspect the heap initializers that the Unity importer uses instead.
+    let Some((program, _)) = build(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game { public class Program {
+            public static object[] limits;
+            public static void Main() {
+                limits = new object[] { sbyte.MinValue, byte.MaxValue, short.MinValue, ushort.MaxValue };
+            }
+        } }
+    "#,
+    )]) else {
+        return;
+    };
+    for (name, value) in [
+        ("SystemSByte", -128),
+        ("SystemByte", 255),
+        ("SystemInt16", -32768),
+        ("SystemUInt16", 65535),
+    ] {
+        let slot = program.data.iter().find(|s| {
+            s.udon_type == name
+                && match s.init {
+                    men_sharp_asm::HeapInit::SByte(v) => i64::from(v) == value,
+                    men_sharp_asm::HeapInit::Byte(v) => i64::from(v) == value,
+                    men_sharp_asm::HeapInit::Int16(v) => i64::from(v) == value,
+                    men_sharp_asm::HeapInit::UInt16(v) => i64::from(v) == value,
+                    _ => false,
+                }
+        });
+        assert!(slot.is_some(), "missing typed constant {name}");
+    }
+}

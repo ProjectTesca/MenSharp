@@ -315,6 +315,19 @@ public class MenSharpIntegrationTests
             (object[])smoke.GetProgramVariable("wideIntegerResults"));
         Assert.AreEqual(1, smoke.GetProgramVariable("remainderZeroCaught"));
 
+        smoke.RunProgram("SmallIntegerConstants");
+        var limits = (object[])smoke.GetProgramVariable("smallLimits");
+        var limitsAfter = (object[])smoke.GetProgramVariable("smallLimitsAfter");
+        object[] expectedLimits = { sbyte.MaxValue, byte.MaxValue, short.MaxValue, ushort.MaxValue };
+        object[] expectedAfter = { sbyte.MinValue, (byte)0, short.MinValue, (ushort)0 };
+        for (int i = 0; i < limits.Length; i++)
+        {
+            Assert.AreEqual(expectedLimits[i].GetType(), limits[i].GetType());
+            Assert.AreEqual(expectedLimits[i], limits[i]);
+            Assert.AreEqual(expectedAfter[i].GetType(), limitsAfter[i].GetType());
+            Assert.AreEqual(expectedAfter[i], limitsAfter[i]);
+        }
+
         smoke.RunProgram("SmallIntegers");
         Assert.AreEqual(3, smoke.GetProgramVariable("smallByte"));
         Assert.AreEqual(1, smoke.GetProgramVariable("smallByteWrapped"));

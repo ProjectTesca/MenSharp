@@ -486,6 +486,17 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         try { ul %= zero; } catch (DivideByZeroException) { remainderZeroCaught = 1; }
     }
 
+    public object[] smallLimits;
+    public object[] smallLimitsAfter;
+    public void SmallIntegerConstants()
+    {
+        sbyte sb = sbyte.MaxValue; byte b = byte.MaxValue;
+        short sh = short.MaxValue; ushort us = ushort.MaxValue;
+        smallLimits = new object[] { sb, b, sh, us };
+        sb++; b++; sh++; us++;
+        smallLimitsAfter = new object[] { sb, b, sh, us };
+    }
+
     public void SmallIntegers()
     {
         byte b = 1;
