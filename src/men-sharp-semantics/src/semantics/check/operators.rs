@@ -231,7 +231,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 if let (Some(l), Some(r)) =
                     (system.numeric_kind(&left), system.numeric_kind(&right))
                 {
-                    return self.numeric_binary(operator, l, r, span);
+                    return self.numeric_binary(operator, l, r, span, node);
                 }
 
                 let comparable = matches!(left, Type::Null)
@@ -283,7 +283,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         if let (Some(left_kind), Some(right_kind)) =
             (system.numeric_kind(&left), system.numeric_kind(&right))
         {
-            return self.numeric_binary(operator, left_kind, right_kind, span);
+            return self.numeric_binary(operator, left_kind, right_kind, span, node);
         }
 
         // enums
@@ -342,6 +342,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         left: NumericKind,
         right: NumericKind,
         span: Range<usize>,
+        node: Option<EntityID>,
     ) -> Type {
         use BinaryOperator::*;
         use NumericKind::*;
@@ -378,6 +379,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             );
             return Type::Error;
         };
+        if let Some(node) = node {
+            let left = self.corlib(promoted.corlib_name());
+            let right = if shift {
+                self.corlib("Int32")
+            } else {
+                left.clone()
+            };
+            self.numeric_promotions.insert(node, (left, right));
+        }
         if matches!(
             operator,
             LessThan | GreaterThan | LessThanEqual | GreaterThanEqual | Equal | NotEqual

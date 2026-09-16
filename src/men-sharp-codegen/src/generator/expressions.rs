@@ -1780,8 +1780,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // binary numeric promotion (§12.4.7): `long == int`, `float * int`
         // — both operands are brought to the wider type first, as an extern
         // takes two slots of exactly its own type
-        let (left, right) =
-            self.promote_numeric_operands(ctx, operator, left, right, result_type, span.clone());
+        let selected = node
+            .and_then(|id| self.bodies.numeric_promotions.get(&id))
+            .cloned();
+        let (left, right) = if let Some((left_type, right_type)) = selected {
+            (
+                (
+                    self.convert(ctx, left.0, left.1, &left_type, span.clone()),
+                    left_type,
+                ),
+                (
+                    self.convert(ctx, right.0, right.1, &right_type, span.clone()),
+                    right_type,
+                ),
+            )
+        } else {
+            self.promote_numeric_operands(ctx, operator, left, right, result_type, span.clone())
+        };
         let left = (left.0, &left.1);
         let right = (right.0, &right.1);
 
@@ -2100,10 +2115,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         })
     }
 
-    /// Both operands of a numeric operator converted to the promoted type:
-    /// the result type for arithmetic, the wider operand for comparisons.
-    /// A shift keeps its `int` count. Operands that are not both numeric
-    /// come back as they were.
+    /// Promotion for synthesized numeric operations such as ++. Explicit
+    /// expressions use the operand types recorded by the checker above.
+    /// A shift keeps its `int` count; non-numeric operands stay as they were.
     fn promote_numeric_operands(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -2119,24 +2133,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return ((left.0, left.1.clone()), (right.0, right.1.clone()));
         };
         let shift = matches!(operator, LeftShift | RightShift | UnsignedRightShift);
-        let (l, r) = if shift {
-            (l, r)
-        } else {
-            use men_sharp_semantics::types::conversions::NumericKind::*;
-            let promote_constant = |slot: DataId, kind, other| {
-                let fits = matches!(self.program.data[slot.0].init, HeapInit::Int32(v) if v >= 0)
-                    || matches!(self.program.data[slot.0].init, HeapInit::Int64(v) if v >= 0);
-                if fits && matches!((kind, other), (Int32, UInt32 | UInt64) | (Int64, UInt64)) {
-                    other
-                } else {
-                    kind
-                }
-            };
-            (
-                promote_constant(left.0, l, r),
-                promote_constant(right.0, r, l),
-            )
-        };
         let kind = if shift {
             Some(l.unary_promoted())
         } else {
@@ -2691,7 +2687,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// `x` (byte, sbyte, short, ushort, char) C# computes in `int` — or in
     /// `y`'s wider type — and casts back, `x = (byte)(x + y)`; Udon has no
     /// operators on the small types, so this is also the only way to
-    /// compute it. Anything else computes in `x`'s own type.
+    /// compute it. The checker supplies the operand types for explicit
+    /// compound assignments, including constant-expression conversions.
     #[allow(clippy::too_many_arguments)]
     fn compound_result(
         &mut self,
@@ -2704,32 +2701,28 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Option<DataId> {
         let target = current.1.clone();
         let system = self.type_system();
-        let computed = match (system.numeric_kind(&target), system.numeric_kind(value.1)) {
-            (Some(l), Some(r)) => {
-                use men_sharp_semantics::types::conversions::NumericKind::*;
-                let fits = matches!(self.program.data[value.0.0].init, HeapInit::Int32(v) if v >= 0)
-                    || matches!(self.program.data[value.0.0].init, HeapInit::Int64(v) if v >= 0);
-                let r = if fits && matches!((r, l), (Int32, UInt32 | UInt64) | (Int64, UInt64)) {
-                    l
-                } else {
-                    r
-                };
-
-                let kind = if matches!(
-                    operator,
-                    BinaryOperator::LeftShift
-                        | BinaryOperator::RightShift
-                        | BinaryOperator::UnsignedRightShift
-                ) {
-                    Some(l.unary_promoted())
-                } else {
-                    l.binary_promoted(r)
-                };
-                kind.map(|k| self.corlib_type(k.corlib_name()))
-                    .unwrap_or_else(|| target.clone())
-            }
-            _ => target.clone(),
-        };
+        let computed =
+            if let Some((left, _)) = node.and_then(|id| self.bodies.numeric_promotions.get(&id)) {
+                left.clone()
+            } else {
+                match (system.numeric_kind(&target), system.numeric_kind(value.1)) {
+                    (Some(l), Some(r)) => {
+                        let kind = if matches!(
+                            operator,
+                            BinaryOperator::LeftShift
+                                | BinaryOperator::RightShift
+                                | BinaryOperator::UnsignedRightShift
+                        ) {
+                            Some(l.unary_promoted())
+                        } else {
+                            l.binary_promoted(r)
+                        };
+                        kind.map(|k| self.corlib_type(k.corlib_name()))
+                            .unwrap_or_else(|| target.clone())
+                    }
+                    _ => target.clone(),
+                }
+            };
         let result = self.emit_binary_operator(
             ctx,
             operator,

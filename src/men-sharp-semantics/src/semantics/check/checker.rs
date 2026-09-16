@@ -145,7 +145,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         self.local_order += 1;
         let order = self.local_order;
         if let Some(scope) = self.locals.last_mut() {
-            scope.locals.insert(name, LocalVariable { ty, order });
+            scope.locals.insert(
+                name,
+                LocalVariable {
+                    ty,
+                    order,
+                    integer_constant: None,
+                },
+            );
         }
     }
 
@@ -155,6 +162,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         self.local_order += 1;
         LocalVariable {
             ty,
+            integer_constant: None,
             order: self.local_order,
         }
     }
@@ -289,6 +297,163 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             let hint = self.cast_hint(from, to, &span);
             self.error_with_hint(kind, span, hint);
         }
+    }
+
+    /// Integral constant expressions used by operator overload resolution.
+    /// Keep values only for const locals, never for ordinary variables whose
+    /// initializer happens to be a literal.
+    pub(super) fn integer_constant(&self, expression: &Expression<'ast, 'ast>) -> Option<i128> {
+        self.integer_constant_inner(expression, 64)
+    }
+
+    fn integer_constant_inner(
+        &self,
+        expression: &Expression<'ast, 'ast>,
+        depth: usize,
+    ) -> Option<i128> {
+        use crate::types::conversions::NumericKind::*;
+        if depth == 0 {
+            return None;
+        }
+        let Some(ty) = self.expression_types.get(&EntityID::from(expression)) else {
+            return super::exhaustive::integer_literal_value(expression).map(i128::from);
+        };
+        let kind = self.system().numeric_kind(ty)?;
+        if !kind.is_integral() {
+            return None;
+        }
+        let value = match expression {
+            Expression::Primary(primary)
+                if self
+                    .targets
+                    .get(
+                        &primary
+                            .chain
+                            .last()
+                            .map(EntityID::from)
+                            .unwrap_or_else(|| EntityID::from(&primary.left)),
+                    )
+                    .is_some_and(|t| matches!(t, super::ResolvedTarget::Member(_))) =>
+            {
+                let node = primary
+                    .chain
+                    .last()
+                    .map(EntityID::from)
+                    .unwrap_or_else(|| EntityID::from(&primary.left));
+                let super::ResolvedTarget::Member(member) = self.targets.get(&node)? else {
+                    return None;
+                };
+                match &member.origin {
+                    crate::types::lookup::MemberOrigin::External { member, .. } => {
+                        match member.constant.as_ref()? {
+                            crate::ExternalConstant::Int(v) => i128::from(*v),
+                            crate::ExternalConstant::UInt(v) => i128::from(*v),
+                            _ => return None,
+                        }
+                    }
+                    crate::types::lookup::MemberOrigin::Source(id) => {
+                        let symbol = self.resolver.declarations.table.symbol(*id);
+                        let value = symbol.declarations.iter().find_map(|site| {
+                            if let crate::symbol::SyntaxRef::Field { field, declarator } =
+                                site.syntax
+                                && field
+                                    .modifiers
+                                    .iter()
+                                    .any(|m| m.value == men_sharp_parser::ast::Modifier::Const)
+                                && let Some(men_sharp_parser::ast::InitializerValue::Expression(
+                                    value,
+                                )) = &declarator.initializer
+                            {
+                                return Some(value);
+                            }
+                            None
+                        })?;
+                        self.integer_constant_inner(value, depth - 1)?
+                    }
+                    _ => return None,
+                }
+            }
+            Expression::Primary(primary) if primary.chain.is_empty() => match &primary.left {
+                PrimaryLeft::Parenthesized { expression, .. } => {
+                    self.integer_constant_inner(expression, depth - 1)?
+                }
+                PrimaryLeft::Identifier { name, .. } => {
+                    self.locals
+                        .iter()
+                        .rev()
+                        .find_map(|scope| scope.locals.get(name.value))?
+                        .integer_constant?
+                }
+                _ => i128::from(super::exhaustive::integer_literal_value(expression)?),
+            },
+            Expression::Cast(cast) => {
+                self.integer_constant_inner(cast.value.as_ref().ok()?, depth - 1)?
+            }
+            Expression::Unary(unary) => {
+                let value = self.integer_constant_inner(unary.operand.as_ref().ok()?, depth - 1)?;
+                match unary.operator.value {
+                    UnaryOperator::Plus => value,
+                    UnaryOperator::Minus => value.checked_neg()?,
+                    UnaryOperator::BitwiseNot => !value,
+                    _ => return None,
+                }
+            }
+            Expression::Binary(binary) => {
+                let left = self.integer_constant_inner(&binary.left, depth - 1)?;
+                let right = self.integer_constant_inner(binary.right.as_ref().ok()?, depth - 1)?;
+                match binary.operator.value {
+                    BinaryOperator::Add => left.checked_add(right)?,
+                    BinaryOperator::Subtract => left.checked_sub(right)?,
+                    BinaryOperator::Multiply => left.checked_mul(right)?,
+                    BinaryOperator::Divide => left.checked_div(right)?,
+                    BinaryOperator::Modulo => left.checked_rem(right)?,
+                    BinaryOperator::BitwiseAnd => left & right,
+                    BinaryOperator::BitwiseOr => left | right,
+                    BinaryOperator::BitwiseXor => left ^ right,
+                    BinaryOperator::LeftShift
+                    | BinaryOperator::RightShift
+                    | BinaryOperator::UnsignedRightShift => {
+                        let bits = if matches!(kind, Int64 | UInt64) {
+                            64
+                        } else {
+                            32
+                        };
+                        let count = (right as u32) & (bits - 1);
+                        let shifted = match binary.operator.value {
+                            BinaryOperator::LeftShift => left << count,
+                            BinaryOperator::UnsignedRightShift if bits == 32 => {
+                                i128::from((left as u32) >> count)
+                            }
+                            BinaryOperator::UnsignedRightShift => {
+                                i128::from((left as u64) >> count)
+                            }
+                            _ => left >> count,
+                        };
+                        match kind {
+                            Int32 => i128::from(shifted as i32),
+                            UInt32 => i128::from(shifted as u32),
+                            Int64 => i128::from(shifted as i64),
+                            UInt64 => i128::from(shifted as u64),
+                            _ => return None,
+                        }
+                    }
+                    _ => return None,
+                }
+            }
+            _ => return None,
+        };
+        let fits = match kind {
+            SByte => i8::try_from(value).is_ok(),
+            Byte => u8::try_from(value).is_ok(),
+            Int16 => i16::try_from(value).is_ok(),
+            UInt16 | Char => u16::try_from(value).is_ok(),
+            Int32 => i32::try_from(value).is_ok(),
+            UInt32 => u32::try_from(value).is_ok(),
+            Int64 => i64::try_from(value).is_ok(),
+            UInt64 => u64::try_from(value).is_ok(),
+            _ => false,
+        };
+        fits.then_some(value)
     }
 
     /// The constant-expression allowance, without evaluating: an integer

@@ -115,8 +115,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             ) && matches!(
                                 pair,
                                 (Some(Int32), Some(UInt32 | UInt64)) | (Some(Int64), Some(UInt64))
-                            ) && super::exhaustive::integer_literal_value(value)
-                                .is_some_and(|v| v >= 0)
+                            ) && self.integer_constant(value).is_some_and(|v| v >= 0)
                             {
                                 target.clone()
                             } else {
@@ -148,7 +147,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             let constant_fits = if system.numeric_kind(&value_type)
                                 == Some(crate::types::conversions::NumericKind::Int32)
                             {
-                                super::exhaustive::integer_literal_value(value).is_some_and(|v| {
+                                self.integer_constant(value).is_some_and(|v| {
                                     use crate::types::conversions::NumericKind::*;
                                     match system.numeric_kind(&target) {
                                         Some(SByte) => i8::try_from(v).is_ok(),
@@ -266,8 +265,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     use crate::types::conversions::NumericKind::*;
                     let system = self.system();
                     let pair = (system.numeric_kind(&ty), system.numeric_kind(other));
-                    let fits = super::exhaustive::integer_literal_value(expression)
-                        .is_some_and(|v| v >= 0);
+                    let fits = self.integer_constant(expression).is_some_and(|v| v >= 0);
                     if fits
                         && matches!(
                             pair,

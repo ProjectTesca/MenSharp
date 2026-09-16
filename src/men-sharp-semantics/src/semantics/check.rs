@@ -74,6 +74,8 @@ use crate::types::{FunctionSignature, Type};
 pub struct BodyCheck {
     /// A type for every checked expression node, keyed by node identity.
     pub expression_types: HashMap<EntityID, Type>,
+    /// Operand types selected for built-in numeric operators.
+    pub numeric_promotions: HashMap<EntityID, (Type, Type)>,
     /// Expression-level type references (casts, `new T`, locals, ...), resolved.
     pub resolved_types: HashMap<EntityID, Type>,
     /// What each name/call/member node *bound to* — the code generator's map
@@ -136,6 +138,7 @@ pub struct LocalFunctionSignature {
 impl BodyCheck {
     pub fn merge(&mut self, other: BodyCheck) {
         self.expression_types.extend(other.expression_types);
+        self.numeric_promotions.extend(other.numeric_promotions);
         self.resolved_types.extend(other.resolved_types);
         self.targets.extend(other.targets);
         self.attribute_types.extend(other.attribute_types);
@@ -345,6 +348,7 @@ pub fn check_file(
         local_order: 0,
         local_function_order: HashMap::default(),
         expression_types: HashMap::default(),
+        numeric_promotions: HashMap::default(),
         attribute_types: HashMap::default(),
         targets: HashMap::default(),
         pattern_inputs: HashMap::default(),
@@ -391,6 +395,7 @@ pub fn check_file(
 
     BodyCheck {
         expression_types: checker.expression_types,
+        numeric_promotions: checker.numeric_promotions,
         resolved_types: checker.resolver.out.type_of,
         targets: checker.targets,
         attribute_types: checker.attribute_types,
@@ -538,6 +543,7 @@ struct Scope<'ast> {
 /// what a local function declared above it may not reach (CS0841).
 struct LocalVariable {
     ty: Type,
+    integer_constant: Option<i128>,
     order: usize,
 }
 
@@ -591,6 +597,7 @@ struct Checker<'a, 'ast> {
     /// themselves are visible throughout their block, above and below.
     local_function_order: HashMap<EntityID, usize>,
     expression_types: HashMap<EntityID, Type>,
+    numeric_promotions: HashMap<EntityID, (Type, Type)>,
     targets: HashMap<EntityID, ResolvedTarget>,
     /// See [`BodyCheck::attribute_types`].
     attribute_types: HashMap<EntityID, Type>,

@@ -14313,3 +14313,47 @@ fn unsigned_compound_assignment_accepts_constant_operands() {
         return;
     };
 }
+
+#[test]
+fn constant_expressions_keep_the_selected_unsigned_operator() {
+    // Constant conversions also apply to const fields, locals and expressions.
+    // Code generation must retain the operator selected by the checker rather
+    // than infer it again from the constant's original Int32 heap type.
+    let Some(emulator) = run(
+        r#"
+        namespace Game { public class Program {
+            const int FieldDelta = 2;
+            public static ulong wrapped;
+            public static int comparison;
+            public static void Main() {
+                const int two = 2;
+                ulong a = ulong.MaxValue;
+                a += FieldDelta;
+                wrapped = a + (1 + 1);
+                if (a == (two - 1)) comparison = 1;
+            }
+        } }
+    "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert!(matches!(
+        emulator.value_of("wrapped"),
+        Some(Value::UInt64(3))
+    ));
+    assert_eq!(int_of(&emulator, "comparison"), 1);
+    let Some(_) = build(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game { public class Program {
+            public static void Main() {
+                const int delta = 2;
+                byte b = 1; b += delta; b += (1 << 32);
+            }
+        } }
+    "#,
+    )]) else {
+        return;
+    };
+}
