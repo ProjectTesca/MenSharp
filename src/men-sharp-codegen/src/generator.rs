@@ -3182,6 +3182,26 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     );
                     return Some(slot);
                 }
+                // Metadata stores all small integer constants as Int/UInt,
+                // but their boxed heap values must retain the declared type.
+                let integer = match constant {
+                    ExternalConstant::Int(v) => Some(*v),
+                    ExternalConstant::UInt(v) => i64::try_from(*v).ok(),
+                    _ => None,
+                };
+                if let Some(value) = integer {
+                    let name = self.heap_type(ty);
+                    let init = match name.as_str() {
+                        "SystemSByte" => Some(HeapInit::SByte(value as i8)),
+                        "SystemByte" => Some(HeapInit::Byte(value as u8)),
+                        "SystemInt16" => Some(HeapInit::Int16(value as i16)),
+                        "SystemUInt16" => Some(HeapInit::UInt16(value as u16)),
+                        _ => None,
+                    };
+                    if let Some(init) = init {
+                        return Some(self.constant(&name, &value.to_string(), init));
+                    }
+                }
                 let slot = match constant {
                     ExternalConstant::Int(value) => match self.heap_type(ty).as_str() {
                         "SystemInt64" => self.constant(

@@ -68,6 +68,37 @@ public class MenSharpIntegrationTests
         "VerifyWake",
     };
 
+    [TestCase("Single", "NaN")]
+    [TestCase("Single", "1.25")]
+    [TestCase("Single", "Infinity")]
+    [TestCase("Single", "-Infinity")]
+    [TestCase("Double", "NaN")]
+    [TestCase("Double", "1.25")]
+    [TestCase("Double", "Infinity")]
+    [TestCase("Double", "-Infinity")]
+    public void FloatingMetadataPreservesSpecialValuesAndBoxedTypes(string kind, string text)
+    {
+        // Verify the metadata spellings emitted by the compiler on Unity Mono.
+        // Assert boxed types as well as values: Single slots must receive floats.
+        var decode = typeof(MenSharpProgramAsset).GetMethod("Decode",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.IsNotNull(decode);
+        object actual = decode.Invoke(null, new object[] {
+            new MenSharpHeapEntry { kind = kind, value = text }
+        });
+
+        if (kind == "Single")
+        {
+            Assert.IsInstanceOf<float>(actual);
+            Assert.AreEqual(float.Parse(text, System.Globalization.CultureInfo.InvariantCulture), actual);
+        }
+        else
+        {
+            Assert.IsInstanceOf<double>(actual);
+            Assert.AreEqual(double.Parse(text, System.Globalization.CultureInfo.InvariantCulture), actual);
+        }
+    }
+
     [Test]
     public void CompilerCreatesEveryManualFixtureAsAnSdkProgramAsset()
     {
@@ -302,6 +333,37 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(3, smoke.GetProgramVariable("copyIn"));
 
         // small integral types: compound ops compute in int, cast back, wrap
+        smoke.RunProgram("IntegerPromotion");
+        var promoted = (object[])smoke.GetProgramVariable("promotedIntegers");
+        Assert.AreEqual(25, promoted.Length);
+        for (int i = 0; i < promoted.Length; i++)
+        {
+            Assert.IsInstanceOf<int>(promoted[i], "promotion index " + i);
+            int expected = i < 5 ? 13 : i < 10 ? -13 : i < 15 ? -14 : i < 20 ? 0 : i == 24 ? 26 : 106496;
+            Assert.AreEqual(expected, promoted[i], "promotion index " + i);
+        }
+        Assert.AreEqual(true, smoke.GetProgramVariable("signedUnsignedComparison"));
+        Assert.AreEqual(13.5, smoke.GetProgramVariable("charFloating"));
+
+        smoke.RunProgram("WideIntegers");
+        CollectionAssert.AreEqual(new object[] { 0u, -2L, 5UL, 0UL },
+            (object[])smoke.GetProgramVariable("wideIntegerResults"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("remainderZeroCaught"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("remainderOverflowCaught"));
+
+        smoke.RunProgram("SmallIntegerConstants");
+        var limits = (object[])smoke.GetProgramVariable("smallLimits");
+        var limitsAfter = (object[])smoke.GetProgramVariable("smallLimitsAfter");
+        object[] expectedLimits = { sbyte.MaxValue, byte.MaxValue, short.MaxValue, ushort.MaxValue };
+        object[] expectedAfter = { sbyte.MinValue, (byte)0, short.MinValue, (ushort)0 };
+        for (int i = 0; i < limits.Length; i++)
+        {
+            Assert.AreEqual(expectedLimits[i].GetType(), limits[i].GetType());
+            Assert.AreEqual(expectedLimits[i], limits[i]);
+            Assert.AreEqual(expectedAfter[i].GetType(), limitsAfter[i].GetType());
+            Assert.AreEqual(expectedAfter[i], limitsAfter[i]);
+        }
+
         smoke.RunProgram("SmallIntegers");
         Assert.AreEqual(3, smoke.GetProgramVariable("smallByte"));
         Assert.AreEqual(1, smoke.GetProgramVariable("smallByteWrapped"));

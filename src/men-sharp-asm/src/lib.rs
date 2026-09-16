@@ -23,6 +23,39 @@ pub use world::World;
 mod tests {
     use super::*;
 
+    #[test]
+    fn floating_metadata_uses_dotnet_special_value_spellings() {
+        // Unity Mono parses Infinity/-Infinity, not Rust's inf/-inf. Keep
+        // finite formatting (including signed zero) and NaN unchanged.
+        let mut asm = Asm::new();
+        for (name, value, expected) in [
+            ("positive", f64::INFINITY, "Infinity"),
+            ("negative", f64::NEG_INFINITY, "-Infinity"),
+            ("nan", f64::NAN, "NaN"),
+            ("finite", 1.25, "1.25"),
+            ("zero", 0.0, "0.0"),
+            ("negative_zero", -0.0, "-0.0"),
+        ] {
+            asm.slot(
+                &format!("single_{name}"),
+                "SystemSingle",
+                HeapInit::Single(value as f32),
+            );
+            asm.slot(
+                &format!("double_{name}"),
+                "SystemDouble",
+                HeapInit::Double(value),
+            );
+            let meta = asm.program.to_meta_json().unwrap();
+            for (prefix, kind) in [("single", "Single"), ("double", "Double")] {
+                let entry = format!(
+                    "\"name\": \"{prefix}_{name}\", \"kind\": \"{kind}\", \"value\": \"{expected}\""
+                );
+                assert!(meta.contains(&entry), "{meta}");
+            }
+        }
+    }
+
     /// Small builder so tests read like assembly listings.
     struct Asm {
         program: Program,

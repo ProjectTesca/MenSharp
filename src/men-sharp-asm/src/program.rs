@@ -50,6 +50,10 @@ pub type UdonType = String;
 pub enum HeapInit {
     Null,
     Boolean(bool),
+    SByte(i8),
+    Byte(u8),
+    Int16(i16),
+    UInt16(u16),
     Int32(i32),
     Int64(i64),
     UInt32(u32),
@@ -632,6 +636,18 @@ impl Program {
                 HeapInit::Boolean(v) => {
                     let _ = write!(out, "Boolean\", \"value\": \"{v}\"");
                 }
+                HeapInit::SByte(v) => {
+                    let _ = write!(out, "SByte\", \"value\": \"{v}\"");
+                }
+                HeapInit::Byte(v) => {
+                    let _ = write!(out, "Byte\", \"value\": \"{v}\"");
+                }
+                HeapInit::Int16(v) => {
+                    let _ = write!(out, "Int16\", \"value\": \"{v}\"");
+                }
+                HeapInit::UInt16(v) => {
+                    let _ = write!(out, "UInt16\", \"value\": \"{v}\"");
+                }
                 HeapInit::Int32(v) => {
                     let _ = write!(out, "Int32\", \"value\": \"{v}\"");
                 }
@@ -645,10 +661,32 @@ impl Program {
                     let _ = write!(out, "UInt64\", \"value\": \"{v}\"");
                 }
                 HeapInit::Single(v) => {
-                    let _ = write!(out, "Single\", \"value\": \"{v:?}\"");
+                    // Metadata is read by Unity Mono using invariant-culture Parse.
+                    // Rust Debug spells infinity as inf, which that parser rejects.
+                    if v.is_infinite() {
+                        let text = if v.is_sign_negative() {
+                            "-Infinity"
+                        } else {
+                            "Infinity"
+                        };
+                        let _ = write!(out, "Single\", \"value\": \"{text}\"");
+                    } else {
+                        let _ = write!(out, "Single\", \"value\": \"{v:?}\"");
+                    }
                 }
                 HeapInit::Double(v) => {
-                    let _ = write!(out, "Double\", \"value\": \"{v:?}\"");
+                    // Metadata is read by Unity Mono using invariant-culture Parse.
+                    // Rust Debug spells infinity as inf, which that parser rejects.
+                    if v.is_infinite() {
+                        let text = if v.is_sign_negative() {
+                            "-Infinity"
+                        } else {
+                            "Infinity"
+                        };
+                        let _ = write!(out, "Double\", \"value\": \"{text}\"");
+                    } else {
+                        let _ = write!(out, "Double\", \"value\": \"{v:?}\"");
+                    }
                 }
                 HeapInit::Decimal(v) => {
                     out.push_str("Decimal\", \"value\": ");

@@ -529,6 +529,10 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
     {
         switch (entry.kind)
         {
+            case "SByte": return sbyte.Parse(entry.value);
+            case "Byte": return byte.Parse(entry.value);
+            case "Int16": return short.Parse(entry.value);
+            case "UInt16": return ushort.Parse(entry.value);
             case "Int32": return int.Parse(entry.value);
             case "UInt32": return uint.Parse(entry.value);
             case "UInt64": return ulong.Parse(entry.value);

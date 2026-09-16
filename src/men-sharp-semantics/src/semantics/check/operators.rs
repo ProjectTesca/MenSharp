@@ -49,14 +49,19 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             UnaryOperator::Plus | UnaryOperator::Minus => {
                 if let Some(kind) = system.numeric_kind(&operand) {
-                    // small operands promote to int
-                    let promoted = match kind {
-                        NumericKind::SByte
-                        | NumericKind::Byte
-                        | NumericKind::Int16
-                        | NumericKind::UInt16
-                        | NumericKind::Char => NumericKind::Int32,
-                        other => other,
+                    let promoted = match (operator, kind) {
+                        (UnaryOperator::Minus, NumericKind::UInt32) => NumericKind::Int64,
+                        (UnaryOperator::Minus, NumericKind::UInt64) => {
+                            self.error(
+                                SemanticErrorKind::InvalidOperator {
+                                    left: self.describe(&operand),
+                                    right: None,
+                                },
+                                span,
+                            );
+                            return Type::Error;
+                        }
+                        _ => kind.unary_promoted(),
                     };
                     self.corlib(promoted.corlib_name())
                 } else if let Some(result) =
@@ -79,7 +84,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     .unwrap_or(false)
                     || system.is_enum_type(&operand)
                 {
-                    operand
+                    if let Some(kind) = system.numeric_kind(&operand) {
+                        self.corlib(kind.unary_promoted().corlib_name())
+                    } else {
+                        operand
+                    }
                 } else if let Some(result) =
                     self.user_defined_unary(operator, &operand, &span, node)
                 {
@@ -219,6 +228,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 };
             }
             Equal | NotEqual => {
+                if let (Some(l), Some(r)) =
+                    (system.numeric_kind(&left), system.numeric_kind(&right))
+                {
+                    return self.numeric_binary(operator, l, r, span, node);
+                }
+
                 let comparable = matches!(left, Type::Null)
                     || matches!(right, Type::Null)
                     || (system.numeric_kind(&left).is_some()
@@ -268,7 +283,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         if let (Some(left_kind), Some(right_kind)) =
             (system.numeric_kind(&left), system.numeric_kind(&right))
         {
-            return self.numeric_binary(operator, left_kind, right_kind, span);
+            return self.numeric_binary(operator, left_kind, right_kind, span, node);
         }
 
         // enums
@@ -327,55 +342,59 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         left: NumericKind,
         right: NumericKind,
         span: Range<usize>,
+        node: Option<EntityID>,
     ) -> Type {
         use BinaryOperator::*;
         use NumericKind::*;
 
-        let promoted = if left == Decimal || right == Decimal {
-            Decimal
-        } else if left == Double || right == Double {
-            Double
-        } else if left == Single || right == Single {
-            Single
-        } else if left == UInt64 || right == UInt64 {
-            UInt64
-        } else if left == Int64 || right == Int64 {
-            Int64
-        } else if left == UInt32 || right == UInt32 {
-            // uint with a signed operand goes to long
-            let signed = |kind: NumericKind| matches!(kind, SByte | Int16 | Int32);
-            if signed(left) || signed(right) {
-                Int64
-            } else {
-                UInt32
-            }
+        let shift = matches!(operator, LeftShift | RightShift | UnsignedRightShift);
+        let promoted = if shift {
+            (left.is_integral() && right.unary_promoted() == Int32).then_some(left.unary_promoted())
         } else {
-            Int32
+            left.binary_promoted(right)
         };
-
-        match operator {
-            LessThan | GreaterThan | LessThanEqual | GreaterThanEqual | Equal | NotEqual => {
-                self.corlib("Boolean")
-            }
-            LeftShift | RightShift | UnsignedRightShift => {
-                // the left operand alone decides, promoted to at least int
-                let shifted = match left {
-                    SByte | Byte | Int16 | UInt16 | Char => Int32,
-                    other => other,
-                };
-                self.corlib(shifted.corlib_name())
-            }
-            BitwiseAnd | BitwiseOr | BitwiseXor
-                if matches!(promoted, Single | Double | Decimal) =>
-            {
-                let kind = SemanticErrorKind::InvalidOperator {
-                    left: promoted.corlib_name().to_string(),
-                    right: Some(promoted.corlib_name().to_string()),
-                };
-                self.error(kind, span);
-                Type::Error
-            }
-            _ => self.corlib(promoted.corlib_name()),
+        let valid_operator = matches!(
+            operator,
+            Add | Subtract
+                | Multiply
+                | Divide
+                | Modulo
+                | LessThan
+                | GreaterThan
+                | LessThanEqual
+                | GreaterThanEqual
+                | Equal
+                | NotEqual
+        ) || (matches!(operator, BitwiseAnd | BitwiseOr | BitwiseXor)
+            && left.is_integral()
+            && right.is_integral())
+            || shift;
+        let Some(promoted) = promoted.filter(|_| valid_operator) else {
+            self.error(
+                SemanticErrorKind::InvalidOperator {
+                    left: left.corlib_name().to_string(),
+                    right: Some(right.corlib_name().to_string()),
+                },
+                span,
+            );
+            return Type::Error;
+        };
+        if let Some(node) = node {
+            let left = self.corlib(promoted.corlib_name());
+            let right = if shift {
+                self.corlib("Int32")
+            } else {
+                left.clone()
+            };
+            self.numeric_promotions.insert(node, (left, right));
+        }
+        if matches!(
+            operator,
+            LessThan | GreaterThan | LessThanEqual | GreaterThanEqual | Equal | NotEqual
+        ) {
+            self.corlib("Boolean")
+        } else {
+            self.corlib(promoted.corlib_name())
         }
     }
 

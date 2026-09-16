@@ -353,7 +353,22 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 (declared, _) => declared.clone(),
             };
 
+            let constant = if declaration.const_keyword.is_some() {
+                match &declarator.initializer {
+                    Some(InitializerValue::Expression(value)) => self.integer_constant(value),
+                    _ => None,
+                }
+            } else {
+                None
+            };
             self.declare_local(declarator.name.value, ty);
+            if let Some(local) = self
+                .locals
+                .last_mut()
+                .and_then(|s| s.locals.get_mut(declarator.name.value))
+            {
+                local.integer_constant = constant;
+            }
         }
     }
 

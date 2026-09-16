@@ -1106,6 +1106,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             {
                 self.wrap_int32_to_small(ctx, source, &to_name, span)
             }
+            (Some(from_name), Some(to_name))
+                if from_name == "SystemChar"
+                    && matches!(
+                        to_name.as_str(),
+                        "SystemSingle" | "SystemDouble" | "SystemDecimal"
+                    ) =>
+            {
+                let int = self.corlib_type("Int32");
+                let value = self.convert(ctx, source, from, &int, span.clone());
+                self.convert(ctx, value, &int, to, span)
+            }
             (Some(from_name), Some(to_name)) if from_name != to_name => {
                 let method = match to_name.as_str() {
                     "SystemInt32" => Some("ToInt32"),
@@ -1726,9 +1737,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Some(result) = self.user_operator_call(ctx, node, &[left, right], span.clone()) {
             return result;
         }
-        if matches!(operator, Divide | Modulo) {
-            self.check_divisor(ctx, right.0, right.1, span.clone());
-        }
 
         let system_is = |ty: &Type, name: &str| {
             self.extern_type_name(ty)
@@ -1772,10 +1780,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // binary numeric promotion (§12.4.7): `long == int`, `float * int`
         // — both operands are brought to the wider type first, as an extern
         // takes two slots of exactly its own type
-        let (left, right) =
-            self.promote_numeric_operands(ctx, operator, left, right, result_type, span.clone());
+        let selected = node
+            .and_then(|id| self.bodies.numeric_promotions.get(&id))
+            .cloned();
+        let (left, right) = if let Some((left_type, right_type)) = selected {
+            (
+                (
+                    self.convert(ctx, left.0, left.1, &left_type, span.clone()),
+                    left_type,
+                ),
+                (
+                    self.convert(ctx, right.0, right.1, &right_type, span.clone()),
+                    right_type,
+                ),
+            )
+        } else {
+            self.promote_numeric_operands(ctx, operator, left, right, result_type, span.clone())
+        };
         let left = (left.0, &left.1);
         let right = (right.0, &right.1);
+
+        if matches!(operator, Divide | Modulo) {
+            self.check_divisor(ctx, right.0, right.1, span.clone());
+        }
+        if operator == Modulo
+            && matches!(
+                self.extern_type_name(left.1).as_deref(),
+                Some("SystemUInt32" | "SystemInt64" | "SystemUInt64")
+            )
+        {
+            return self.integer_remainder(ctx, left, right.0, span);
+        }
 
         let name = match operator {
             Add => "op_Addition",
@@ -2000,6 +2035,68 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// Udon lacks remainder externs for uint, long and ulong. The quotient
+    /// is truncated, so a - (a / b) * b gives the same remainder without
+    /// overflowing the product. Handle long.MinValue / -1 before dividing.
+    fn integer_remainder(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        left: (DataId, &Type),
+        right: DataId,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        let name = self.extern_type_name(left.1)?;
+        let out = self.temp(&name);
+        if name == "SystemInt64" {
+            let ordinary = self.fresh_label("remainder_divide");
+            let minus_one = self.constant("SystemInt64", "-1", HeapInit::Int64(-1));
+            let is_minus_one = self.temp("SystemBoolean");
+            self.call_extern(
+                ctx,
+                "SystemInt64.__op_Equality__SystemInt64_SystemInt64__SystemBoolean",
+                &[right, minus_one, is_minus_one],
+                span.clone(),
+            );
+            self.program.code.push(Op::Push(is_minus_one));
+            self.program
+                .code
+                .push(Op::JumpIfFalse(Target::Label(ordinary)));
+            let minimum = self.constant(
+                "SystemInt64",
+                &i64::MIN.to_string(),
+                HeapInit::Int64(i64::MIN),
+            );
+            let is_minimum = self.temp("SystemBoolean");
+            self.call_extern(
+                ctx,
+                "SystemInt64.__op_Equality__SystemInt64_SystemInt64__SystemBoolean",
+                &[left.0, minimum, is_minimum],
+                span.clone(),
+            );
+            self.program.code.push(Op::Push(is_minimum));
+            self.program
+                .code
+                .push(Op::JumpIfFalse(Target::Label(ordinary)));
+            self.throw_new(ctx, &["System", "OverflowException"], None, span.clone());
+            self.program.code.push(Op::Label(ordinary));
+        }
+        let quotient = self.temp(&name);
+        let product = self.temp(&name);
+        for (op, args) in [
+            ("op_Division", [left.0, right, quotient]),
+            ("op_Multiplication", [quotient, right, product]),
+            ("op_Subtraction", [left.0, product, out]),
+        ] {
+            self.call_extern(
+                ctx,
+                &format!("{name}.__{op}__{name}_{name}__{name}"),
+                &args,
+                span.clone(),
+            );
+        }
+        Some(out)
+    }
+
     /// The rank of a numeric type in binary promotion; `None` for anything
     /// that is not a primitive number.
     fn numeric_rank(&self, ty: &Type) -> Option<u8> {
@@ -2018,10 +2115,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         })
     }
 
-    /// Both operands of a numeric operator converted to the promoted type:
-    /// the result type for arithmetic, the wider operand for comparisons.
-    /// A shift keeps its `int` count. Operands that are not both numeric
-    /// come back as they were.
+    /// Promotion for synthesized numeric operations such as ++. Explicit
+    /// expressions use the operand types recorded by the checker above.
+    /// A shift keeps its `int` count; non-numeric operands stay as they were.
     fn promote_numeric_operands(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -2032,40 +2128,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> ((DataId, Type), (DataId, Type)) {
         use BinaryOperator::*;
-        let as_is = ((left.0, left.1.clone()), (right.0, right.1.clone()));
-        let (Some(left_rank), Some(right_rank)) =
-            (self.numeric_rank(left.1), self.numeric_rank(right.1))
-        else {
-            return as_is;
+        let system = self.type_system();
+        let (Some(l), Some(r)) = (system.numeric_kind(left.1), system.numeric_kind(right.1)) else {
+            return ((left.0, left.1.clone()), (right.0, right.1.clone()));
         };
-        if matches!(operator, LeftShift | RightShift) {
-            return as_is;
-        }
-        // one type on both sides: its own operator applies (Udon has
-        // `char == char`, and no promotion is needed)
-        if self.extern_type_name(left.1) == self.extern_type_name(right.1) {
-            return as_is;
-        }
-        let comparison = matches!(
-            operator,
-            Equal | NotEqual | LessThan | GreaterThan | LessThanEqual | GreaterThanEqual
-        );
-        let target = if !comparison && self.numeric_rank(result_type).is_some() {
-            result_type.clone()
-        } else if left_rank >= right_rank {
-            left.1.clone()
+        let shift = matches!(operator, LeftShift | RightShift | UnsignedRightShift);
+        let kind = if shift {
+            Some(l.unary_promoted())
         } else {
-            right.1.clone()
+            l.binary_promoted(r)
         };
-        // a small type (byte, short, char) computes as an int
-        let target = if self.numeric_rank(&target) == Some(0) {
+        let target = kind
+            .map(|k| self.corlib_type(k.corlib_name()))
+            .unwrap_or_else(|| result_type.clone());
+        let right_target = if shift {
             self.corlib_type("Int32")
         } else {
-            target
+            target.clone()
         };
         let promoted_left = self.convert(ctx, left.0, left.1, &target, span.clone());
-        let promoted_right = self.convert(ctx, right.0, right.1, &target, span);
-        ((promoted_left, target.clone()), (promoted_right, target))
+        let promoted_right = self.convert(ctx, right.0, right.1, &right_target, span);
+        ((promoted_left, target), (promoted_right, right_target))
     }
 
     /// A value as a `string`, via the type's own `ToString` extern.
@@ -2254,6 +2337,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             return result;
         }
+        let operand = if self.numeric_rank(operand_type).is_some() {
+            self.convert(ctx, operand, operand_type, result_type, span.clone())
+        } else {
+            operand
+        };
         match operator {
             UnaryOperator::Not => {
                 let out = self.temp("SystemBoolean");
@@ -2320,6 +2408,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     "SystemUInt32" => {
                         self.constant("SystemUInt32", "4294967295", HeapInit::UInt32(u32::MAX))
                     }
+                    "SystemUInt64" => self.constant(
+                        "SystemUInt64",
+                        &u64::MAX.to_string(),
+                        HeapInit::UInt64(u64::MAX),
+                    ),
                     _ => {
                         self.error(
                             ctx,
@@ -2594,7 +2687,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// `x` (byte, sbyte, short, ushort, char) C# computes in `int` — or in
     /// `y`'s wider type — and casts back, `x = (byte)(x + y)`; Udon has no
     /// operators on the small types, so this is also the only way to
-    /// compute it. Anything else computes in `x`'s own type.
+    /// compute it. The checker supplies the operand types for explicit
+    /// compound assignments, including constant-expression conversions.
     #[allow(clippy::too_many_arguments)]
     fn compound_result(
         &mut self,
@@ -2606,14 +2700,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         node: Option<EntityID>,
     ) -> Option<DataId> {
         let target = current.1.clone();
-        let computed = if self.numeric_rank(&target) == Some(0) {
-            match self.numeric_rank(value.1) {
-                Some(rank) if rank > 1 => value.1.clone(),
-                _ => self.corlib_type("Int32"),
-            }
-        } else {
-            target.clone()
-        };
+        let system = self.type_system();
+        let computed =
+            if let Some((left, _)) = node.and_then(|id| self.bodies.numeric_promotions.get(&id)) {
+                left.clone()
+            } else {
+                match (system.numeric_kind(&target), system.numeric_kind(value.1)) {
+                    (Some(l), Some(r)) => {
+                        let kind = if matches!(
+                            operator,
+                            BinaryOperator::LeftShift
+                                | BinaryOperator::RightShift
+                                | BinaryOperator::UnsignedRightShift
+                        ) {
+                            Some(l.unary_promoted())
+                        } else {
+                            l.binary_promoted(r)
+                        };
+                        kind.map(|k| self.corlib_type(k.corlib_name()))
+                            .unwrap_or_else(|| target.clone())
+                    }
+                    _ => target.clone(),
+                }
+            };
         let result = self.emit_binary_operator(
             ctx,
             operator,

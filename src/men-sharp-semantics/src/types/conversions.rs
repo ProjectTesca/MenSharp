@@ -95,6 +95,49 @@ impl NumericKind {
         }
     }
 
+    /// Unary numeric promotion (§12.4.7.1), also used for shift operands.
+    pub fn unary_promoted(self) -> Self {
+        match self {
+            Self::SByte | Self::Byte | Self::Int16 | Self::UInt16 | Self::Char => Self::Int32,
+            other => other,
+        }
+    }
+
+    /// Binary numeric promotion (§12.4.7.2). `None` means that the built-in
+    /// operator has no common operand type (for example, long with ulong).
+    pub fn binary_promoted(self, other: Self) -> Option<Self> {
+        use NumericKind::*;
+        let pair = [self, other];
+        Some(if pair.contains(&Decimal) {
+            if pair.contains(&Single) || pair.contains(&Double) {
+                return None;
+            }
+            Decimal
+        } else if pair.contains(&Double) {
+            Double
+        } else if pair.contains(&Single) {
+            Single
+        } else if pair.contains(&UInt64) {
+            if pair
+                .iter()
+                .any(|k| matches!(k, SByte | Int16 | Int32 | Int64))
+            {
+                return None;
+            }
+            UInt64
+        } else if pair.contains(&Int64) {
+            Int64
+        } else if pair.contains(&UInt32) {
+            if pair.iter().any(|k| matches!(k, SByte | Int16 | Int32)) {
+                Int64
+            } else {
+                UInt32
+            }
+        } else {
+            Int32
+        })
+    }
+
     pub fn is_integral(&self) -> bool {
         !matches!(
             self,

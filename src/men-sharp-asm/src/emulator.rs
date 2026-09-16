@@ -303,6 +303,10 @@ impl Emulator {
                     _ => Value::Null,
                 },
                 HeapInit::Boolean(v) => Value::Boolean(*v),
+                HeapInit::SByte(v) => Value::Int32(i32::from(*v)),
+                HeapInit::Byte(v) => Value::Int32(i32::from(*v)),
+                HeapInit::Int16(v) => Value::Int32(i32::from(*v)),
+                HeapInit::UInt16(v) => Value::Int32(i32::from(*v)),
                 HeapInit::Int32(v) => Value::Int32(*v),
                 HeapInit::Int64(v) => Value::Int64(*v),
                 HeapInit::UInt32(v) => Value::UInt32(*v),
@@ -562,6 +566,12 @@ impl Emulator {
             "SystemInt32.__op_Modulus__SystemInt32_SystemInt32__SystemInt32"
             | "SystemInt32.__op_Remainder__SystemInt32_SystemInt32__SystemInt32" => {
                 binary_i32!(|a: i32, b: i32| Value::Int32(a.wrapping_rem(b)))
+            }
+            "SystemInt32.__op_LeftShift__SystemInt32_SystemInt32__SystemInt32" => {
+                binary_i32!(|a: i32, b: i32| Value::Int32(a.wrapping_shl(b as u32)))
+            }
+            "SystemInt32.__op_RightShift__SystemInt32_SystemInt32__SystemInt32" => {
+                binary_i32!(|a: i32, b: i32| Value::Int32(a.wrapping_shr(b as u32)))
             }
             "SystemInt32.__op_UnaryMinus__SystemInt32__SystemInt32" => {
                 let args = self.pop_arguments(2)?;
@@ -1250,10 +1260,12 @@ impl Emulator {
                 Ok(())
             }
             "SystemConvert.__ToInt64__SystemInt32__SystemInt64"
+            | "SystemConvert.__ToInt64__SystemUInt32__SystemInt64"
             | "SystemConvert.__ToInt64__SystemObject__SystemInt64" => {
                 let args = self.pop_arguments(2)?;
                 let value = match &self.heap[args[0]] {
                     Value::Int64(value) => *value,
+                    Value::UInt32(value) => i64::from(*value),
                     other => i64::from(other.as_i32()?),
                 };
                 self.heap[args[1]] = Value::Int64(value);

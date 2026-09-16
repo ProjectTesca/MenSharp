@@ -101,20 +101,72 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             .ok()
                             .and_then(super::exhaustive::integer_literal_value)
                             == Some(0);
+                        let operator_value_type = {
+                            use crate::types::conversions::NumericKind::*;
+                            let pair = (
+                                self.system().numeric_kind(&value_type),
+                                self.system().numeric_kind(&target),
+                            );
+                            if !matches!(
+                                operator,
+                                BinaryOperator::LeftShift
+                                    | BinaryOperator::RightShift
+                                    | BinaryOperator::UnsignedRightShift
+                            ) && matches!(
+                                pair,
+                                (Some(Int32), Some(UInt32 | UInt64)) | (Some(Int64), Some(UInt64))
+                            ) && self.integer_constant(value).is_some_and(|v| v >= 0)
+                            {
+                                target.clone()
+                            } else {
+                                value_type.clone()
+                            }
+                        };
                         let result = self.binary_type(
                             operator,
                             target.clone(),
-                            value_type,
+                            operator_value_type,
                             literal,
                             zero_literal,
                             assignment.span.clone(),
                             Some(EntityID::from(*assignment)),
                         );
-                        // compound assignment narrows back implicitly (int += byte)
+                        // A predefined compound operator may narrow its result,
+                        // but the RHS must still convert implicitly to the LHS
+                        // (except for shifts). `byte += byte` is valid; `byte += long` is not.
                         if !matches!(result, Type::Error) {
-                            let compatible =
-                                self.system().is_implicitly_convertible(&result, &target)
-                                    || self.system().numeric_kind(&target).is_some();
+                            let system = self.system();
+                            let numeric = system.numeric_kind(&target).is_some()
+                                && system.numeric_kind(&value_type).is_some();
+                            let shift = matches!(
+                                operator,
+                                BinaryOperator::LeftShift
+                                    | BinaryOperator::RightShift
+                                    | BinaryOperator::UnsignedRightShift
+                            );
+                            let constant_fits = if system.numeric_kind(&value_type)
+                                == Some(crate::types::conversions::NumericKind::Int32)
+                            {
+                                self.integer_constant(value).is_some_and(|v| {
+                                    use crate::types::conversions::NumericKind::*;
+                                    match system.numeric_kind(&target) {
+                                        Some(SByte) => i8::try_from(v).is_ok(),
+                                        Some(Byte) => u8::try_from(v).is_ok(),
+                                        Some(Int16) => i16::try_from(v).is_ok(),
+                                        Some(UInt16) => u16::try_from(v).is_ok(),
+                                        Some(UInt32) => u32::try_from(v).is_ok(),
+                                        Some(UInt64) => v >= 0,
+                                        _ => false,
+                                    }
+                                })
+                            } else {
+                                false
+                            };
+                            let compatible = system.is_implicitly_convertible(&result, &target)
+                                || (numeric
+                                    && (shift
+                                        || system.is_implicitly_convertible(&value_type, &target)
+                                        || constant_fits));
                             if !compatible {
                                 let kind = SemanticErrorKind::TypeMismatch {
                                     expected: self.describe(&target),
@@ -207,6 +259,49 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         other => other,
                     };
                 }
+                // Non-negative int constants convert to uint/ulong before
+                // overload resolution; long constants may convert to ulong.
+                let promote_constant = |ty: Type, other: &Type, expression: &Expression| {
+                    use crate::types::conversions::NumericKind::*;
+                    let system = self.system();
+                    let pair = (system.numeric_kind(&ty), system.numeric_kind(other));
+                    let fits = self.integer_constant(expression).is_some_and(|v| v >= 0);
+                    if fits
+                        && matches!(
+                            pair,
+                            (Some(Int32), Some(UInt32 | UInt64)) | (Some(Int64), Some(UInt64))
+                        )
+                    {
+                        other.clone()
+                    } else {
+                        ty
+                    }
+                };
+                let original_left = left.clone();
+                let left = if !matches!(
+                    binary.operator.value,
+                    BinaryOperator::LeftShift
+                        | BinaryOperator::RightShift
+                        | BinaryOperator::UnsignedRightShift
+                ) {
+                    promote_constant(left, &right, &binary.left)
+                } else {
+                    left
+                };
+                let right = if let Ok(expression) = &binary.right {
+                    if !matches!(
+                        binary.operator.value,
+                        BinaryOperator::LeftShift
+                            | BinaryOperator::RightShift
+                            | BinaryOperator::UnsignedRightShift
+                    ) {
+                        promote_constant(right, &original_left, expression)
+                    } else {
+                        right
+                    }
+                } else {
+                    right
+                };
                 self.binary_type(
                     binary.operator.value,
                     left,

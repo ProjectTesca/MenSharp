@@ -6,7 +6,12 @@ use men_sharp_asm::{Emulator, Value};
 use men_sharp_compiler::{Compiler, CompilerSettings, SourceCode};
 
 fn dotnet_shared_dir() -> Option<std::path::PathBuf> {
-    for root in ["/usr/share/dotnet", "/usr/lib/dotnet"] {
+    let configured = std::env::var("DOTNET_ROOT").ok();
+    for root in configured
+        .as_deref()
+        .into_iter()
+        .chain(["/usr/share/dotnet", "/usr/lib/dotnet"])
+    {
         let base = std::path::Path::new(root).join("shared/Microsoft.NETCore.App");
         if let Ok(entries) = std::fs::read_dir(base) {
             let mut versions: Vec<_> = entries.flatten().collect();
@@ -1782,7 +1787,7 @@ fn small_integer_compound_assignment_computes_in_int_and_casts_back() {
                 char c = 'A';
                 c++;
                 after = c.ToString();       // "B"
-                c += 1;
+                c += (char)1;
                 code = c;                   // 67
                 char w = (char)65601;       // 65601 & 0xFFFF = 65: an unchecked cast wraps
                 wrapped = w.ToString();     // "A"
@@ -14141,4 +14146,253 @@ fn an_initializer_udon_can_run_is_not_handed_to_the_proxy() {
         uasm.contains("SystemTextStringBuilder.__ctor__SystemString"),
         "{uasm}"
     );
+}
+
+#[test]
+fn integer_operands_are_promoted_before_calling_externs() {
+    // Small operands must be converted before calling Int32 externs; merely
+    // choosing the promoted result type leaves incompatible values on the heap.
+    for ty in ["sbyte", "byte", "short", "ushort", "char"] {
+        let source = format!(
+            r#"
+            namespace Game {{ public class Program {{
+                public static object plus, minus, complement, remainder, shifted;
+                public static void Main() {{
+                    {ty} a = ({ty})13, b = ({ty})3;
+                    plus = +a; minus = -a; complement = ~a;
+                    remainder = a % b; shifted = a << b;
+                    a %= b; a >>= b;
+                }}
+            }} }}
+        "#
+        );
+        let Some((program, _)) = build(vec![SourceCode::new("test.cs", source.as_str())]) else {
+            return;
+        };
+        let dump = program.dump();
+        assert!(dump.contains("SystemConvert.__ToInt32__"), "{ty}: {dump}");
+        assert!(
+            dump.contains("SystemInt32.__op_Remainder__SystemInt32_SystemInt32__SystemInt32"),
+            "{ty}: {dump}"
+        );
+        assert!(
+            dump.contains("SystemInt32.__op_UnaryMinus__SystemInt32__SystemInt32"),
+            "{ty}: {dump}"
+        );
+    }
+}
+
+#[test]
+fn signed_uint_comparisons_use_long_in_both_orders() {
+    // A negative signed operand cannot be converted to uint. Both operand
+    // orders must select long, as must unary minus on a uint operand.
+    let Some(emulator) = run(
+        r#"
+        namespace Game { public class Program {
+            public static int result;
+            public static long negated;
+            public static void Main() {
+                int a = -13; uint b = 3u;
+                if (a < b && b > a && a != b && b != a) result = 1;
+                negated = -b;
+            }
+        } }
+    "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 1);
+    assert!(matches!(
+        emulator.value_of("negated"),
+        Some(Value::Int64(-3))
+    ));
+}
+
+#[test]
+fn wide_remainder_handles_boundaries() {
+    // Lowered remainder must preserve the dividend's sign and catchable exceptions.
+    let Some(emulator) = run(
+        r#"
+        namespace Game { public class Program {
+            public static long negative, min;
+            public static ulong wide, complement;
+            public static int caught;
+            public static void Main() {
+                long a = -13L, b = 3L;
+                negative = a % b;
+                long lowest = long.MinValue, minusOne = -1L;
+                // Unity Mono throws here; the lowered remainder must remain catchable.
+                try { min = lowest % minusOne; } catch (System.OverflowException) { min = 7; }
+                ulong top = ulong.MaxValue, divisor = 10UL;
+                wide = top % divisor;
+                complement = ~top;
+                long zero = 0L;
+                try { negative %= zero; } catch (System.DivideByZeroException) { caught = 1; }
+            }
+        } }
+    "#,
+        "Main",
+    ) else {
+        return;
+    };
+    for (name, value) in [("negative", -1), ("min", 7)] {
+        assert!(
+            matches!(emulator.value_of(name), Some(Value::Int64(v)) if *v == value),
+            "{name}"
+        );
+    }
+    assert!(matches!(emulator.value_of("wide"), Some(Value::UInt64(5))));
+    assert!(matches!(
+        emulator.value_of("complement"),
+        Some(Value::UInt64(0))
+    ));
+
+    assert_eq!(int_of(&emulator, "caught"), 1);
+}
+
+#[test]
+fn small_integer_metadata_constants_keep_their_heap_types() {
+    // The emulator represents small integers as Int32, so checking its values
+    // would miss an initializer with the right value but the wrong boxed type.
+    // Inspect the heap initializers that the Unity importer uses instead.
+    let Some((program, _)) = build(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game { public class Program {
+            public static object[] limits;
+            public static void Main() {
+                limits = new object[] { sbyte.MinValue, byte.MaxValue, short.MinValue, ushort.MaxValue };
+            }
+        } }
+    "#,
+    )]) else {
+        return;
+    };
+    for (name, value) in [
+        ("SystemSByte", -128),
+        ("SystemByte", 255),
+        ("SystemInt16", -32768),
+        ("SystemUInt16", 65535),
+    ] {
+        let slot = program.data.iter().find(|s| {
+            s.udon_type == name
+                && match s.init {
+                    men_sharp_asm::HeapInit::SByte(v) => i64::from(v) == value,
+                    men_sharp_asm::HeapInit::Byte(v) => i64::from(v) == value,
+                    men_sharp_asm::HeapInit::Int16(v) => i64::from(v) == value,
+                    men_sharp_asm::HeapInit::UInt16(v) => i64::from(v) == value,
+                    _ => false,
+                }
+        });
+        assert!(slot.is_some(), "missing typed constant {name}");
+    }
+}
+
+#[test]
+fn invalid_numeric_operators_are_rejected() {
+    // A usable Udon conversion does not make an operator legal in C#.
+    // Reject invalid operand pairs during checking, including compound
+    // assignments whose right operand cannot implicitly convert to the left.
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    for body in [
+        "long a = 1; ulong b = 1; var c = a + b;",
+        "long a = 1; ulong b = 1; var c = a == b;",
+        "int a = 1; uint b = 1; var c = a << b;",
+        "float a = 1; var c = a << 1;",
+        "decimal a = 1; double b = 1; var c = a + b;",
+        "int a = 1; var c = a && a;",
+        "ulong a = 1; var c = -a;",
+        "byte a = 1; long b = 1; a += b;",
+        "char a = 'a'; a += 1;",
+        "byte a = 1; a += 300;",
+    ] {
+        let source = format!("class Probe {{ void Run() {{ {body} }} }}");
+        let files = compiler.parse(vec![SourceCode::new("test.cs", source)]);
+        let declarations = compiler.collect_declarations(&files);
+        let signatures = compiler.resolve_signatures(&declarations, &references);
+        let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+        assert!(!bodies.errors.is_empty(), "accepted {body}");
+    }
+}
+
+#[test]
+fn unsigned_compound_assignment_accepts_constant_operands() {
+    // A fitting int constant can select an unsigned operator. Starting at
+    // ulong.MaxValue exposes an incorrect signed conversion before arithmetic.
+    let Some(emulator) = run(
+        r#"
+        namespace Game { public class Program {
+            public static ulong wrapped;
+            public static void Main() {
+                ulong a = ulong.MaxValue;
+                a += 2; a -= 2; a *= 2;
+                wrapped = a;
+            }
+        } }
+    "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert!(matches!(emulator.value_of("wrapped"), Some(Value::UInt64(v)) if *v == u64::MAX - 1));
+    let Some(_) = build(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game { public class Program {
+            public static void Main() { sbyte a = 1; a += (-1); }
+        } }
+    "#,
+    )]) else {
+        return;
+    };
+}
+
+#[test]
+fn constant_expressions_keep_the_selected_unsigned_operator() {
+    // Constant conversions also apply to const fields, locals and expressions.
+    // Code generation must retain the operator selected by the checker rather
+    // than infer it again from the constant's original Int32 heap type.
+    let Some(emulator) = run(
+        r#"
+        namespace Game { public class Program {
+            const int FieldDelta = 2;
+            public static ulong wrapped;
+            public static int comparison;
+            public static void Main() {
+                const int two = 2;
+                ulong a = ulong.MaxValue;
+                a += FieldDelta;
+                wrapped = a + (1 + 1);
+                if (a == (two - 1)) comparison = 1;
+            }
+        } }
+    "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert!(matches!(
+        emulator.value_of("wrapped"),
+        Some(Value::UInt64(3))
+    ));
+    assert_eq!(int_of(&emulator, "comparison"), 1);
+    let Some(_) = build(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game { public class Program {
+            public static void Main() {
+                const int delta = 2;
+                byte b = 1; b += delta; b += (1 << 32);
+            }
+        } }
+    "#,
+    )]) else {
+        return;
+    };
 }

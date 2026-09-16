@@ -466,6 +466,53 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     public int smallUShort;
     public string smallChar;
 
+    // Check the actual boxed result types: a small heap slot cannot be
+    // passed straight to an Int32 extern even when its value fits.
+    public object[] promotedIntegers;
+    public bool signedUnsignedComparison;
+    public double charFloating;
+    public void IntegerPromotion()
+    {
+        sbyte sb = 13; byte b = 13; short sh = 13; ushort us = 13; char c = (char)13;
+        promotedIntegers = new object[] {
+            +sb, +b, +sh, +us, +c,
+            -sb, -b, -sh, -us, -c,
+            ~sb, ~b, ~sh, ~us, ~c,
+            sb % sb, b % b, sh % sh, us % us, c % c,
+            sb << b, b << sh, sh << us, us << c, c << 1
+        };
+        int negative = -13; uint positive = 3;
+        signedUnsignedComparison = negative < positive && positive > negative;
+        charFloating = c + 0.5;
+    }
+
+    public object[] wideIntegerResults;
+    public int remainderZeroCaught;
+    public int remainderOverflowCaught;
+    public void WideIntegers()
+    {
+        uint u = uint.MaxValue, three = 3;
+        long l = long.MinValue, minusOne = -1;
+        ulong ul = ulong.MaxValue, ten = 10;
+        wideIntegerResults = new object[] { u % three, l % 3L, ul % ten, ~ul };
+        try { l %= minusOne; } catch (OverflowException) { remainderOverflowCaught = 1; }
+        u %= three; ul %= ten;
+        wideIntegerResults[0] = u; wideIntegerResults[2] = ul;
+        ulong zero = 0;
+        try { ul %= zero; } catch (DivideByZeroException) { remainderZeroCaught = 1; }
+    }
+
+    public object[] smallLimits;
+    public object[] smallLimitsAfter;
+    public void SmallIntegerConstants()
+    {
+        sbyte sb = sbyte.MaxValue; byte b = byte.MaxValue;
+        short sh = short.MaxValue; ushort us = ushort.MaxValue;
+        smallLimits = new object[] { sb, b, sh, us };
+        sb++; b++; sh++; us++;
+        smallLimitsAfter = new object[] { sb, b, sh, us };
+    }
+
     public void SmallIntegers()
     {
         byte b = 1;
