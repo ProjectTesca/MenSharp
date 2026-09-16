@@ -298,6 +298,18 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(3, smoke.GetProgramVariable("copyIn"));
 
         // small integral types: compound ops compute in int, cast back, wrap
+        smoke.RunProgram("IntegerPromotion");
+        var promoted = (object[])smoke.GetProgramVariable("promotedIntegers");
+        Assert.AreEqual(25, promoted.Length);
+        for (int i = 0; i < promoted.Length; i++)
+        {
+            Assert.IsInstanceOf<int>(promoted[i], "promotion index " + i);
+            int expected = i < 5 ? 13 : i < 10 ? -13 : i < 15 ? -14 : i < 20 ? 0 : i == 24 ? 26 : 106496;
+            Assert.AreEqual(expected, promoted[i], "promotion index " + i);
+        }
+        Assert.AreEqual(true, smoke.GetProgramVariable("signedUnsignedComparison"));
+        Assert.AreEqual(13.5, smoke.GetProgramVariable("charFloating"));
+
         smoke.RunProgram("SmallIntegers");
         Assert.AreEqual(3, smoke.GetProgramVariable("smallByte"));
         Assert.AreEqual(1, smoke.GetProgramVariable("smallByteWrapped"));

@@ -1250,10 +1250,12 @@ impl Emulator {
                 Ok(())
             }
             "SystemConvert.__ToInt64__SystemInt32__SystemInt64"
+            | "SystemConvert.__ToInt64__SystemUInt32__SystemInt64"
             | "SystemConvert.__ToInt64__SystemObject__SystemInt64" => {
                 let args = self.pop_arguments(2)?;
                 let value = match &self.heap[args[0]] {
                     Value::Int64(value) => *value,
+                    Value::UInt32(value) => i64::from(*value),
                     other => i64::from(other.as_i32()?),
                 };
                 self.heap[args[1]] = Value::Int64(value);

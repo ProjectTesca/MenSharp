@@ -1106,6 +1106,17 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             {
                 self.wrap_int32_to_small(ctx, source, &to_name, span)
             }
+            (Some(from_name), Some(to_name))
+                if from_name == "SystemChar"
+                    && matches!(
+                        to_name.as_str(),
+                        "SystemSingle" | "SystemDouble" | "SystemDecimal"
+                    ) =>
+            {
+                let int = self.corlib_type("Int32");
+                let value = self.convert(ctx, source, from, &int, span.clone());
+                self.convert(ctx, value, &int, to, span)
+            }
             (Some(from_name), Some(to_name)) if from_name != to_name => {
                 let method = match to_name.as_str() {
                     "SystemInt32" => Some("ToInt32"),
@@ -2032,40 +2043,45 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         span: Range<usize>,
     ) -> ((DataId, Type), (DataId, Type)) {
         use BinaryOperator::*;
-        let as_is = ((left.0, left.1.clone()), (right.0, right.1.clone()));
-        let (Some(left_rank), Some(right_rank)) =
-            (self.numeric_rank(left.1), self.numeric_rank(right.1))
-        else {
-            return as_is;
+        let system = self.type_system();
+        let (Some(l), Some(r)) = (system.numeric_kind(left.1), system.numeric_kind(right.1)) else {
+            return ((left.0, left.1.clone()), (right.0, right.1.clone()));
         };
-        if matches!(operator, LeftShift | RightShift) {
-            return as_is;
-        }
-        // one type on both sides: its own operator applies (Udon has
-        // `char == char`, and no promotion is needed)
-        if self.extern_type_name(left.1) == self.extern_type_name(right.1) {
-            return as_is;
-        }
-        let comparison = matches!(
-            operator,
-            Equal | NotEqual | LessThan | GreaterThan | LessThanEqual | GreaterThanEqual
-        );
-        let target = if !comparison && self.numeric_rank(result_type).is_some() {
-            result_type.clone()
-        } else if left_rank >= right_rank {
-            left.1.clone()
+        let shift = matches!(operator, LeftShift | RightShift | UnsignedRightShift);
+        let (l, r) = if shift {
+            (l, r)
         } else {
-            right.1.clone()
+            use men_sharp_semantics::types::conversions::NumericKind::*;
+            let promote_constant = |slot: DataId, kind, other| {
+                let fits = matches!(self.program.data[slot.0].init, HeapInit::Int32(v) if v >= 0)
+                    || matches!(self.program.data[slot.0].init, HeapInit::Int64(v) if v >= 0);
+                if fits && matches!((kind, other), (Int32, UInt32 | UInt64) | (Int64, UInt64)) {
+                    other
+                } else {
+                    kind
+                }
+            };
+            (
+                promote_constant(left.0, l, r),
+                promote_constant(right.0, r, l),
+            )
         };
-        // a small type (byte, short, char) computes as an int
-        let target = if self.numeric_rank(&target) == Some(0) {
+        let kind = if shift {
+            Some(l.unary_promoted())
+        } else {
+            l.binary_promoted(r)
+        };
+        let target = kind
+            .map(|k| self.corlib_type(k.corlib_name()))
+            .unwrap_or_else(|| result_type.clone());
+        let right_target = if shift {
             self.corlib_type("Int32")
         } else {
-            target
+            target.clone()
         };
         let promoted_left = self.convert(ctx, left.0, left.1, &target, span.clone());
-        let promoted_right = self.convert(ctx, right.0, right.1, &target, span);
-        ((promoted_left, target.clone()), (promoted_right, target))
+        let promoted_right = self.convert(ctx, right.0, right.1, &right_target, span);
+        ((promoted_left, target), (promoted_right, right_target))
     }
 
     /// A value as a `string`, via the type's own `ToString` extern.
@@ -2254,6 +2270,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             return result;
         }
+        let operand = if self.numeric_rank(operand_type).is_some() {
+            self.convert(ctx, operand, operand_type, result_type, span.clone())
+        } else {
+            operand
+        };
         match operator {
             UnaryOperator::Not => {
                 let out = self.temp("SystemBoolean");
@@ -2320,6 +2341,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     "SystemUInt32" => {
                         self.constant("SystemUInt32", "4294967295", HeapInit::UInt32(u32::MAX))
                     }
+                    "SystemUInt64" => self.constant(
+                        "SystemUInt64",
+                        &u64::MAX.to_string(),
+                        HeapInit::UInt64(u64::MAX),
+                    ),
                     _ => {
                         self.error(
                             ctx,
@@ -2606,13 +2632,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         node: Option<EntityID>,
     ) -> Option<DataId> {
         let target = current.1.clone();
-        let computed = if self.numeric_rank(&target) == Some(0) {
-            match self.numeric_rank(value.1) {
-                Some(rank) if rank > 1 => value.1.clone(),
-                _ => self.corlib_type("Int32"),
+        let system = self.type_system();
+        let computed = match (system.numeric_kind(&target), system.numeric_kind(value.1)) {
+            (Some(l), Some(r)) => {
+                let kind = if matches!(
+                    operator,
+                    BinaryOperator::LeftShift
+                        | BinaryOperator::RightShift
+                        | BinaryOperator::UnsignedRightShift
+                ) {
+                    Some(l.unary_promoted())
+                } else {
+                    l.binary_promoted(r)
+                };
+                kind.map(|k| self.corlib_type(k.corlib_name()))
+                    .unwrap_or_else(|| target.clone())
             }
-        } else {
-            target.clone()
+            _ => target.clone(),
         };
         let result = self.emit_binary_operator(
             ctx,

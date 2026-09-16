@@ -6,7 +6,12 @@ use men_sharp_asm::{Emulator, Value};
 use men_sharp_compiler::{Compiler, CompilerSettings, SourceCode};
 
 fn dotnet_shared_dir() -> Option<std::path::PathBuf> {
-    for root in ["/usr/share/dotnet", "/usr/lib/dotnet"] {
+    let configured = std::env::var("DOTNET_ROOT").ok();
+    for root in configured
+        .as_deref()
+        .into_iter()
+        .chain(["/usr/share/dotnet", "/usr/lib/dotnet"])
+    {
         let base = std::path::Path::new(root).join("shared/Microsoft.NETCore.App");
         if let Ok(entries) = std::fs::read_dir(base) {
             let mut versions: Vec<_> = entries.flatten().collect();
@@ -14102,4 +14107,65 @@ fn an_initializer_udon_can_run_is_not_handed_to_the_proxy() {
         uasm.contains("SystemTextStringBuilder.__ctor__SystemString"),
         "{uasm}"
     );
+}
+
+#[test]
+fn integer_operands_are_promoted_before_calling_externs() {
+    // Small operands must be converted before calling Int32 externs; merely
+    // choosing the promoted result type leaves incompatible values on the heap.
+    for ty in ["sbyte", "byte", "short", "ushort", "char"] {
+        let source = format!(
+            r#"
+            namespace Game {{ public class Program {{
+                public static object plus, minus, complement, remainder, shifted;
+                public static void Main() {{
+                    {ty} a = ({ty})13, b = ({ty})3;
+                    plus = +a; minus = -a; complement = ~a;
+                    remainder = a % b; shifted = a << b;
+                    a %= b; a >>= b;
+                }}
+            }} }}
+        "#
+        );
+        let Some((program, _)) = build(vec![SourceCode::new("test.cs", source.as_str())]) else {
+            return;
+        };
+        let dump = program.dump();
+        assert!(dump.contains("SystemConvert.__ToInt32__"), "{ty}: {dump}");
+        assert!(
+            dump.contains("SystemInt32.__op_Remainder__SystemInt32_SystemInt32__SystemInt32"),
+            "{ty}: {dump}"
+        );
+        assert!(
+            dump.contains("SystemInt32.__op_UnaryMinus__SystemInt32__SystemInt32"),
+            "{ty}: {dump}"
+        );
+    }
+}
+
+#[test]
+fn signed_uint_comparisons_use_long_in_both_orders() {
+    // A negative signed operand cannot be converted to uint. Both operand
+    // orders must select long, as must unary minus on a uint operand.
+    let Some(emulator) = run(
+        r#"
+        namespace Game { public class Program {
+            public static int result;
+            public static long negated;
+            public static void Main() {
+                int a = -13; uint b = 3u;
+                if (a < b && b > a && a != b && b != a) result = 1;
+                negated = -b;
+            }
+        } }
+    "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 1);
+    assert!(matches!(
+        emulator.value_of("negated"),
+        Some(Value::Int64(-3))
+    ));
 }

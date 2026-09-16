@@ -452,6 +452,26 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     public int smallUShort;
     public string smallChar;
 
+    // Check the actual boxed result types: a small heap slot cannot be
+    // passed straight to an Int32 extern even when its value fits.
+    public object[] promotedIntegers;
+    public bool signedUnsignedComparison;
+    public double charFloating;
+    public void IntegerPromotion()
+    {
+        sbyte sb = 13; byte b = 13; short sh = 13; ushort us = 13; char c = (char)13;
+        promotedIntegers = new object[] {
+            +sb, +b, +sh, +us, +c,
+            -sb, -b, -sh, -us, -c,
+            ~sb, ~b, ~sh, ~us, ~c,
+            sb % sb, b % b, sh % sh, us % us, c % c,
+            sb << b, b << sh, sh << us, us << c, c << 1
+        };
+        int negative = -13; uint positive = 3;
+        signedUnsignedComparison = negative < positive && positive > negative;
+        charFloating = c + 0.5;
+    }
+
     public void SmallIntegers()
     {
         byte b = 1;

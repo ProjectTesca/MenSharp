@@ -207,6 +207,50 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         other => other,
                     };
                 }
+                // Non-negative int constants convert to uint/ulong before
+                // overload resolution; long constants may convert to ulong.
+                let promote_constant = |ty: Type, other: &Type, expression: &Expression| {
+                    use crate::types::conversions::NumericKind::*;
+                    let system = self.system();
+                    let pair = (system.numeric_kind(&ty), system.numeric_kind(other));
+                    let fits = super::exhaustive::integer_literal_value(expression)
+                        .is_some_and(|v| v >= 0);
+                    if fits
+                        && matches!(
+                            pair,
+                            (Some(Int32), Some(UInt32 | UInt64)) | (Some(Int64), Some(UInt64))
+                        )
+                    {
+                        other.clone()
+                    } else {
+                        ty
+                    }
+                };
+                let original_left = left.clone();
+                let left = if !matches!(
+                    binary.operator.value,
+                    BinaryOperator::LeftShift
+                        | BinaryOperator::RightShift
+                        | BinaryOperator::UnsignedRightShift
+                ) {
+                    promote_constant(left, &right, &binary.left)
+                } else {
+                    left
+                };
+                let right = if let Ok(expression) = &binary.right {
+                    if !matches!(
+                        binary.operator.value,
+                        BinaryOperator::LeftShift
+                            | BinaryOperator::RightShift
+                            | BinaryOperator::UnsignedRightShift
+                    ) {
+                        promote_constant(right, &original_left, expression)
+                    } else {
+                        right
+                    }
+                } else {
+                    right
+                };
                 self.binary_type(
                     binary.operator.value,
                     left,
