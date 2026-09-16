@@ -10894,6 +10894,17 @@ fn destroy_cancellation_token_is_lazy_and_cancelled_before_the_user_handler() {
             .iter()
             .any(|symbol| symbol.name == "__this_destroyCancellationToken")
     );
+    // Unity's symbol table rejects duplicate heap names.
+    let mut data_names = std::collections::HashSet::new();
+    assert!(
+        program
+            .output
+            .program
+            .data
+            .iter()
+            .all(|symbol| data_names.insert(&symbol.name)),
+        "generated data symbols must have unique names"
+    );
 
     let assembled = program.output.program.assemble().unwrap();
     // An uncached token is created by OnDestroy itself, after the pre-hook.

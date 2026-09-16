@@ -412,7 +412,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.ensure_function(&key);
         let function = &self.functions[&key];
         let (label, return_slot) = (function.label, function.return_slot);
-        let halt = self.code_address_constant(format!("__halt_after_{name}"), None);
+        let halt =
+            self.code_address_constant(format!("__halt_after_{name}_{}", self.temp_counter), None);
+        self.temp_counter += 1;
         self.copy(halt, return_slot);
         self.program.code.push(Op::Jump(Target::Label(label)));
         self.program.code.push(Op::Label(ok));
