@@ -2032,7 +2032,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Option<DataId> {
         let name = self.extern_type_name(left.1)?;
         let out = self.temp(&name);
-        let done = self.fresh_label("remainder_done");
         if name == "SystemInt64" {
             let ordinary = self.fresh_label("remainder_divide");
             let minus_one = self.constant("SystemInt64", "-1", HeapInit::Int64(-1));
@@ -2047,9 +2046,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.program
                 .code
                 .push(Op::JumpIfFalse(Target::Label(ordinary)));
-            let zero = self.constant("SystemInt64", "0", HeapInit::Int64(0));
-            self.copy(zero, out);
-            self.program.code.push(Op::Jump(Target::Label(done)));
+            let minimum = self.constant(
+                "SystemInt64",
+                &i64::MIN.to_string(),
+                HeapInit::Int64(i64::MIN),
+            );
+            let is_minimum = self.temp("SystemBoolean");
+            self.call_extern(
+                ctx,
+                "SystemInt64.__op_Equality__SystemInt64_SystemInt64__SystemBoolean",
+                &[left.0, minimum, is_minimum],
+                span.clone(),
+            );
+            self.program.code.push(Op::Push(is_minimum));
+            self.program
+                .code
+                .push(Op::JumpIfFalse(Target::Label(ordinary)));
+            self.throw_new(ctx, &["System", "OverflowException"], None, span.clone());
             self.program.code.push(Op::Label(ordinary));
         }
         let quotient = self.temp(&name);
@@ -2066,7 +2079,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 span.clone(),
             );
         }
-        self.program.code.push(Op::Label(done));
         Some(out)
     }
 

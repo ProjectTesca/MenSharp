@@ -311,9 +311,10 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(13.5, smoke.GetProgramVariable("charFloating"));
 
         smoke.RunProgram("WideIntegers");
-        CollectionAssert.AreEqual(new object[] { 0u, 0L, 5UL, 0UL },
+        CollectionAssert.AreEqual(new object[] { 0u, -2L, 5UL, 0UL },
             (object[])smoke.GetProgramVariable("wideIntegerResults"));
         Assert.AreEqual(1, smoke.GetProgramVariable("remainderZeroCaught"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("remainderOverflowCaught"));
 
         smoke.RunProgram("SmallIntegerConstants");
         var limits = (object[])smoke.GetProgramVariable("smallLimits");

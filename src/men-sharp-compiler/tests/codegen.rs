@@ -14183,7 +14183,8 @@ fn wide_remainder_handles_boundaries() {
                 long a = -13L, b = 3L;
                 negative = a % b;
                 long lowest = long.MinValue, minusOne = -1L;
-                min = lowest % minusOne;
+                // Unity Mono throws here; the lowered remainder must remain catchable.
+                try { min = lowest % minusOne; } catch (System.OverflowException) { min = 7; }
                 ulong top = ulong.MaxValue, divisor = 10UL;
                 wide = top % divisor;
                 complement = ~top;
@@ -14196,7 +14197,7 @@ fn wide_remainder_handles_boundaries() {
     ) else {
         return;
     };
-    for (name, value) in [("negative", -1), ("min", 0)] {
+    for (name, value) in [("negative", -1), ("min", 7)] {
         assert!(
             matches!(emulator.value_of(name), Some(Value::Int64(v)) if *v == value),
             "{name}"

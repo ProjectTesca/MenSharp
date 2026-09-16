@@ -474,12 +474,14 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
 
     public object[] wideIntegerResults;
     public int remainderZeroCaught;
+    public int remainderOverflowCaught;
     public void WideIntegers()
     {
         uint u = uint.MaxValue, three = 3;
         long l = long.MinValue, minusOne = -1;
         ulong ul = ulong.MaxValue, ten = 10;
-        wideIntegerResults = new object[] { u % three, l % minusOne, ul % ten, ~ul };
+        wideIntegerResults = new object[] { u % three, l % 3L, ul % ten, ~ul };
+        try { l %= minusOne; } catch (OverflowException) { remainderOverflowCaught = 1; }
         u %= three; ul %= ten;
         wideIntegerResults[0] = u; wideIntegerResults[2] = ul;
         ulong zero = 0;
