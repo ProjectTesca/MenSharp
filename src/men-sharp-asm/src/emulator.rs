@@ -563,6 +563,12 @@ impl Emulator {
             | "SystemInt32.__op_Remainder__SystemInt32_SystemInt32__SystemInt32" => {
                 binary_i32!(|a: i32, b: i32| Value::Int32(a.wrapping_rem(b)))
             }
+            "SystemInt32.__op_LeftShift__SystemInt32_SystemInt32__SystemInt32" => {
+                binary_i32!(|a: i32, b: i32| Value::Int32(a.wrapping_shl(b as u32)))
+            }
+            "SystemInt32.__op_RightShift__SystemInt32_SystemInt32__SystemInt32" => {
+                binary_i32!(|a: i32, b: i32| Value::Int32(a.wrapping_shr(b as u32)))
+            }
             "SystemInt32.__op_UnaryMinus__SystemInt32__SystemInt32" => {
                 let args = self.pop_arguments(2)?;
                 let a = self.heap[args[0]].as_i32()?;

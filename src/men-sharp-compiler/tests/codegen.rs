@@ -14169,3 +14169,44 @@ fn signed_uint_comparisons_use_long_in_both_orders() {
         Some(Value::Int64(-3))
     ));
 }
+
+#[test]
+fn wide_remainder_handles_boundaries() {
+    // Lowered remainder must preserve the dividend's sign and catchable exceptions.
+    let Some(emulator) = run(
+        r#"
+        namespace Game { public class Program {
+            public static long negative, min;
+            public static ulong wide, complement;
+            public static int caught;
+            public static void Main() {
+                long a = -13L, b = 3L;
+                negative = a % b;
+                long lowest = long.MinValue, minusOne = -1L;
+                min = lowest % minusOne;
+                ulong top = ulong.MaxValue, divisor = 10UL;
+                wide = top % divisor;
+                complement = ~top;
+                long zero = 0L;
+                try { negative %= zero; } catch (System.DivideByZeroException) { caught = 1; }
+            }
+        } }
+    "#,
+        "Main",
+    ) else {
+        return;
+    };
+    for (name, value) in [("negative", -1), ("min", 0)] {
+        assert!(
+            matches!(emulator.value_of(name), Some(Value::Int64(v)) if *v == value),
+            "{name}"
+        );
+    }
+    assert!(matches!(emulator.value_of("wide"), Some(Value::UInt64(5))));
+    assert!(matches!(
+        emulator.value_of("complement"),
+        Some(Value::UInt64(0))
+    ));
+
+    assert_eq!(int_of(&emulator, "caught"), 1);
+}

@@ -472,6 +472,20 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         charFloating = c + 0.5;
     }
 
+    public object[] wideIntegerResults;
+    public int remainderZeroCaught;
+    public void WideIntegers()
+    {
+        uint u = uint.MaxValue, three = 3;
+        long l = long.MinValue, minusOne = -1;
+        ulong ul = ulong.MaxValue, ten = 10;
+        wideIntegerResults = new object[] { u % three, l % minusOne, ul % ten, ~ul };
+        u %= three; ul %= ten;
+        wideIntegerResults[0] = u; wideIntegerResults[2] = ul;
+        ulong zero = 0;
+        try { ul %= zero; } catch (DivideByZeroException) { remainderZeroCaught = 1; }
+    }
+
     public void SmallIntegers()
     {
         byte b = 1;

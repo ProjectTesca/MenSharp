@@ -887,19 +887,27 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         divisor_type: &Type,
         span: Range<usize>,
     ) {
-        if self.heap_type(divisor_type) != "SystemInt32" {
-            return;
-        }
-        if let HeapInit::Int32(value) = self.program.data[divisor.0].init
-            && value != 0
+        let name = self.heap_type(divisor_type);
+        let init = match name.as_str() {
+            "SystemInt32" => HeapInit::Int32(0),
+            "SystemInt64" => HeapInit::Int64(0),
+            "SystemUInt32" => HeapInit::UInt32(0),
+            "SystemUInt64" => HeapInit::UInt64(0),
+            _ => return,
+        };
+        if matches!(self.program.data[divisor.0].init,
+            HeapInit::Int32(v) if v != 0)
+            || matches!(self.program.data[divisor.0].init, HeapInit::Int64(v) if v != 0)
+            || matches!(self.program.data[divisor.0].init, HeapInit::UInt32(v) if v != 0)
+            || matches!(self.program.data[divisor.0].init, HeapInit::UInt64(v) if v != 0)
         {
             return;
         }
-        let zero = self.int_constant(0);
+        let zero = self.constant(&name, "0", init);
         let is_zero = self.temp("SystemBoolean");
         self.call_extern(
             ctx,
-            "SystemInt32.__op_Equality__SystemInt32_SystemInt32__SystemBoolean",
+            &format!("{name}.__op_Equality__{name}_{name}__SystemBoolean"),
             &[divisor, zero, is_zero],
             span.clone(),
         );

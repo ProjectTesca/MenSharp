@@ -310,6 +310,11 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(true, smoke.GetProgramVariable("signedUnsignedComparison"));
         Assert.AreEqual(13.5, smoke.GetProgramVariable("charFloating"));
 
+        smoke.RunProgram("WideIntegers");
+        CollectionAssert.AreEqual(new object[] { 0u, 0L, 5UL, 0UL },
+            (object[])smoke.GetProgramVariable("wideIntegerResults"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("remainderZeroCaught"));
+
         smoke.RunProgram("SmallIntegers");
         Assert.AreEqual(3, smoke.GetProgramVariable("smallByte"));
         Assert.AreEqual(1, smoke.GetProgramVariable("smallByteWrapped"));

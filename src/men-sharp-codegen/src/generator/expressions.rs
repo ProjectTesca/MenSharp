@@ -1737,9 +1737,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Some(result) = self.user_operator_call(ctx, node, &[left, right], span.clone()) {
             return result;
         }
-        if matches!(operator, Divide | Modulo) {
-            self.check_divisor(ctx, right.0, right.1, span.clone());
-        }
 
         let system_is = |ty: &Type, name: &str| {
             self.extern_type_name(ty)
@@ -1787,6 +1784,18 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.promote_numeric_operands(ctx, operator, left, right, result_type, span.clone());
         let left = (left.0, &left.1);
         let right = (right.0, &right.1);
+
+        if matches!(operator, Divide | Modulo) {
+            self.check_divisor(ctx, right.0, right.1, span.clone());
+        }
+        if operator == Modulo
+            && matches!(
+                self.extern_type_name(left.1).as_deref(),
+                Some("SystemUInt32" | "SystemInt64" | "SystemUInt64")
+            )
+        {
+            return self.integer_remainder(ctx, left, right.0, span);
+        }
 
         let name = match operator {
             Add => "op_Addition",
@@ -2009,6 +2018,56 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 None
             }
         }
+    }
+
+    /// Udon lacks remainder externs for uint, long and ulong. The quotient
+    /// is truncated, so a - (a / b) * b gives the same remainder without
+    /// overflowing the product. Handle long.MinValue / -1 before dividing.
+    fn integer_remainder(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        left: (DataId, &Type),
+        right: DataId,
+        span: Range<usize>,
+    ) -> Option<DataId> {
+        let name = self.extern_type_name(left.1)?;
+        let out = self.temp(&name);
+        let done = self.fresh_label("remainder_done");
+        if name == "SystemInt64" {
+            let ordinary = self.fresh_label("remainder_divide");
+            let minus_one = self.constant("SystemInt64", "-1", HeapInit::Int64(-1));
+            let is_minus_one = self.temp("SystemBoolean");
+            self.call_extern(
+                ctx,
+                "SystemInt64.__op_Equality__SystemInt64_SystemInt64__SystemBoolean",
+                &[right, minus_one, is_minus_one],
+                span.clone(),
+            );
+            self.program.code.push(Op::Push(is_minus_one));
+            self.program
+                .code
+                .push(Op::JumpIfFalse(Target::Label(ordinary)));
+            let zero = self.constant("SystemInt64", "0", HeapInit::Int64(0));
+            self.copy(zero, out);
+            self.program.code.push(Op::Jump(Target::Label(done)));
+            self.program.code.push(Op::Label(ordinary));
+        }
+        let quotient = self.temp(&name);
+        let product = self.temp(&name);
+        for (op, args) in [
+            ("op_Division", [left.0, right, quotient]),
+            ("op_Multiplication", [quotient, right, product]),
+            ("op_Subtraction", [left.0, product, out]),
+        ] {
+            self.call_extern(
+                ctx,
+                &format!("{name}.__{op}__{name}_{name}__{name}"),
+                &args,
+                span.clone(),
+            );
+        }
+        self.program.code.push(Op::Label(done));
+        Some(out)
     }
 
     /// The rank of a numeric type in binary promotion; `None` for anything
