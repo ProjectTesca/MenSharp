@@ -68,6 +68,37 @@ public class MenSharpIntegrationTests
         "VerifyWake",
     };
 
+    [TestCase("Single", "NaN")]
+    [TestCase("Single", "1.25")]
+    [TestCase("Single", "Infinity")]
+    [TestCase("Single", "-Infinity")]
+    [TestCase("Double", "NaN")]
+    [TestCase("Double", "1.25")]
+    [TestCase("Double", "Infinity")]
+    [TestCase("Double", "-Infinity")]
+    public void FloatingMetadataPreservesSpecialValuesAndBoxedTypes(string kind, string text)
+    {
+        // Verify the metadata spellings emitted by the compiler on Unity Mono.
+        // Assert boxed types as well as values: Single slots must receive floats.
+        var decode = typeof(MenSharpProgramAsset).GetMethod("Decode",
+            BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.IsNotNull(decode);
+        object actual = decode.Invoke(null, new object[] {
+            new MenSharpHeapEntry { kind = kind, value = text }
+        });
+
+        if (kind == "Single")
+        {
+            Assert.IsInstanceOf<float>(actual);
+            Assert.AreEqual(float.Parse(text, System.Globalization.CultureInfo.InvariantCulture), actual);
+        }
+        else
+        {
+            Assert.IsInstanceOf<double>(actual);
+            Assert.AreEqual(double.Parse(text, System.Globalization.CultureInfo.InvariantCulture), actual);
+        }
+    }
+
     [Test]
     public void CompilerCreatesEveryManualFixtureAsAnSdkProgramAsset()
     {

@@ -661,10 +661,32 @@ impl Program {
                     let _ = write!(out, "UInt64\", \"value\": \"{v}\"");
                 }
                 HeapInit::Single(v) => {
-                    let _ = write!(out, "Single\", \"value\": \"{v:?}\"");
+                    // Metadata is read by Unity Mono using invariant-culture Parse.
+                    // Rust Debug spells infinity as inf, which that parser rejects.
+                    if v.is_infinite() {
+                        let text = if v.is_sign_negative() {
+                            "-Infinity"
+                        } else {
+                            "Infinity"
+                        };
+                        let _ = write!(out, "Single\", \"value\": \"{text}\"");
+                    } else {
+                        let _ = write!(out, "Single\", \"value\": \"{v:?}\"");
+                    }
                 }
                 HeapInit::Double(v) => {
-                    let _ = write!(out, "Double\", \"value\": \"{v:?}\"");
+                    // Metadata is read by Unity Mono using invariant-culture Parse.
+                    // Rust Debug spells infinity as inf, which that parser rejects.
+                    if v.is_infinite() {
+                        let text = if v.is_sign_negative() {
+                            "-Infinity"
+                        } else {
+                            "Infinity"
+                        };
+                        let _ = write!(out, "Double\", \"value\": \"{text}\"");
+                    } else {
+                        let _ = write!(out, "Double\", \"value\": \"{v:?}\"");
+                    }
                 }
                 HeapInit::Decimal(v) => {
                     out.push_str("Decimal\", \"value\": ");
