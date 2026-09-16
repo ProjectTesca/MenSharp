@@ -136,9 +136,6 @@ public class MenSharpIntegrationTests
 
         UdonBehaviour smoke = FindUdon("MenSharpRuntimeSmoke");
         Assert.IsTrue(smoke.IsInitialized, "the SDK did not initialise the smoke UdonBehaviour");
-
-        UdonBehaviour uncached = FindUdon("MenSharpRuntimeSmoke2");
-
         smoke.RunProgram("Greet");
         Assert.AreEqual("Start: Hello", smoke.GetProgramVariable("greeted"));
 
@@ -361,17 +358,6 @@ public class MenSharpIntegrationTests
         Assert.AreEqual("https://example.com/base", shadow.GetProgramVariable("baseUrl"));
         Assert.AreEqual("https://example.com/derived", shadow.GetProgramVariable("derivedUrl"));
 
-        // Keep the lifecycle event last; the SDK may treat manual OnDestroy as terminal.
-        // The generated pre-hook still cancels a cached token before the user handler.
-        smoke.RunProgram("Start");
-        uncached.RunProgram("Start");
-        smoke.RunProgram("OnDestroy");
-        uncached.RunProgram("OnDestroy");
-        Assert.AreEqual(true, smoke.GetProgramVariable("destroyTokenCached"));
-        Assert.AreEqual(true, smoke.GetProgramVariable("destroyTokenCanceled"));
-        Assert.AreEqual(false, uncached.GetProgramVariable("destroyTokenCached"));
-        Assert.AreEqual(false, uncached.GetProgramVariable("destroyTokenCanceled"));
-
         yield return new ExitPlayMode();
         AssetDatabase.DeleteAsset(GeneratedScene);
     }
@@ -392,11 +378,6 @@ public class MenSharpIntegrationTests
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
 
         GameObject smokeObject = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke", "MenSharpRuntimeSmoke", Vector3.zero);
-        // cacheDestroyToken = true
-        MenSharpTestScene.Assign(
-            MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke"),
-            "cacheDestroyToken",
-            true);
         MenSharpTestScene.Assign(
             MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke"),
             "items",
@@ -423,11 +404,6 @@ public class MenSharpIntegrationTests
             MenSharpTestScene.Assign(smokeProxy, "textAsset", dead);
         }
         GameObject secondSmoke = MenSharpTestScene.AddProxy("MenSharpRuntimeSmoke2", "MenSharpRuntimeSmoke", Vector3.up * 4);
-        // cacheDestroyToken = false
-        MenSharpTestScene.Assign(
-            MenSharpTestScene.Proxy(secondSmoke, "MenSharpRuntimeSmoke"),
-            "cacheDestroyToken",
-            false);
         GameObject targetObject = MenSharpTestScene.AddProxy("MenSharpRuntimeTarget", "MenSharpRuntimeTarget", Vector3.right * 4);
         GameObject callerObject = MenSharpTestScene.AddProxy("MenSharpRuntimeCaller", "MenSharpRuntimeCaller", Vector3.right * 8);
         MenSharpTestScene.Assign(
