@@ -90,11 +90,22 @@ fn bool_literal(expression: &Expression) -> Option<bool> {
 /// allowed to be. Anything else is `None`: the member is then a case of
 /// its own, which is right unless it aliases another.
 pub(super) fn integer_literal_value(expression: &Expression) -> Option<i64> {
+    if let Expression::Unary(unary) = expression {
+        let value = integer_literal_value(unary.operand.as_ref().ok()?)?;
+        return match unary.operator.value {
+            men_sharp_parser::ast::UnaryOperator::Plus => Some(value),
+            men_sharp_parser::ast::UnaryOperator::Minus => value.checked_neg(),
+            _ => None,
+        };
+    }
     let Expression::Primary(primary) = expression else {
         return None;
     };
     if !primary.chain.is_empty() {
         return None;
+    }
+    if let PrimaryLeft::Parenthesized { expression, .. } = &primary.left {
+        return integer_literal_value(expression);
     }
     let PrimaryLeft::Literal(LiteralExpression::Integer(text)) = &primary.left else {
         return None;

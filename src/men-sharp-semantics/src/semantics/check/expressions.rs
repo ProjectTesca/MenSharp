@@ -101,10 +101,32 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                             .ok()
                             .and_then(super::exhaustive::integer_literal_value)
                             == Some(0);
+                        let operator_value_type = {
+                            use crate::types::conversions::NumericKind::*;
+                            let pair = (
+                                self.system().numeric_kind(&value_type),
+                                self.system().numeric_kind(&target),
+                            );
+                            if !matches!(
+                                operator,
+                                BinaryOperator::LeftShift
+                                    | BinaryOperator::RightShift
+                                    | BinaryOperator::UnsignedRightShift
+                            ) && matches!(
+                                pair,
+                                (Some(Int32), Some(UInt32 | UInt64)) | (Some(Int64), Some(UInt64))
+                            ) && super::exhaustive::integer_literal_value(value)
+                                .is_some_and(|v| v >= 0)
+                            {
+                                target.clone()
+                            } else {
+                                value_type.clone()
+                            }
+                        };
                         let result = self.binary_type(
                             operator,
                             target.clone(),
-                            value_type.clone(),
+                            operator_value_type,
                             literal,
                             zero_literal,
                             assignment.span.clone(),

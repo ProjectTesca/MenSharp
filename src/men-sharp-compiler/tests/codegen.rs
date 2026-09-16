@@ -14280,3 +14280,35 @@ fn invalid_numeric_operators_are_rejected() {
         assert!(!bodies.errors.is_empty(), "accepted {body}");
     }
 }
+
+#[test]
+fn unsigned_compound_assignment_accepts_constant_operands() {
+    // A fitting int constant can select an unsigned operator. Starting at
+    // ulong.MaxValue exposes an incorrect signed conversion before arithmetic.
+    let Some(emulator) = run(
+        r#"
+        namespace Game { public class Program {
+            public static ulong wrapped;
+            public static void Main() {
+                ulong a = ulong.MaxValue;
+                a += 2; a -= 2; a *= 2;
+                wrapped = a;
+            }
+        } }
+    "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert!(matches!(emulator.value_of("wrapped"), Some(Value::UInt64(v)) if *v == u64::MAX - 1));
+    let Some(_) = build(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game { public class Program {
+            public static void Main() { sbyte a = 1; a += (-1); }
+        } }
+    "#,
+    )]) else {
+        return;
+    };
+}

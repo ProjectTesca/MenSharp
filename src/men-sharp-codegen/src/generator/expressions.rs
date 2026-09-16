@@ -2694,6 +2694,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let system = self.type_system();
         let computed = match (system.numeric_kind(&target), system.numeric_kind(value.1)) {
             (Some(l), Some(r)) => {
+                use men_sharp_semantics::types::conversions::NumericKind::*;
+                let fits = matches!(self.program.data[value.0.0].init, HeapInit::Int32(v) if v >= 0)
+                    || matches!(self.program.data[value.0.0].init, HeapInit::Int64(v) if v >= 0);
+                let r = if fits && matches!((r, l), (Int32, UInt32 | UInt64) | (Int64, UInt64)) {
+                    l
+                } else {
+                    r
+                };
+
                 let kind = if matches!(
                     operator,
                     BinaryOperator::LeftShift
