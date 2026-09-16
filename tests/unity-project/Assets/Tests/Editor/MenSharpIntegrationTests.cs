@@ -262,6 +262,10 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // a VRCUrl[] field initializer is baked from the proxy
+        smoke.RunProgram("UrlList");
+        Assert.AreEqual("https://example.com/3", smoke.GetProgramVariable("urlThird"));
+
         // a LINQ field initializer needs the interface dispatchers it calls
         smoke.RunProgram("LinqInitializer");
         Assert.AreEqual(40, smoke.GetProgramVariable("linqThird"));

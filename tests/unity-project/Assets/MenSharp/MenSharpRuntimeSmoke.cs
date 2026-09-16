@@ -5,6 +5,7 @@ using MenSharp;
 using MenSharp.Json;
 using UnityEngine;
 using VRC.SDK3.Image;
+using VRC.SDKBase;
 
 // A deliberately small black-box test program. The Unity test runner invokes
 // its exported events through the SDK's real UdonBehaviour and reads these
@@ -332,6 +333,19 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // a VRCUrl[] built in a field initializer: Udon has no VRCUrl
+    // constructor, so the field is baked from the C# proxy (issue: the
+    // lambda's `new VRCUrl` was an error)
+    private readonly VRCUrl[] urlList = Enumerable.Range(0, 10)
+        .Select(i => new VRCUrl($"https://example.com/{i}"))
+        .ToArray();
+    public string urlThird;
+
+    public void UrlList()
+    {
+        urlThird = urlList[3].Get();
+    }
+
     // a field initializer that walks an IEnumerable<int> (issue: assembly
     // error UnplacedLabel for the GetEnumerator dispatcher)
     private readonly int[] linqValues = Enumerable.Range(1, 4).Select(x => x * 10).ToArray();

@@ -14022,6 +14022,45 @@ fn a_field_initializer_udon_cannot_run_is_left_to_the_proxy() {
 }
 
 #[test]
+fn a_field_initializer_whose_lambda_udon_cannot_run_is_left_to_the_proxy() {
+    // `Enumerable.Range(0, 3).Select(i => new CultureInfo("en-US")).ToArray()`
+    // (the issue's shape, with VRCUrl): the constructor Udon lacks is called
+    // in the lambda, compiled after the initializer's own code — outside
+    // the speculative window, so the error stood. The lambdas are part of
+    // the attempt now, and the field is baked from the proxy like the
+    // plain `new CultureInfo(…)` case
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using System.Globalization;
+        using System.Linq;
+        using MenSharp;
+        public class Thing : MenSharpBehaviour
+        {
+            private readonly CultureInfo[] cultures =
+                Enumerable.Range(0, 3).Select(i => new CultureInfo("en-US")).ToArray();
+            public int count;
+            public void Interact() { count = cultures.Length; }
+        }
+        "#,
+        "Thing",
+    ) else {
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let uasm = program.output.program.to_uasm().unwrap();
+    assert!(!uasm.contains("CultureInfo.__ctor"), "{uasm}");
+    let proxy = &program.output.program.proxy_initialized;
+    assert_eq!(proxy.len(), 1, "{proxy:?}");
+    assert_eq!(proxy[0].field, "cultures");
+    // and the program still assembles: no label was left unplaced
+    program.output.program.assemble().unwrap();
+}
+
+#[test]
 fn a_shadowed_proxy_field_records_its_own_declaring_type() {
     // base and derived both declare `culture`: two distinct heap slots, two
     // proxy-init entries, each naming the class whose field it must read — so

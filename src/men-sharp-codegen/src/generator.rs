@@ -120,6 +120,7 @@ pub fn generate(
         emitted_dispatchers: HashSet::default(),
         export_layouts: HashMap::default(),
         call_edges: HashMap::default(),
+        deferred_function_code: Vec::new(),
         defer_dispatcher_bodies: true,
         field_visits: HashSet::default(),
         deferred_unsupported: Vec::new(),
@@ -496,6 +497,10 @@ struct Generator<'a, 'ast> {
     /// and accessors — the names UdonSharp would use. See `programs`.
     export_layouts: HashMap<SymbolId, HashMap<programs::LayoutKey, programs::ExportLayout>>,
     call_edges: HashMap<FunctionKey, HashSet<FunctionKey>>,
+    /// Function bodies (an initializer's lambdas) compiled inside a field
+    /// initializer's speculative window, kept out of the initializer's own
+    /// code — they are appended after its body, where a function may sit.
+    deferred_function_code: Vec<Op>,
     /// While set, `compile_fixpoint` queues dispatcher implementations but
     /// emits no dispatcher (or type test) body: a body enumerates the
     /// types known when it is written, and the static initializer — lowered
@@ -1620,6 +1625,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
         }
         self.program.code.push(Op::JumpIndirect(init_return));
+        // the function bodies an initializer's speculative window compiled
+        let deferred = std::mem::take(&mut self.deferred_function_code);
+        self.program.code.extend(deferred);
     }
 
     /// Every `static T()` in the compilation, queued for compilation and
@@ -1720,7 +1728,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             && !shared
             && self.is_entry_member(field)
             && self.is_proxy_bakeable_type(&ty);
-        let checkpoint = bakeable.then_some((self.errors.len(), self.program.code.len()));
+        let checkpoint =
+            bakeable.then_some((self.errors.len(), self.program.code.len(), self.queue.len()));
 
         let guard = shared.then(|| self.begin_owner_guard());
         let place = if shared {
@@ -1744,7 +1753,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if let Some(skip) = guard {
             self.end_owner_guard(skip);
         }
-        if let Some((errors, code)) = checkpoint
+        if let Some((_, _, queued)) = checkpoint
+            && self.queue.len() > queued
+        {
+            // what the initializer queued — its lambdas (`.Select(i => new
+            // VRCUrl(…))`) — is part of the attempt: an error in one is the
+            // initializer's. Their bodies go to a side buffer, appended
+            // after the initializer's own code, and stay whatever happens:
+            // a thunk or a closure may still name their labels
+            let mut side = Vec::new();
+            std::mem::swap(&mut self.program.code, &mut side);
+            while self.queue.len() > queued {
+                let key = self.queue.pop_back().expect("queued");
+                self.compile_function(&key);
+            }
+            std::mem::swap(&mut self.program.code, &mut side);
+            self.deferred_function_code.extend(side);
+        }
+        if let Some((errors, code, _)) = checkpoint
             && self.errors.len() > errors
         {
             // roll the failed emission back and hand the field to the proxy
