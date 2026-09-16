@@ -137,16 +137,7 @@ public class MenSharpIntegrationTests
         UdonBehaviour smoke = FindUdon("MenSharpRuntimeSmoke");
         Assert.IsTrue(smoke.IsInitialized, "the SDK did not initialise the smoke UdonBehaviour");
 
-        // A cached token is canceled by the generated pre-hook before OnDestroy.
         UdonBehaviour uncached = FindUdon("MenSharpRuntimeSmoke2");
-        smoke.RunProgram("Start");
-        uncached.RunProgram("Start");
-        smoke.RunProgram("OnDestroy");
-        uncached.RunProgram("OnDestroy");
-        Assert.AreEqual(true, smoke.GetProgramVariable("destroyTokenCached"));
-        Assert.AreEqual(true, smoke.GetProgramVariable("destroyTokenCanceled"));
-        Assert.AreEqual(false, uncached.GetProgramVariable("destroyTokenCached"));
-        Assert.AreEqual(false, uncached.GetProgramVariable("destroyTokenCanceled"));
 
         smoke.RunProgram("Greet");
         Assert.AreEqual("Start: Hello", smoke.GetProgramVariable("greeted"));
@@ -369,6 +360,17 @@ public class MenSharpIntegrationTests
         shadow.RunProgram("Run");
         Assert.AreEqual("https://example.com/base", shadow.GetProgramVariable("baseUrl"));
         Assert.AreEqual("https://example.com/derived", shadow.GetProgramVariable("derivedUrl"));
+
+        // Keep the lifecycle event last; the SDK may treat manual OnDestroy as terminal.
+        // The generated pre-hook still cancels a cached token before the user handler.
+        smoke.RunProgram("Start");
+        uncached.RunProgram("Start");
+        smoke.RunProgram("OnDestroy");
+        uncached.RunProgram("OnDestroy");
+        Assert.AreEqual(true, smoke.GetProgramVariable("destroyTokenCached"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("destroyTokenCanceled"));
+        Assert.AreEqual(false, uncached.GetProgramVariable("destroyTokenCached"));
+        Assert.AreEqual(false, uncached.GetProgramVariable("destroyTokenCanceled"));
 
         yield return new ExitPlayMode();
         AssetDatabase.DeleteAsset(GeneratedScene);
