@@ -1787,7 +1787,7 @@ fn small_integer_compound_assignment_computes_in_int_and_casts_back() {
                 char c = 'A';
                 c++;
                 after = c.ToString();       // "B"
-                c += 1;
+                c += (char)1;
                 code = c;                   // 67
                 char w = (char)65601;       // 65601 & 0xFFFF = 65: an unchecked cast wraps
                 wrapped = w.ToString();     // "A"
@@ -14246,5 +14246,37 @@ fn small_integer_metadata_constants_keep_their_heap_types() {
                 }
         });
         assert!(slot.is_some(), "missing typed constant {name}");
+    }
+}
+
+#[test]
+fn invalid_numeric_operators_are_rejected() {
+    // A usable Udon conversion does not make an operator legal in C#.
+    // Reject invalid operand pairs during checking, including compound
+    // assignments whose right operand cannot implicitly convert to the left.
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    for body in [
+        "long a = 1; ulong b = 1; var c = a + b;",
+        "long a = 1; ulong b = 1; var c = a == b;",
+        "int a = 1; uint b = 1; var c = a << b;",
+        "float a = 1; var c = a << 1;",
+        "decimal a = 1; double b = 1; var c = a + b;",
+        "int a = 1; var c = a && a;",
+        "ulong a = 1; var c = -a;",
+        "byte a = 1; long b = 1; a += b;",
+        "char a = 'a'; a += 1;",
+        "byte a = 1; a += 300;",
+    ] {
+        let source = format!("class Probe {{ void Run() {{ {body} }} }}");
+        let files = compiler.parse(vec![SourceCode::new("test.cs", source)]);
+        let declarations = compiler.collect_declarations(&files);
+        let signatures = compiler.resolve_signatures(&declarations, &references);
+        let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+        assert!(!bodies.errors.is_empty(), "accepted {body}");
     }
 }

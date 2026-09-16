@@ -104,17 +104,48 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         let result = self.binary_type(
                             operator,
                             target.clone(),
-                            value_type,
+                            value_type.clone(),
                             literal,
                             zero_literal,
                             assignment.span.clone(),
                             Some(EntityID::from(*assignment)),
                         );
-                        // compound assignment narrows back implicitly (int += byte)
+                        // A predefined compound operator may narrow its result,
+                        // but the RHS must still convert implicitly to the LHS
+                        // (except for shifts). `byte += byte` is valid; `byte += long` is not.
                         if !matches!(result, Type::Error) {
-                            let compatible =
-                                self.system().is_implicitly_convertible(&result, &target)
-                                    || self.system().numeric_kind(&target).is_some();
+                            let system = self.system();
+                            let numeric = system.numeric_kind(&target).is_some()
+                                && system.numeric_kind(&value_type).is_some();
+                            let shift = matches!(
+                                operator,
+                                BinaryOperator::LeftShift
+                                    | BinaryOperator::RightShift
+                                    | BinaryOperator::UnsignedRightShift
+                            );
+                            let constant_fits = if system.numeric_kind(&value_type)
+                                == Some(crate::types::conversions::NumericKind::Int32)
+                            {
+                                super::exhaustive::integer_literal_value(value).is_some_and(|v| {
+                                    use crate::types::conversions::NumericKind::*;
+                                    match system.numeric_kind(&target) {
+                                        Some(SByte) => i8::try_from(v).is_ok(),
+                                        Some(Byte) => u8::try_from(v).is_ok(),
+                                        Some(Int16) => i16::try_from(v).is_ok(),
+                                        Some(UInt16) => u16::try_from(v).is_ok(),
+                                        Some(UInt32) => u32::try_from(v).is_ok(),
+                                        Some(UInt64) => v >= 0,
+                                        _ => false,
+                                    }
+                                })
+                            } else {
+                                false
+                            };
+                            let compatible = system.is_implicitly_convertible(&result, &target)
+                                || (numeric
+                                    && (shift
+                                        || system.is_implicitly_convertible(&value_type, &target)
+                                        || constant_fits));
                             if !compatible {
                                 let kind = SemanticErrorKind::TypeMismatch {
                                     expected: self.describe(&target),
