@@ -293,6 +293,15 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // sizeof of the thirteen constant-size types
+        smoke.RunProgram("SizeofConstants");
+        Assert.AreEqual("1,1,1,2,2,2,4,4,4,8,8,8,16", smoke.GetProgramVariable("sizeofValues"));
+        Assert.AreEqual(21, smoke.GetProgramVariable("sizeofConst"));
+
+        // const expressions convert wherever they are declared
+        smoke.RunProgram("ConstCompound");
+        Assert.AreEqual(27, smoke.GetProgramVariable("constCompound"));
+
         // a VRCUrl[] field initializer is baked from the proxy
         smoke.RunProgram("UrlList");
         Assert.AreEqual("https://example.com/3", smoke.GetProgramVariable("urlThird"));

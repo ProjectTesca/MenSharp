@@ -4077,6 +4077,33 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             },
             PrimaryLeft::New(new_expression) => self.lower_new(ctx, new_expression),
+            // `sizeof(int)`: the checker admitted only the thirteen types
+            // whose size is a constant, so this is an Int32 constant
+            PrimaryLeft::Sizeof {
+                target_type, span, ..
+            } => {
+                let size = target_type
+                    .as_ref()
+                    .ok()
+                    .and_then(|type_ref| {
+                        self.bodies
+                            .resolved_types
+                            .get(&EntityID::from(type_ref))
+                            .cloned()
+                    })
+                    .and_then(|ty| self.type_system().sizeof_value(&ty));
+                match size {
+                    Some(size) => Piece::Value(self.int_constant(size), self.corlib_type("Int32")),
+                    None => {
+                        self.error(
+                            ctx,
+                            Message::key("codegen.this_expression_is_not_supported_by_the"),
+                            span.clone(),
+                        );
+                        Piece::Error
+                    }
+                }
+            }
             PrimaryLeft::Typeof {
                 target_type, span, ..
             } => {

@@ -145,6 +145,7 @@ async_by_ref_parameter = "an `async` method cannot have `ref` or `out` parameter
 yield_outside_iterator = "`yield` is only allowed in a method returning `IEnumerable<T>` or `IEnumerator<T>`"
 yield_inside_try = "`yield` cannot appear inside a {region}"
 return_in_iterator = "an iterator cannot `return` a value: use `yield return` and `yield break`"
+sizeof_requires_unsafe = "`sizeof({type_name})` needs an `unsafe` context: without one, `sizeof` works on bool, char, the integer types, float, double and decimal"
 unsupported_expression = "this expression is not supported"
 unsupported_statement = "this statement is not supported"
 

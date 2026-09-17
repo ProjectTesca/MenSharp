@@ -207,6 +207,12 @@ pub enum SemanticErrorKind {
     },
     /// `return value;` in an iterator (CS1622).
     ReturnInIterator,
+    /// `sizeof(T)` on a type C# only sizes in an `unsafe` context (CS0233):
+    /// anything but `bool`, `char`, the integer types, `float`, `double`
+    /// and `decimal`.
+    SizeofRequiresUnsafe {
+        type_name: String,
+    },
     /// A construct the checker does not handle yet. Temporary scaffolding: each of
     /// these becomes a real implementation or a precise "unsupported on Udon"
     /// diagnostic as the checker grows.
@@ -365,6 +371,9 @@ impl SemanticErrorKind {
                 Message::key("semantics.yield_inside_try").arg("region", region)
             }
             SemanticErrorKind::ReturnInIterator => Message::key("semantics.return_in_iterator"),
+            SemanticErrorKind::SizeofRequiresUnsafe { type_name } => {
+                Message::key("semantics.sizeof_requires_unsafe").arg("type_name", type_name)
+            }
             SemanticErrorKind::UnsupportedExpression => {
                 Message::key("semantics.unsupported_expression")
             }
@@ -429,6 +438,7 @@ impl SemanticErrorKind {
             | AsyncByRefParameter
             | YieldOutsideIterator
             | YieldInsideTry { .. }
+            | SizeofRequiresUnsafe { .. }
             | ReturnInIterator => "SemanticsError",
         }
     }

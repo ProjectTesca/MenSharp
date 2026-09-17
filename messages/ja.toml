@@ -144,6 +144,7 @@ async_by_ref_parameter = "`async` メソッドは `ref` や `out` のパラメ�
 yield_outside_iterator = "`yield` は `IEnumerable<T>` か `IEnumerator<T>` を返すメソッドの中でだけ使えます"
 yield_inside_try = "`yield` は {region} の中には書けません"
 return_in_iterator = "イテレータでは値を `return` できません: `yield return` と `yield break` を使ってください"
+sizeof_requires_unsafe = "`sizeof({type_name})` には `unsafe` コンテキストが必要です: `unsafe` なしで `sizeof` を使えるのは bool、char、整数型、float、double、decimal です"
 unsupported_expression = "この式は未対応です"
 unsupported_statement = "この文は未対応です"
 

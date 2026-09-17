@@ -797,7 +797,23 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 }
                 Meaning::Value(self.corlib("Type"))
             }
-            PrimaryLeft::Sizeof { .. } => Meaning::Value(self.corlib("Int32")),
+            // `sizeof(int)`: an int constant for the thirteen types C#
+            // sizes outside `unsafe`; anything else needs `unsafe`, which
+            // M# does not have
+            PrimaryLeft::Sizeof {
+                target_type, span, ..
+            } => {
+                if let Ok(target_type) = target_type {
+                    let ty = self.resolve_type(target_type);
+                    if !matches!(ty, Type::Error) && self.system().sizeof_value(&ty).is_none() {
+                        let kind = SemanticErrorKind::SizeofRequiresUnsafe {
+                            type_name: self.describe(&ty),
+                        };
+                        self.error(kind, span.clone());
+                    }
+                }
+                Meaning::Value(self.corlib("Int32"))
+            }
             // nameof's operand may be a method group or type; C# only reads its
             // spelling, so it goes unchecked here
             PrimaryLeft::Nameof { .. } => Meaning::Value(self.corlib("String")),

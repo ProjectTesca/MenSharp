@@ -77,6 +77,18 @@ impl NumericKind {
             .unwrap()
     }
 
+    /// `sizeof` of the type, in bytes (C# §23.6.9): a compile-time
+    /// constant that needs no `unsafe` context for these types.
+    pub fn size_in_bytes(self) -> i32 {
+        match self {
+            Self::SByte | Self::Byte => 1,
+            Self::Int16 | Self::UInt16 | Self::Char => 2,
+            Self::Int32 | Self::UInt32 | Self::Single => 4,
+            Self::Int64 | Self::UInt64 | Self::Double => 8,
+            Self::Decimal => 16,
+        }
+    }
+
     /// The C# keyword: `int` for `Int32`.
     pub fn keyword(&self) -> &'static str {
         match self {
@@ -192,6 +204,15 @@ impl TypeSystem<'_, '_> {
             .iter()
             .find(|(name, _)| self.external.find_type(&["System"], name, 0) == Some(*id))
             .map(|(_, kind)| *kind)
+    }
+
+    /// `sizeof(ty)` where C# makes it a constant outside `unsafe`: `bool`
+    /// and the twelve numeric types. `None` for any other type.
+    pub fn sizeof_value(&self, ty: &Type) -> Option<i32> {
+        if self.is_system_type(ty, "Boolean") {
+            return Some(1);
+        }
+        self.numeric_kind(ty).map(NumericKind::size_in_bytes)
     }
 
     pub fn is_bool(&self, ty: &Type) -> bool {

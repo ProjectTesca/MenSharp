@@ -489,6 +489,8 @@ fn starts_constant_pattern(kind: TokenKind) -> bool {
             | TokenKind::Null
             | TokenKind::Minus
             | TokenKind::Plus
+            // `case sizeof(int):` -- a constant, never a type
+            | TokenKind::Sizeof
     )
 }
 

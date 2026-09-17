@@ -75,6 +75,24 @@ fn run_stepping(source: &str, event: &str, steps: &[(f32, i32)]) -> Option<Emula
     Some(emulator)
 }
 
+/// No syntax error in the M# sources: a construct the parser gave up on is
+/// dropped from the tree, so a test would otherwise run the program without
+/// it and never say why. A foreign (library) file may be broken on
+/// purpose — its members are an error only when used.
+fn assert_no_syntax_errors(files: &[men_sharp_compiler::ParsedFile]) {
+    let errors: Vec<String> = files
+        .iter()
+        .filter(|file| !file.foreign)
+        .flat_map(|file| {
+            file.ast
+                .errors()
+                .iter()
+                .map(move |error| format!("{}: {error:?}", file.name))
+        })
+        .collect();
+    assert!(errors.is_empty(), "syntax errors: {errors:#?}");
+}
+
 /// Compiles `sources` (adding the mini-corlib when absent) to an assembled
 /// program, asserting that every phase is clean.
 fn build(
@@ -92,6 +110,7 @@ fn build(
     let references = compiler.load_references(&bytes).unwrap();
 
     let files = compiler.parse(sources);
+    assert_no_syntax_errors(&files);
     let declarations = compiler.collect_declarations(&files);
     let signatures = compiler.resolve_signatures(&declarations, &references);
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
@@ -678,6 +697,7 @@ fn the_shipped_demo_runs_in_the_emulator() {
     sources.extend(Compiler::corlib_sources());
 
     let files = compiler.parse(sources);
+    assert_no_syntax_errors(&files);
     let declarations = compiler.collect_declarations(&files);
     let signatures = compiler.resolve_signatures(&declarations, &references);
     let bodies = compiler.check_bodies(&declarations, &signatures, &references);
@@ -2198,6 +2218,209 @@ fn a_field_initializer_may_dispatch_through_an_interface() {
     };
     assert_eq!(int_of(&emulator, "third"), 40);
     assert_eq!(int_of(&emulator, "sum"), 12);
+}
+
+#[test]
+fn a_const_expression_converts_wherever_it_is_declared() {
+    // `byte += K` needs K to be a constant that fits a byte. A `const`
+    // defined by an expression was only recognised when its initializer
+    // had been checked already — declared above the use in the same class —
+    // so below the use, or in another class, the compound assignment was a
+    // false "expected `byte`, found `int`" (regression from PR #6). The
+    // emulator holds no byte, so this checks that it compiles cleanly; the
+    // Unity smoke `ConstCompound` checks the value on the SDK VM
+    let Some(messages) = codegen_messages(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int result;
+
+            public void Interact()
+            {
+                byte b = 1;
+                b += Limits.Step;       // another class: 2 * 3
+                b += Later;             // this class, below: 1 << 2
+                b |= Chained;           // below, naming another const below: Base * 8
+                b += Folded;            // an int shift by 33 & 31 = 1: 2
+                result = b;             // 1 + 6 + 4 = 11, | 16 = 27, + 2 = 29
+            }
+
+            const int Later = 1 << 2;
+            const int Chained = Base * 8;
+            const int Base = 2;
+            const int Folded = 1 << 33;
+        }
+
+        public static class Limits
+        {
+            public const int Step = 2 * 3;
+        }
+        "#,
+        "Probe",
+    ) else {
+        return;
+    };
+    assert!(messages.is_empty(), "{messages:?}");
+}
+
+#[test]
+fn a_const_expression_out_of_range_is_still_rejected() {
+    // C# (CS0031): 300 * 2 is no byte, wherever the const is declared
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public void Interact()
+            {
+                byte b = 1;
+                b += Big;
+                b += Limits.Wide;
+            }
+
+            const int Big = 300 * 2;
+        }
+
+        public static class Limits
+        {
+            public const int Wide = 1 << 20;
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let mismatches = bodies
+        .errors
+        .iter()
+        .filter(|error| {
+            matches!(
+                error.kind,
+                men_sharp_semantics::SemanticErrorKind::TypeMismatch { .. }
+            )
+        })
+        .count();
+    assert_eq!(mismatches, 2, "{:#?}", bodies.errors);
+}
+
+#[test]
+fn sizeof_is_a_constant_for_the_thirteen_sized_types() {
+    // `sizeof(T)` needs no `unsafe` for bool, char, the integer types,
+    // float, double and decimal, and is a constant there: usable in a
+    // `const`, a switch label, and as an int constant a byte takes
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public string sizes;
+            public int doubled;
+            public string matched;
+            public int qualified;
+
+            const int K = sizeof(long) * 2;
+
+            public void Interact()
+            {
+                sizes = sizeof(bool) + "," + sizeof(byte) + "," + sizeof(sbyte) + ","
+                    + sizeof(char) + "," + sizeof(short) + "," + sizeof(ushort) + ","
+                    + sizeof(int) + "," + sizeof(uint) + "," + sizeof(float) + ","
+                    + sizeof(long) + "," + sizeof(ulong) + "," + sizeof(double) + ","
+                    + sizeof(decimal);
+                doubled = K;                                             // 16
+                int n = 4;
+                matched = n switch { sizeof(int) => "int", _ => "other" };
+                switch (n) { case sizeof(float): matched += "+float"; break; }
+                qualified = sizeof(System.Int32);                        // 4
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(string_of(&emulator, "sizes"), "1,1,1,2,2,2,4,4,4,8,8,8,16");
+    assert_eq!(int_of(&emulator, "doubled"), 16);
+    assert_eq!(string_of(&emulator, "matched"), "int+float");
+    assert_eq!(int_of(&emulator, "qualified"), 4);
+
+    // and a byte takes it as an int constant, wherever it is declared (the
+    // emulator holds no byte: compile-clean is what is checked here)
+    let Some(messages) = codegen_messages(
+        r#"
+        using MenSharp;
+        public class Probe : MenSharpBehaviour
+        {
+            public void Interact() { byte b = 1; b += sizeof(int); b += Later; }
+            const int Later = sizeof(ushort);
+        }
+        "#,
+        "Probe",
+    ) else {
+        return;
+    };
+    assert!(messages.is_empty(), "{messages:?}");
+}
+
+#[test]
+fn sizeof_of_any_other_type_needs_unsafe() {
+    // CS0233: an enum, a struct, a nullable have no size outside `unsafe`,
+    // which M# has not
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using System;
+        using MenSharp;
+
+        public struct Point { public int x; }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public void Interact()
+            {
+                var a = sizeof(DayOfWeek);
+                var b = sizeof(Point);
+                var c = sizeof(int?);
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let unsafe_sizeofs = bodies
+        .errors
+        .iter()
+        .filter(|error| {
+            matches!(
+                error.kind,
+                men_sharp_semantics::SemanticErrorKind::SizeofRequiresUnsafe { .. }
+            )
+        })
+        .count();
+    assert_eq!(unsafe_sizeofs, 3, "{:#?}", bodies.errors);
 }
 
 #[test]

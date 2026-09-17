@@ -333,6 +333,41 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // `sizeof` of the thirteen types C# sizes without `unsafe`: an int
+    // constant (issue: "this expression is not supported")
+    public string sizeofValues;
+    public int sizeofConst;
+    const int SizeofWide = sizeof(long) * 2;
+
+    public void SizeofConstants()
+    {
+        sizeofValues = string.Join(",", new object[] {
+            sizeof(bool), sizeof(byte), sizeof(sbyte), sizeof(char),
+            sizeof(short), sizeof(ushort), sizeof(int), sizeof(uint),
+            sizeof(float), sizeof(long), sizeof(ulong), sizeof(double),
+            sizeof(decimal) });
+        byte b = 1;
+        b += sizeof(int);
+        sizeofConst = SizeofWide + b;             // 16 + 5
+    }
+
+    // `byte += K` with K a const expression declared below, in another
+    // class, or naming another const (issue: a false type mismatch)
+    public int constCompound;
+
+    public void ConstCompound()
+    {
+        byte b = 1;
+        b += SmokeLimits.Step;
+        b += SmokeLater;
+        b |= SmokeChained;
+        constCompound = b;
+    }
+
+    const int SmokeLater = 1 << 2;
+    const int SmokeChained = SmokeBase * 8;
+    const int SmokeBase = 2;
+
     // a VRCUrl[] built in a field initializer: Udon has no VRCUrl
     // constructor, so the field is baked from the C# proxy (issue: the
     // lambda's `new VRCUrl` was an error)
@@ -662,6 +697,12 @@ public static class GenericCache<T>
     // a constant-literal initializer: one per closed type (int and string
     // each start at 7), baked with no code
     public static int Seeded = 7;
+}
+
+// what `ConstCompound` reads from another class
+public static class SmokeLimits
+{
+    public const int Step = 2 * 3;
 }
 
 // what `EnumUnderlying` uses: the issue's enums

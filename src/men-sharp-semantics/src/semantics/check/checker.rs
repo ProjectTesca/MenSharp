@@ -352,23 +352,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         }
                     }
                     crate::types::lookup::MemberOrigin::Source(id) => {
-                        let symbol = self.resolver.declarations.table.symbol(*id);
-                        let value = symbol.declarations.iter().find_map(|site| {
-                            if let crate::symbol::SyntaxRef::Field { field, declarator } =
-                                site.syntax
-                                && field
-                                    .modifiers
-                                    .iter()
-                                    .any(|m| m.value == men_sharp_parser::ast::Modifier::Const)
-                                && let Some(men_sharp_parser::ast::InitializerValue::Expression(
-                                    value,
-                                )) = &declarator.initializer
-                            {
-                                return Some(value);
-                            }
-                            None
-                        })?;
-                        self.integer_constant_inner(value, depth - 1)?
+                        self.source_const_value(*id, depth - 1)?
                     }
                     _ => return None,
                 }
@@ -384,6 +368,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         .find_map(|scope| scope.locals.get(name.value))?
                         .integer_constant?
                 }
+                PrimaryLeft::Sizeof {
+                    target_type: Ok(target_type),
+                    ..
+                } => i128::from(self.sizeof_constant(target_type)?),
                 _ => i128::from(super::exhaustive::integer_literal_value(expression)?),
             },
             Expression::Cast(cast) => {
@@ -442,18 +430,237 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             _ => return None,
         };
-        let fits = match kind {
-            SByte => i8::try_from(value).is_ok(),
-            Byte => u8::try_from(value).is_ok(),
-            Int16 => i16::try_from(value).is_ok(),
-            UInt16 | Char => u16::try_from(value).is_ok(),
-            Int32 => i32::try_from(value).is_ok(),
-            UInt32 => u32::try_from(value).is_ok(),
-            Int64 => i64::try_from(value).is_ok(),
-            UInt64 => u64::try_from(value).is_ok(),
-            _ => false,
+        integer_fits(kind, value).then_some(value)
+    }
+
+    /// The initializer expression of a source `const` field, or `None` for
+    /// any other member.
+    fn const_initializer(&self, field: SymbolId) -> Option<&'ast Expression<'ast, 'ast>> {
+        let symbol = self.resolver.declarations.table.symbol(field);
+        symbol.declarations.iter().find_map(|site| {
+            if let crate::symbol::SyntaxRef::Field { field, declarator } = site.syntax
+                && field
+                    .modifiers
+                    .iter()
+                    .any(|m| m.value == men_sharp_parser::ast::Modifier::Const)
+                && let Some(men_sharp_parser::ast::InitializerValue::Expression(value)) =
+                    &declarator.initializer
+            {
+                return Some(value);
+            }
+            None
+        })
+    }
+
+    /// The value of a source `const` field. Its initializer may not have
+    /// been checked yet — it sits below the use, or in another class — so
+    /// an unchecked one is evaluated structurally against the field's
+    /// declared type rather than through the types recorded for it (which
+    /// made the answer depend on declaration order).
+    fn source_const_value(&self, field: SymbolId, depth: usize) -> Option<i128> {
+        let value = self.const_initializer(field)?;
+        if self.expression_types.contains_key(&EntityID::from(value)) {
+            return self.integer_constant_inner(value, depth);
+        }
+        let kind = match self.signatures.members.get(&field) {
+            Some(crate::types::MemberSignature::Field(ty)) => self.system().numeric_kind(ty)?,
+            _ => return None,
         };
-        fits.then_some(value)
+        let owner = self.resolver.declarations.table.symbol(field).parent;
+        let value = self.untyped_integer_constant(value, owner, depth)?;
+        integer_fits(kind, value).then_some(value)
+    }
+
+    /// An integer constant expression no type was recorded for: literals,
+    /// parentheses, unary and binary operators, casts (their value; C#
+    /// rejects an out-of-range constant cast without `unchecked` anyway),
+    /// and names of `const` fields of `owner` or a type enclosing it.
+    fn untyped_integer_constant(
+        &self,
+        expression: &Expression<'ast, 'ast>,
+        owner: Option<SymbolId>,
+        depth: usize,
+    ) -> Option<i128> {
+        if depth == 0 {
+            return None;
+        }
+        match expression {
+            Expression::Primary(primary) if primary.chain.is_empty() => match &primary.left {
+                PrimaryLeft::Parenthesized { expression, .. } => {
+                    self.untyped_integer_constant(expression, owner, depth - 1)
+                }
+                PrimaryLeft::Identifier {
+                    name,
+                    generics: None,
+                    ..
+                } => {
+                    let field = self.const_field_named(owner, name.value)?;
+                    self.source_const_value(field, depth - 1)
+                }
+                PrimaryLeft::Literal(_) => {
+                    super::exhaustive::integer_literal_value(expression).map(i128::from)
+                }
+                PrimaryLeft::Sizeof {
+                    target_type: Ok(target_type),
+                    ..
+                } => self.sizeof_constant(target_type).map(i128::from),
+                _ => None,
+            },
+            Expression::Cast(cast) => {
+                self.untyped_integer_constant(cast.value.as_ref().ok()?, owner, depth - 1)
+            }
+            Expression::Unary(unary) => {
+                let value =
+                    self.untyped_integer_constant(unary.operand.as_ref().ok()?, owner, depth - 1)?;
+                match unary.operator.value {
+                    UnaryOperator::Plus => Some(value),
+                    UnaryOperator::Minus => value.checked_neg(),
+                    UnaryOperator::BitwiseNot => Some(!value),
+                    _ => None,
+                }
+            }
+            Expression::Binary(binary) => {
+                let right_expression = binary.right.as_ref().ok()?;
+                let left = self.untyped_integer_constant(&binary.left, owner, depth - 1)?;
+                let right = self.untyped_integer_constant(right_expression, owner, depth - 1)?;
+                match binary.operator.value {
+                    BinaryOperator::Add => left.checked_add(right),
+                    BinaryOperator::Subtract => left.checked_sub(right),
+                    BinaryOperator::Multiply => left.checked_mul(right),
+                    BinaryOperator::Divide => left.checked_div(right),
+                    BinaryOperator::Modulo => left.checked_rem(right),
+                    BinaryOperator::BitwiseAnd => Some(left & right),
+                    BinaryOperator::BitwiseOr => Some(left | right),
+                    BinaryOperator::BitwiseXor => Some(left ^ right),
+                    operator @ (BinaryOperator::LeftShift
+                    | BinaryOperator::RightShift
+                    | BinaryOperator::UnsignedRightShift) => {
+                        // the left operand's own type sets the width, as in
+                        // C#: `1 << 33` is an int shift by 1, `1L << 33` not
+                        let wide = self.untyped_is_long(&binary.left, owner, depth - 1);
+                        let bits: u32 = if wide { 64 } else { 32 };
+                        let count = (right as u32) & (bits - 1);
+                        Some(match (operator, wide) {
+                            (BinaryOperator::LeftShift, false) => {
+                                i128::from((left as i32).wrapping_shl(count))
+                            }
+                            (BinaryOperator::LeftShift, true) => {
+                                i128::from((left as i64).wrapping_shl(count))
+                            }
+                            (BinaryOperator::UnsignedRightShift, false) => {
+                                i128::from((left as u32) >> count)
+                            }
+                            (BinaryOperator::UnsignedRightShift, true) => {
+                                i128::from((left as u64) >> count)
+                            }
+                            (_, false) => i128::from((left as i32) >> count),
+                            (_, true) => i128::from((left as i64) >> count),
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
+
+    /// Is an unchecked integer constant expression a `long`/`ulong` rather
+    /// than an `int`/`uint`? A suffixed or out-of-uint-range literal, or a
+    /// const field declared so; for an operator, either operand.
+    fn untyped_is_long(
+        &self,
+        expression: &Expression<'ast, 'ast>,
+        owner: Option<SymbolId>,
+        depth: usize,
+    ) -> bool {
+        use crate::types::conversions::NumericKind::{Int64, UInt64};
+        if depth == 0 {
+            return false;
+        }
+        match expression {
+            Expression::Primary(primary) if primary.chain.is_empty() => match &primary.left {
+                PrimaryLeft::Parenthesized { expression, .. } => {
+                    self.untyped_is_long(expression, owner, depth - 1)
+                }
+                PrimaryLeft::Literal(LiteralExpression::Integer(text)) => {
+                    let suffixed = text.value.to_ascii_lowercase().contains('l');
+                    suffixed
+                        || super::exhaustive::integer_literal_value(expression)
+                            .is_none_or(|value| u32::try_from(value).is_err())
+                }
+                PrimaryLeft::Identifier { name, .. } => self
+                    .const_field_named(owner, name.value)
+                    .and_then(|field| match self.signatures.members.get(&field) {
+                        Some(crate::types::MemberSignature::Field(ty)) => {
+                            self.system().numeric_kind(ty)
+                        }
+                        _ => None,
+                    })
+                    .is_some_and(|kind| matches!(kind, Int64 | UInt64)),
+                _ => false,
+            },
+            Expression::Unary(unary) => unary
+                .operand
+                .as_ref()
+                .is_ok_and(|operand| self.untyped_is_long(operand, owner, depth - 1)),
+            Expression::Binary(binary) => {
+                let shift = matches!(
+                    binary.operator.value,
+                    BinaryOperator::LeftShift
+                        | BinaryOperator::RightShift
+                        | BinaryOperator::UnsignedRightShift
+                );
+                self.untyped_is_long(&binary.left, owner, depth - 1)
+                    || (!shift
+                        && binary
+                            .right
+                            .as_ref()
+                            .is_ok_and(|right| self.untyped_is_long(right, owner, depth - 1)))
+            }
+            _ => false,
+        }
+    }
+
+    /// The value of `sizeof(T)`: from the type the checker resolved for it,
+    /// or — in an initializer not checked yet — from the keyword spelled.
+    fn sizeof_constant(&self, target: &men_sharp_parser::ast::TypeRef<'ast, 'ast>) -> Option<i32> {
+        use men_sharp_parser::ast::{PredefinedType as P, TypeRefBase};
+        if let Some(ty) = self.resolver.out.type_of.get(&EntityID::from(target)) {
+            return self.system().sizeof_value(ty);
+        }
+        let TypeRefBase::Predefined(predefined) = &target.base else {
+            return None;
+        };
+        if !target.suffixes.is_empty() {
+            return None;
+        }
+        Some(match predefined.value {
+            P::Bool | P::Byte | P::Sbyte => 1,
+            P::Char | P::Short | P::Ushort => 2,
+            P::Int | P::Uint | P::Float => 4,
+            P::Long | P::Ulong | P::Double => 8,
+            P::Decimal => 16,
+            _ => return None,
+        })
+    }
+
+    /// A `const` field called `name` on `owner` or a type enclosing it.
+    fn const_field_named(&self, owner: Option<SymbolId>, name: &str) -> Option<SymbolId> {
+        let table = &self.resolver.declarations.table;
+        let mut current = owner;
+        while let Some(ty) = current {
+            let symbol = table.symbol(ty);
+            if let Some(field) = symbol
+                .members_named(name)
+                .iter()
+                .copied()
+                .find(|&member| self.const_initializer(member).is_some())
+            {
+                return Some(field);
+            }
+            current = symbol.parent;
+        }
+        None
     }
 
     /// The constant-expression allowance, without evaluating: an integer
@@ -514,5 +721,21 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             _ => false,
         }
+    }
+}
+
+/// Does `value` lie in the range of the integral type `kind`?
+fn integer_fits(kind: crate::types::conversions::NumericKind, value: i128) -> bool {
+    use crate::types::conversions::NumericKind::*;
+    match kind {
+        SByte => i8::try_from(value).is_ok(),
+        Byte => u8::try_from(value).is_ok(),
+        Int16 => i16::try_from(value).is_ok(),
+        UInt16 | Char => u16::try_from(value).is_ok(),
+        Int32 => i32::try_from(value).is_ok(),
+        UInt32 => u32::try_from(value).is_ok(),
+        Int64 => i64::try_from(value).is_ok(),
+        UInt64 => u64::try_from(value).is_ok(),
+        _ => false,
     }
 }
