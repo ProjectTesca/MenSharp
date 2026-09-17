@@ -352,6 +352,8 @@ struct FieldCallback {
 struct EventEntry {
     name: String,
     key: FunctionKey,
+    /// Pre-hooks, in execution order, before the event body.
+    before: Vec<FunctionKey>,
     arguments: Vec<EventArgument>,
     /// `OnOwnershipRequest`: Udon reads the result back from `__returnValue`.
     returns_value: bool,
@@ -995,6 +997,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 entries.push(EventEntry {
                     name,
                     key,
+                    before: Vec::new(),
                     arguments,
                     // the one event whose *result* Udon reads back, from
                     // `__returnValue` (UdonSharp does the same copy)
@@ -1017,6 +1020,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             }
         }
+        self.add_destroy_token_handler(&mut entries, &mut claimed);
         // `[FieldChangeCallback]` fields each get an `_onVarChange_…` entry;
         // collected before the queue drains so their setters get compiled
         let callbacks = self.collect_field_callbacks();
@@ -1070,6 +1074,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             entries.push(EventEntry {
                 name: delegates::REMOTE_INVOKE_EVENT.to_string(),
                 key,
+                before: Vec::new(),
                 arguments: Vec::new(),
                 returns_value: false,
                 result_slot: None,
@@ -1097,6 +1102,22 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let name = &entry.name;
             let key = &entry.key;
             self.begin_entry_stub(name, init_label, init_return, initialized);
+
+            for (index, before) in entry.before.iter().enumerate() {
+                let function = &self.functions[before];
+                let (return_slot, label) = (function.return_slot, function.label);
+                // Resume at the next hook, or the event body, after this call.
+                let done = self
+                    .program
+                    .add_label(format!("event_{name}__before_{index}_done"));
+                let return_to_stub =
+                    self.code_address_constant(format!("__ret_before_{name}_{index}"), Some(done));
+                self.copy(return_to_stub, return_slot);
+                self.program.code.push(Op::Jump(Target::Label(label)));
+                self.program.code.push(Op::Label(done));
+                // Do not continue into the event after an uncaught hook error.
+                self.emit_unhandled_check(name);
+            }
 
             // the event's arguments: the runtime wrote them into the named
             // slots before raising the event; hand them to the function
@@ -2846,6 +2867,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             entries.push(EventEntry {
                 name,
                 key,
+                before: Vec::new(),
                 arguments,
                 returns_value: false,
                 result_slot: None,
@@ -2853,6 +2875,63 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             added = true;
         }
         added
+    }
+
+    /// Adds MenSharpBehaviour's cancellation hook to Udon's `OnDestroy`
+    /// event, without taking the event away from a user-defined handler.
+    fn add_destroy_token_handler(
+        &mut self,
+        entries: &mut Vec<EventEntry>,
+        claimed: &mut HashSet<String>,
+    ) {
+        let Some(marker) = self.marker else {
+            return;
+        };
+        // The marker owns the hook; the source subclass owns `OnDestroy`.
+        let Some(method) = self
+            .declarations
+            .table
+            .symbol(marker)
+            .members_named("__CancelDestroyToken")
+            .iter()
+            .copied()
+            .find(|&member| self.declarations.table.symbol(member).kind == SymbolKind::Method)
+        else {
+            return;
+        };
+        let key = FunctionKey {
+            symbol: method,
+            role: Role::Method,
+            bindings: Vec::new(),
+        };
+        self.add_before_handler(entries, claimed, udon_event_name("OnDestroy"), key);
+    }
+
+    /// Adds a pre-hook, or creates a synthetic entry when no body exists.
+    fn add_before_handler(
+        &mut self,
+        entries: &mut Vec<EventEntry>,
+        claimed: &mut HashSet<String>,
+        name: String,
+        key: FunctionKey,
+    ) {
+        // Compile the hook even when it is the synthetic event body.
+        self.ensure_function(&key);
+        if let Some(entry) = entries.iter_mut().find(|entry| entry.name == name) {
+            // Keep registration order so hooks run deterministically.
+            entry.before.push(key);
+            return;
+        }
+        // With no user body, the first hook is the entry's main function.
+        claimed.insert(name.clone());
+        entries.push(EventEntry {
+            name,
+            key,
+            before: Vec::new(),
+            arguments: Vec::new(),
+            returns_value: false,
+            result_slot: None,
+        });
     }
 
     fn find_symbol(&self, path: &[&str]) -> Option<SymbolId> {
@@ -4064,15 +4143,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.is_bodiless(symbol) {
             return false;
         }
-        let entry = self.declarations.table.symbol(symbol);
-        entry.declarations.iter().all(|site| {
-            matches!(&site.syntax, SyntaxRef::Property(property)
-            if matches!(&property.body, FunctionBody::Accessors(accessors)
-                if accessors.accessors.iter().all(|accessor| matches!(
-                    accessor.body,
-                    FunctionBody::None { .. }
-                ))))
-        })
+        self.declarations.table.symbol(symbol).is_auto_property()
     }
 
     fn collect_statics(&mut self, class: SymbolId, export: bool) {
@@ -4134,6 +4205,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         entries.push(EventEntry {
             name: layout.event,
             key,
+            before: Vec::new(),
             arguments,
             returns_value: false,
             result_slot,
@@ -4504,8 +4576,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         member
     }
 
-    /// The heap slot for a member declared directly on `MenSharpBehaviour`
-    /// (`gameObject`, `transform`), or `None` for anything else.
+    /// The heap slot for an auto-property declared directly on
+    /// `MenSharpBehaviour`, or `None` for anything else.
     ///
     /// Udon has no `this` and no extern that returns a program's own object,
     /// so these are not calls: each gets a private slot whose initial value is
@@ -4517,6 +4589,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let marker = self.marker?;
         let symbol = self.declarations.table.symbol(member);
         if symbol.parent != Some(marker) {
+            return None;
+        }
+        if !self.is_auto_property(member) {
             return None;
         }
         if let Some(&slot) = self.statics.get(&member) {
