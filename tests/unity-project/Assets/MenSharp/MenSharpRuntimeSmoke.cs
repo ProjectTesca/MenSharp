@@ -351,6 +351,29 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     // a user enum (byte-backed, even) set from the inspector: the proxy
     // transfer must hand the M# heap an Int32, not the C# enum (issue: the
     // VM halted reading `mode` as Int32). Arrays of one are object[] of Int32s.
+    // the GetComponent family with no receiver (issue #7: "this name does
+    // not exist" for GetComponentsInChildren<T>()), and the array-returning
+    // generics, which Udon spells `…__TArray`. The smoke object is a cube
+    // with no parent or children: one of each
+    public int componentsInChildren;
+    public int componentsInChildrenInactive;
+    public int componentsInParent;
+    public int components;
+    public int componentsByType;
+    public int smokesInChildren;
+    public bool componentInParentFound;
+
+    public void ComponentFamily()
+    {
+        componentsInChildren = GetComponentsInChildren<Renderer>().Length;
+        componentsInChildrenInactive = GetComponentsInChildren<Transform>(true).Length;
+        componentsInParent = GetComponentsInParent<Transform>().Length;
+        components = gameObject.GetComponents<BoxCollider>().Length;
+        componentsByType = GetComponentsInChildren(typeof(MeshFilter), true).Length;
+        smokesInChildren = GetComponentsInChildren<MenSharpRuntimeSmoke>().Length;
+        componentInParentFound = GetComponentInParent<Transform>(true) == transform;
+    }
+
     // `sizeof` of the thirteen types C# sizes without `unsafe`: an int
     // constant (issue: "this expression is not supported")
     public string sizeofValues;

@@ -2015,7 +2015,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // `…__T` that takes its type argument as an ordinary `System.Type`
         // value (`GetComponent<T>`). Prefer that when the VM actually exposes
         // it — the caller supplies the value (see emit_call).
-        let generic_suffix = format!("__{name}{middle}__T");
+        // the return is spelled by the method's own type parameter: `T` for
+        // `GetComponent<T>`, `TArray` for `GetComponents<T>` (which returns
+        // `T[]`)
+        let generic_return = match &member.signature {
+            MemberSignature::Function(original) => match &original.return_type {
+                Type::Array { element, rank: 1 }
+                    if matches!(**element, Type::ExternalMethodTypeParameter(_)) =>
+                {
+                    "TArray"
+                }
+                _ => "T",
+            },
+            _ => "T",
+        };
+        let generic_suffix = format!("__{name}{middle}__{generic_return}");
         if let Some(full) = self.real_extern(&declaring, receiver.as_ref(), &generic_suffix) {
             return Some((full, true));
         }

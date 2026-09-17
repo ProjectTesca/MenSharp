@@ -293,6 +293,16 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(42, smoke.GetProgramVariable("nestedValue"));
         Assert.AreEqual(84, smoke.GetProgramVariable("nestedDoubled"));
 
+        // the GetComponent family, receiver-less and array-returning
+        smoke.RunProgram("ComponentFamily");
+        Assert.AreEqual(1, smoke.GetProgramVariable("componentsInChildren"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("componentsInChildrenInactive"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("componentsInParent"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("components"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("componentsByType"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("smokesInChildren"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("componentInParentFound"));
+
         // sizeof of the thirteen constant-size types
         smoke.RunProgram("SizeofConstants");
         Assert.AreEqual("1,1,1,2,2,2,4,4,4,8,8,8,16", smoke.GetProgramVariable("sizeofValues"));

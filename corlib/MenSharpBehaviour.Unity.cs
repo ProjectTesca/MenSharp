@@ -149,6 +149,105 @@ namespace MenSharp
             return gameObject.GetComponentInChildren<T>();
         }
 
+        public T GetComponentInChildren<T>(bool includeInactive)
+        {
+            return gameObject.GetComponentInChildren<T>(includeInactive);
+        }
+
+        public T GetComponentInParent<T>()
+        {
+            return gameObject.GetComponentInParent<T>();
+        }
+
+        public T GetComponentInParent<T>(bool includeInactive)
+        {
+            return gameObject.GetComponentInParent<T>(includeInactive);
+        }
+
+        public T[] GetComponents<T>()
+        {
+            return gameObject.GetComponents<T>();
+        }
+
+        public T[] GetComponentsInChildren<T>()
+        {
+            return gameObject.GetComponentsInChildren<T>();
+        }
+
+        public T[] GetComponentsInChildren<T>(bool includeInactive)
+        {
+            return gameObject.GetComponentsInChildren<T>(includeInactive);
+        }
+
+        public T[] GetComponentsInParent<T>()
+        {
+            return gameObject.GetComponentsInParent<T>();
+        }
+
+        public T[] GetComponentsInParent<T>(bool includeInactive)
+        {
+            return gameObject.GetComponentsInParent<T>(includeInactive);
+        }
+
+        // The `System.Type` / name forms, for engine types (a program type
+        // has no `System.Type` on Udon: use the generic form for those).
+        // The `List<T>` overloads are left out: M#'s `List<T>` is its own,
+        // not the engine's, so Udon's externs could not fill it.
+        public UnityEngine.Component GetComponent(System.Type type)
+        {
+            return gameObject.GetComponent(type);
+        }
+
+        public UnityEngine.Component GetComponent(string type)
+        {
+            return gameObject.GetComponent(type);
+        }
+
+        public UnityEngine.Component GetComponentInChildren(System.Type type)
+        {
+            return gameObject.GetComponentInChildren(type);
+        }
+
+        public UnityEngine.Component GetComponentInChildren(System.Type type, bool includeInactive)
+        {
+            return gameObject.GetComponentInChildren(type, includeInactive);
+        }
+
+        public UnityEngine.Component GetComponentInParent(System.Type type)
+        {
+            return gameObject.GetComponentInParent(type);
+        }
+
+        public UnityEngine.Component GetComponentInParent(System.Type type, bool includeInactive)
+        {
+            return gameObject.GetComponentInParent(type, includeInactive);
+        }
+
+        public UnityEngine.Component[] GetComponents(System.Type type)
+        {
+            return gameObject.GetComponents(type);
+        }
+
+        public UnityEngine.Component[] GetComponentsInChildren(System.Type type)
+        {
+            return gameObject.GetComponentsInChildren(type);
+        }
+
+        public UnityEngine.Component[] GetComponentsInChildren(System.Type type, bool includeInactive)
+        {
+            return gameObject.GetComponentsInChildren(type, includeInactive);
+        }
+
+        public UnityEngine.Component[] GetComponentsInParent(System.Type type)
+        {
+            return gameObject.GetComponentsInParent(type);
+        }
+
+        public UnityEngine.Component[] GetComponentsInParent(System.Type type, bool includeInactive)
+        {
+            return gameObject.GetComponentsInParent(type, includeInactive);
+        }
+
         // Udon has no TryGetComponent extern at all, so this is written out
         // in terms of GetComponent — which is exactly what it means.
         public bool TryGetComponent<T>(out T component)

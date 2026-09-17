@@ -4083,6 +4083,97 @@ fn a_generic_extern_passes_its_type_as_a_value() {
 }
 
 #[test]
+fn the_whole_get_component_family_is_callable_on_the_behaviour() {
+    // issue #7: `GetComponentsInChildren<Renderer>()` with no receiver was
+    // "this name does not exist" — MenSharpBehaviour only forwarded
+    // GetComponent/GetComponentInChildren. And the array-returning generics
+    // were spelled `…__T` even through `gameObject`, where Udon names them
+    // `…__TArray`
+    let (Some(dotnet), Some(unity)) = (dotnet_shared_dir(), unity_managed_dir()) else {
+        eprintln!("skipped: needs both a .NET runtime and a Unity install");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dotnet.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Finder : MenSharpBehaviour
+            {
+                public int total;
+                public void Interact()
+                {
+                    var r = GetComponentsInChildren<Renderer>();
+                    var r2 = GetComponentsInChildren<Renderer>(true);
+                    var p = GetComponentsInParent<Transform>();
+                    var p2 = GetComponentsInParent<Transform>(true);
+                    var c = GetComponents<Transform>();
+                    var one = GetComponentInChildren<Renderer>(true);
+                    var up = GetComponentInParent<Transform>();
+                    var up2 = GetComponentInParent<Transform>(true);
+                    var byType = GetComponent(typeof(Transform));
+                    var byName = GetComponent("Transform");
+                    var byTypes = GetComponentsInChildren(typeof(Renderer), true);
+                    var direct = gameObject.GetComponents<Transform>();
+                    var others = GetComponentsInChildren<Finder>(true);
+                    total = r.Length + r2.Length + p.Length + p2.Length + c.Length
+                        + byTypes.Length + direct.Length + others.Length;
+                }
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources_for(&references));
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+
+    let programs =
+        compiler.generate_udon_behaviours(&declarations, &signatures, &bodies, &references, &files);
+    let program = programs
+        .iter()
+        .find(|program| program.class_path == "Game.Finder")
+        .expect("Game.Finder");
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    for extern_name in [
+        "UnityEngineGameObject.__GetComponentsInChildren__TArray",
+        "UnityEngineGameObject.__GetComponentsInChildren__SystemBoolean__TArray",
+        "UnityEngineGameObject.__GetComponentsInParent__TArray",
+        "UnityEngineGameObject.__GetComponentsInParent__SystemBoolean__TArray",
+        "UnityEngineGameObject.__GetComponents__TArray",
+        "UnityEngineGameObject.__GetComponentInChildren__SystemBoolean__T",
+        "UnityEngineGameObject.__GetComponentInParent__T",
+        "UnityEngineGameObject.__GetComponentInParent__SystemBoolean__T",
+        "UnityEngineGameObject.__GetComponent__SystemType__UnityEngineComponent",
+        "UnityEngineGameObject.__GetComponent__SystemString__UnityEngineComponent",
+        "UnityEngineGameObject.__GetComponentsInChildren__SystemType_SystemBoolean__UnityEngineComponentArray",
+    ] {
+        assert!(
+            text.contains(&format!("EXTERN, \"{extern_name}\"")),
+            "missing {extern_name}"
+        );
+    }
+    // a program type goes through the program search, not the engine
+    assert!(!text.contains("__GetComponentsInChildren__T\""), "{text}");
+}
+
+#[test]
 fn a_type_constant_carries_its_dotnet_name() {
     // only the Unity importer can make a real System.Type, so what the
     // sidecar carries is the name it resolves
