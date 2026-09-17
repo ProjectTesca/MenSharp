@@ -27,8 +27,8 @@ public static class MenSharpMarker
         + "# Delete this file to hand the folder back to UdonSharp / plain C#.\n";
 
     /// Every folder under Assets that carries the marker, as asset paths with
-    /// no trailing slash. Read off disk: the marker is a dotfile Unity does
-    /// not import.
+    /// no trailing slash — except those Unity ignores (`Foo~`). Read off disk:
+    /// the marker is a dotfile Unity does not import.
     public static List<string> MarkedRoots()
     {
         var roots = new List<string>();
@@ -38,9 +38,16 @@ public static class MenSharpMarker
         }
         foreach (string file in Directory.GetFiles("Assets", MarkerFileName, SearchOption.AllDirectories))
         {
-            if (Path.GetFileName(file) == MarkerFileName)
+            if (Path.GetFileName(file) != MarkerFileName)
             {
-                roots.Add(MenSharpSources.Normalize(Path.GetDirectoryName(file)));
+                continue;
+            }
+            // a marker inside a folder Unity ignores (`Tests~`) marks nothing:
+            // none of the scripts under it are compiled
+            string folder = MenSharpSources.Normalize(Path.GetDirectoryName(file));
+            if (!MenSharpSources.IsUnityIgnored(folder))
+            {
+                roots.Add(folder);
             }
         }
         return roots;

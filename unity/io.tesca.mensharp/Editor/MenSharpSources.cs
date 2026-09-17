@@ -56,7 +56,7 @@ public static class MenSharpSources
         void AddMenSharp(string assetPath, string programsFolder)
         {
             string path = Normalize(assetPath);
-            if (!claimed.Add(path))
+            if (IsUnityIgnored(path) || !claimed.Add(path))
             {
                 return;
             }
@@ -130,7 +130,7 @@ public static class MenSharpSources
             foreach (string file in Directory.GetFiles(root, "*.cs", SearchOption.AllDirectories))
             {
                 string path = Normalize(file);
-                if (claimed.Contains(path) || IsEditorScript(path))
+                if (claimed.Contains(path) || IsUnityIgnored(path) || IsEditorScript(path))
                 {
                     continue;
                 }
@@ -170,7 +170,7 @@ public static class MenSharpSources
     public static bool IsMenSharpSource(string assetPath)
     {
         string path = Normalize(assetPath);
-        if (!path.EndsWith(".cs", StringComparison.Ordinal))
+        if (!path.EndsWith(".cs", StringComparison.Ordinal) || IsUnityIgnored(path))
         {
             return false;
         }
@@ -199,11 +199,14 @@ public static class MenSharpSources
     }
 
     /// Is this .cs a library source — anything of the project's that is not
-    /// MenSharp's, not in an Editor folder and not in a VRChat package?
+    /// MenSharp's, not in an Editor folder, not in a folder Unity ignores
+    /// and not in a VRChat package?
     public static bool IsLibrarySource(string assetPath)
     {
         string path = Normalize(assetPath);
-        if (!path.EndsWith(".cs", StringComparison.Ordinal) || IsEditorScript(path))
+        if (!path.EndsWith(".cs", StringComparison.Ordinal)
+            || IsUnityIgnored(path)
+            || IsEditorScript(path))
         {
             return false;
         }
@@ -278,6 +281,32 @@ public static class MenSharpSources
     public static string Normalize(string path)
     {
         return path.Replace('\\', '/');
+    }
+
+    /// Is this path something Unity does not import — under (or itself) a
+    /// folder or file whose name ends in `~` (`Tests~`, `Samples~`), starts
+    /// with `.`, or is `cvs`? Unity never compiles such a script, so neither
+    /// does MenSharp: not as a MenSharp source, not as a library. Only the
+    /// part below `Assets/` or `Packages/<name>/` is looked at.
+    public static bool IsUnityIgnored(string path)
+    {
+        string[] segments = Normalize(path).Split('/');
+        int first = segments.Length > 0 && segments[0] == "Packages" ? 2 : 1;
+        for (int index = first; index < segments.Length; index++)
+        {
+            string segment = segments[index];
+            if (segment.Length == 0)
+            {
+                continue;
+            }
+            if (segment.EndsWith("~", StringComparison.Ordinal)
+                || segment.StartsWith(".", StringComparison.Ordinal)
+                || string.Equals(segment, "cvs", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+        return false;
     }
 
     /// A path the compiler (a separate process, run from the project root)
