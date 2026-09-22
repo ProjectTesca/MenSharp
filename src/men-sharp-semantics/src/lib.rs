@@ -47,7 +47,8 @@ pub mod types;
 pub use error::{SemanticError, SemanticErrorKind};
 pub use semantics::check::{
     BodyCheck, ConstructorChain, ConstructorChainKind, ForeachEnumeration, ResolvedAwait,
-    ResolvedCall, ResolvedMember, ResolvedTarget, check_file, uncompilable_foreign_members,
+    ResolvedCall, ResolvedMember, ResolvedTarget, ResourceDisposal, check_file,
+    uncompilable_foreign_members,
 };
 pub use semantics::collect::{
     DeclarationNode, FileDeclarations, MemberNode, NamespaceNode, TypeNode, collect_file,

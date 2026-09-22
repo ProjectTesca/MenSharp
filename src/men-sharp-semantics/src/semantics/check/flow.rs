@@ -558,7 +558,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     /// Overload resolution for `receiver.name()` with no arguments and no
     /// syntax to hang an error on: the selected overload and its return type,
     /// or `None` when nothing fits.
-    fn resolve_parameterless_call(
+    pub(super) fn resolve_parameterless_call(
         &mut self,
         receiver: &Type,
         name: &'ast str,

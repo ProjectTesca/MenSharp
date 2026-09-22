@@ -374,6 +374,48 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         componentInParentFound = GetComponentInParent<Transform>(true) == transform;
     }
 
+    // `using`: the resource is disposed however the region is left (issue:
+    // a `using` declaration compiled to a plain local and dropped Dispose)
+    public int usingReported;
+    public string usingOrder;
+    public string usingThrowOrder;
+    public int usingNullSkipped;
+
+    void UsingThrows()
+    {
+        using var thrown = new SmokeResource("t");
+        throw new Exception("boom");
+    }
+
+    public void UsingDisposal()
+    {
+        SmokeResource h = new SmokeResource("h");
+        {
+            using var d = h;
+            h.N = 3;
+        }
+        usingReported = h.N;                       // 7: Dispose() ran
+
+        SmokeResource.log = "";
+        using (var a = new SmokeResource("a"))
+        {
+            using var b = new SmokeResource("b");
+            SmokeResource.log += "1";
+        }
+        usingOrder = SmokeResource.log;            // "1ba": reverse order
+
+        SmokeResource.log = "";
+        try { UsingThrows(); } catch (Exception) { SmokeResource.log += "c"; }
+        usingThrowOrder = SmokeResource.log;       // "tc"
+
+        SmokeResource.log = "";
+        {
+            using SmokeResource missing = null;
+            SmokeResource.log += "n";
+        }
+        usingNullSkipped = SmokeResource.log.Length;   // 1: null is not disposed
+    }
+
     // `sizeof` of the thirteen types C# sizes without `unsafe`: an int
     // constant (issue: "this expression is not supported")
     public string sizeofValues;
@@ -811,4 +853,14 @@ public enum InspectorEnumMode : byte
 {
     First = 0,
     Second
+}
+
+// what `UsingDisposal` opens and closes
+public class SmokeResource : IDisposable
+{
+    public static string log;
+    public string name;
+    public int N;
+    public SmokeResource(string n) { name = n; }
+    public void Dispose() { log += name; N = 7; }
 }

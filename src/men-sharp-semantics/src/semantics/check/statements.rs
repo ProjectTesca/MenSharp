@@ -1,6 +1,6 @@
 //! Statements and patterns.
 
-use super::{Checker, Meaning, MethodGroup, Scope};
+use super::{Checker, Meaning, MethodGroup, ResourceDisposal, Scope};
 use crate::error::SemanticErrorKind;
 use crate::semantics::resolve::Resolution;
 use crate::symbol::SymbolKind;
@@ -29,7 +29,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     fn check_statement(&mut self, statement: &'ast Statement<'ast, 'ast>) {
         match statement {
             Statement::Block(block) => self.check_block(block),
-            Statement::LocalVariable(declaration) => self.check_local_declaration(declaration),
+            Statement::LocalVariable(declaration) => {
+                self.check_local_declaration(declaration, false)
+            }
             Statement::Expression(statement) => {
                 self.check_expression(&statement.expression);
             }
@@ -64,7 +66,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 self.locals.push(Scope::default());
                 match &statement.initializer {
                     Some(ForInitializer::Declaration(declaration)) => {
-                        self.check_local_declaration(declaration)
+                        self.check_local_declaration(declaration, false)
                     }
                     Some(ForInitializer::Expressions(expressions)) => {
                         for expression in *expressions {
@@ -184,10 +186,11 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 self.locals.push(Scope::default());
                 match &statement.resource {
                     Ok(UsingResource::Declaration(declaration)) => {
-                        self.check_local_declaration(declaration)
+                        self.check_local_declaration(declaration, true)
                     }
                     Ok(UsingResource::Expression(expression)) => {
-                        self.check_expression(expression);
+                        let ty = self.check_expression(expression);
+                        self.record_disposal(EntityID::from(expression), &ty, &expression.span());
                     }
                     Err(()) => {}
                 }
@@ -217,7 +220,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             Statement::Fixed(statement) => {
                 self.locals.push(Scope::default());
                 if let Ok(declaration) = &statement.declaration {
-                    self.check_local_declaration(declaration);
+                    self.check_local_declaration(declaration, false);
                 }
                 if let Ok(body) = statement.body {
                     self.check_statement(body);
@@ -311,8 +314,15 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
-    fn check_local_declaration(&mut self, declaration: &'ast LocalVariableDeclaration<'ast, 'ast>) {
+    /// `as_using` is the parenthesized `using (var x = ...)` form, whose
+    /// `using` keyword sits on the statement rather than on the declaration.
+    fn check_local_declaration(
+        &mut self,
+        declaration: &'ast LocalVariableDeclaration<'ast, 'ast>,
+        as_using: bool,
+    ) {
         let declared = self.resolve_type(&declaration.variable_type);
+        let disposes = as_using || declaration.using_keyword.is_some();
 
         for declarator in declaration.declarators {
             let ty = match (&declared, &declarator.initializer) {
@@ -361,6 +371,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             } else {
                 None
             };
+            if disposes {
+                self.record_disposal(EntityID::from(declarator), &ty, &declarator.name.span);
+            }
             self.declare_local(declarator.name.value, ty);
             if let Some(local) = self
                 .locals
@@ -370,6 +383,41 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                 local.integer_constant = constant;
             }
         }
+    }
+
+    /// The `Dispose()` a `using` resource owes (§13.14). A type that is not
+    /// `System.IDisposable` is an error here rather than a `using` that
+    /// quietly disposes of nothing.
+    fn record_disposal(&mut self, node: EntityID, ty: &Type, span: &std::ops::Range<usize>) {
+        if matches!(ty, Type::Error | Type::Infer | Type::Null | Type::Void) {
+            return;
+        }
+        let disposable = self
+            .resolver
+            .external
+            .find_type(&["System"], "IDisposable", 0)
+            .map(|id| Type::Named {
+                target: TypeTarget::External(id),
+                arguments: Vec::new(),
+            });
+        let implemented = match &disposable {
+            // no reference declares `IDisposable`: take the method as proof
+            None => true,
+            Some(target) => self.system().is_implicitly_convertible(ty, target),
+        };
+        let resolved = implemented
+            .then(|| self.resolve_parameterless_call(ty, "Dispose", span))
+            .flatten();
+        let Some((call, _)) = resolved else {
+            let kind = SemanticErrorKind::NotDisposable {
+                type_name: self.describe(ty),
+            };
+            self.error(kind, span.clone());
+            return;
+        };
+        let check_null = self.system().is_reference_type(ty);
+        self.disposals
+            .insert(node, ResourceDisposal { call, check_null });
     }
 
     pub(super) fn check_condition(&mut self, condition: &'ast Expression<'ast, 'ast>) {

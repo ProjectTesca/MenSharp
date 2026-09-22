@@ -143,6 +143,10 @@ pub enum SemanticErrorKind {
     NotEnumerable {
         type_name: String,
     },
+    /// A `using` resource whose type is not `System.IDisposable`.
+    NotDisposable {
+        type_name: String,
+    },
     /// A switch expression over a `bool`, an enum or a `[Union]` type — or
     /// a switch statement over a `[Union]` — with a case no arm handles.
     NonExhaustiveSwitch {
@@ -327,6 +331,9 @@ impl SemanticErrorKind {
             SemanticErrorKind::NotEnumerable { type_name } => {
                 Message::key("semantics.not_enumerable").arg("type_name", type_name)
             }
+            SemanticErrorKind::NotDisposable { type_name } => {
+                Message::key("semantics.not_disposable").arg("type_name", type_name)
+            }
             SemanticErrorKind::NonExhaustiveSwitch { subject, missing } => {
                 Message::key("semantics.non_exhaustive_switch")
                     .arg("subject", subject)
@@ -396,6 +403,7 @@ impl SemanticErrorKind {
             | WrongNumberOfIndices { .. }
             | RaggedArrayInitializer
             | NotEnumerable { .. }
+            | NotDisposable { .. }
             | ThrowNeedsException { .. }
             | NotAwaitable { .. }
             | AsyncReturnType { .. }

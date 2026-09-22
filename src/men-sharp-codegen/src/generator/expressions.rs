@@ -2,7 +2,7 @@
 
 use men_sharp_parser::ast::{
     ExpressionStatement, IfStatement, LocalVariableDeclaration, NewExpression, PostfixOperator,
-    ReturnStatement, SwitchLabel, SwitchStatement, WhileStatement,
+    ReturnStatement, SwitchLabel, SwitchStatement, UsingResource, UsingStatement, WhileStatement,
 };
 
 use super::*;
@@ -15,28 +15,41 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // before the statements: a local function may be called from above
         // its own declaration
         self.register_local_functions(ctx, block);
+        let mut opened = 0;
         for statement in block.statements {
-            self.lower_statement(ctx, statement);
+            opened += self.lower_statement(ctx, statement);
         }
+        // a `using` declaration's region runs to the end of its block, and
+        // the resources are disposed in reverse order (§13.14)
+        self.close_using_regions(ctx, opened);
         ctx.locals.pop();
     }
 
-    fn lower_statement(&mut self, ctx: &mut Ctx<'ast>, statement: &'ast Statement<'ast, 'ast>) {
+    /// Answers how many `using` regions the statement left open: a `using`
+    /// declaration is disposed by its enclosing block, not by itself.
+    fn lower_statement(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        statement: &'ast Statement<'ast, 'ast>,
+    ) -> usize {
         let temps_before = self.temp_live.len();
         self.emit_source_mark(ctx, &statement.span());
-        self.lower_statement_kind(ctx, statement);
+        let opened = self.lower_statement_kind(ctx, statement);
         self.release_temps(ctx, temps_before, None);
+        opened
     }
 
     fn lower_statement_kind(
         &mut self,
         ctx: &mut Ctx<'ast>,
         statement: &'ast Statement<'ast, 'ast>,
-    ) {
+    ) -> usize {
         match statement {
             Statement::Block(block) => self.lower_block(ctx, block),
             Statement::Empty { .. } => {}
-            Statement::LocalVariable(declaration) => self.lower_local(ctx, declaration),
+            Statement::LocalVariable(declaration) => {
+                return self.lower_local(ctx, declaration, false);
+            }
             // registered by the block, compiled when something calls it
             Statement::LocalFunction(_) => {}
             Statement::Expression(ExpressionStatement { expression, .. }) => {
@@ -73,7 +86,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ctx.locals.push(HashMap::default());
                 match &statement.initializer {
                     Some(ForInitializer::Declaration(declaration)) => {
-                        self.lower_local(ctx, declaration)
+                        self.lower_local(ctx, declaration, false);
                     }
                     Some(ForInitializer::Expressions(expressions)) => {
                         for expression in *expressions {
@@ -113,6 +126,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Statement::Foreach(statement) => self.lower_foreach(ctx, statement),
             Statement::Switch(statement) => self.lower_switch(ctx, statement),
             Statement::Try(statement) => self.lower_try(ctx, statement),
+            Statement::Using(statement) => {
+                self.lower_using(ctx, statement);
+            }
             Statement::Throw(statement) => self.lower_throw_statement(ctx, statement),
             Statement::Yield(statement) => self.lower_yield(ctx, statement),
             Statement::Return(ReturnStatement { value, span, .. }) => {
@@ -214,13 +230,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 );
             }
         }
+        0
     }
 
+    /// `as_using` is the parenthesized `using (var x = ...)` form, whose
+    /// `using` keyword sits on the statement. Answers how many regions were
+    /// opened — one per declarator that owes a `Dispose()`.
     fn lower_local(
         &mut self,
         ctx: &mut Ctx<'ast>,
         declaration: &'ast LocalVariableDeclaration<'ast, 'ast>,
-    ) {
+        as_using: bool,
+    ) -> usize {
+        let disposes = as_using || declaration.using_keyword.is_some();
+        let mut opened = 0;
         let declared = self
             .bodies
             .resolved_types
@@ -251,7 +274,104 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             {
                 self.copy(array, slot);
             }
-            self.bind_local(ctx, declarator.name.value, slot, ty);
+            self.bind_local(ctx, declarator.name.value, slot, ty.clone());
+            if disposes {
+                opened += self.open_using_region(ctx, EntityID::from(declarator), slot, ty);
+            }
+        }
+        opened
+    }
+
+    /// `using (resource) statement` (§13.14): the resource is disposed
+    /// however the region is left — off the end, by `return`, by `break`,
+    /// by an exception.
+    fn lower_using(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        statement: &'ast UsingStatement<'ast, 'ast>,
+    ) -> usize {
+        ctx.locals.push(HashMap::default());
+        let opened = match &statement.resource {
+            Ok(UsingResource::Declaration(declaration)) => self.lower_local(ctx, declaration, true),
+            Ok(UsingResource::Expression(expression)) => {
+                let ty = self.type_of(ctx, expression);
+                match self.owned_value(ctx, expression) {
+                    // a slot of its own: the expression is evaluated once,
+                    // and what it produced is what gets disposed
+                    Some(value) => {
+                        let slot = self.temp_for(&ty);
+                        self.copy(value, slot);
+                        self.open_using_region(ctx, EntityID::from(expression), slot, ty)
+                    }
+                    None => 0,
+                }
+            }
+            Err(()) => 0,
+        };
+        if let Ok(body) = statement.body {
+            self.lower_statement(ctx, body);
+        }
+        self.close_using_regions(ctx, opened);
+        ctx.locals.pop();
+        0
+    }
+
+    /// Opens the `try`/`finally` a `using` resource is wrapped in. Answers
+    /// 1 when a region was opened, 0 when the resource owes nothing.
+    fn open_using_region(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        node: EntityID,
+        slot: DataId,
+        ty: Type,
+    ) -> usize {
+        let Some(disposal) = self.bodies.disposals.get(&node).cloned() else {
+            return 0;
+        };
+        let ResourceDisposal { call, check_null } = disposal;
+        if self.dispose_does_nothing(&call, &ty) {
+            return 0;
+        }
+        let handler = self.fresh_label("using_handler");
+        ctx.loop_stack.push(BreakFrame::Try {
+            handler,
+            finally: Some(FinallyAction::Dispose(Box::new(Disposal {
+                call,
+                resource: slot,
+                resource_type: ty,
+                check_null,
+            }))),
+            search: None,
+        });
+        1
+    }
+
+    /// Closes the innermost `count` `using` regions, innermost first: each
+    /// disposes on the way out, and again on the path an exception takes.
+    fn close_using_regions(&mut self, ctx: &mut Ctx<'ast>, count: usize) {
+        for _ in 0..count {
+            let Some(BreakFrame::Try {
+                handler,
+                finally: Some(action),
+                ..
+            }) = ctx.loop_stack.pop()
+            else {
+                continue;
+            };
+            let done = self.fresh_label("using_done");
+            self.emit_finally_action(ctx, &action);
+            self.program.code.push(Op::Jump(Target::Label(done)));
+
+            // left by an exception: dispose, then keep unwinding
+            self.program.code.push(Op::Label(handler));
+            let state = self.exception_state();
+            let saved = self.temp("SystemObject");
+            self.copy(state.exception, saved);
+            let cleared = self.constant("SystemBoolean", "false", HeapInit::Boolean(false));
+            self.copy(cleared, state.pending);
+            self.emit_finally_action(ctx, &action);
+            self.emit_continue_unwind(ctx, saved);
+            self.program.code.push(Op::Label(done));
         }
     }
 
@@ -575,8 +695,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             .map(|call| {
                 FinallyAction::Dispose(Box::new(Disposal {
                     call,
-                    enumerator,
-                    enumerator_type: enumerator_type.clone(),
+                    resource: enumerator,
+                    resource_type: enumerator_type.clone(),
+                    check_null: false,
                 }))
             });
         let dispose_handler = self.fresh_label("foreach_dispose");
@@ -766,9 +887,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.program.code.push(Op::Label(body));
             ctx.loop_stack
                 .push(BreakFrame::Switch { break_target: end });
+            let mut opened = 0;
             for statement in section.statements {
-                self.lower_statement(ctx, statement);
+                opened += self.lower_statement(ctx, statement);
             }
+            self.close_using_regions(ctx, opened);
             ctx.loop_stack.pop();
             ctx.locals.pop();
             // C# forbids falling through, so this jump is what Roslyn already

@@ -91,6 +91,11 @@ pub struct BodyCheck {
     /// (anything but an array or a string), the three members it bound to.
     /// Keyed by the statement node.
     pub enumerations: HashMap<EntityID, ForeachEnumeration>,
+    /// For every `using` resource — the parenthesized form's declarators and
+    /// expression alike, and every `using` local declaration — the
+    /// `Dispose()` the region owes it. Keyed by the declarator node, or by
+    /// the expression node for `using (expression)`.
+    pub disposals: HashMap<EntityID, ResourceDisposal>,
     /// What each constructor runs before its own body: the `: base(...)` /
     /// `: this(...)` it wrote, or the implicit `base()`. Keyed by the
     /// constructor symbol — or, for a class that declares none, by the class
@@ -143,6 +148,7 @@ impl BodyCheck {
         self.targets.extend(other.targets);
         self.attribute_types.extend(other.attribute_types);
         self.enumerations.extend(other.enumerations);
+        self.disposals.extend(other.disposals);
         self.constructor_chains.extend(other.constructor_chains);
         self.errors.extend(other.errors);
         self.uncompilable.extend(other.uncompilable);
@@ -244,6 +250,16 @@ pub struct ForeachEnumeration {
     /// however the loop is left, which is what runs an iterator's pending
     /// `finally` blocks.
     pub dispose: Option<ResolvedCall>,
+}
+
+/// What a `using` region owes its resource (§13.14): the `Dispose()` it
+/// calls however the region is left. A resource that can be null is tested
+/// first, exactly as the expansion C# defines does; a value type's cannot be
+/// and is called outright.
+#[derive(Debug, Clone)]
+pub struct ResourceDisposal {
+    pub call: ResolvedCall,
+    pub check_null: bool,
 }
 
 /// What a checked node resolved to. Keyed by node identity in
@@ -353,6 +369,7 @@ pub fn check_file(
         targets: HashMap::default(),
         pattern_inputs: HashMap::default(),
         enumerations: HashMap::default(),
+        disposals: HashMap::default(),
         constructor_chains: HashMap::default(),
         catch_depth: 0,
         in_async: false,
@@ -400,6 +417,7 @@ pub fn check_file(
         targets: checker.targets,
         attribute_types: checker.attribute_types,
         enumerations: checker.enumerations,
+        disposals: checker.disposals,
         constructor_chains: checker.constructor_chains,
         errors: checker.resolver.out.errors,
         uncompilable: HashMap::default(),
@@ -605,6 +623,7 @@ struct Checker<'a, 'ast> {
     /// check (see `exhaustive.rs`).
     pattern_inputs: HashMap<EntityID, Type>,
     enumerations: HashMap<EntityID, ForeachEnumeration>,
+    disposals: HashMap<EntityID, ResourceDisposal>,
     constructor_chains: HashMap<SymbolId, ConstructorChain>,
     /// How many `catch` blocks enclose the current position — where a bare
     /// `throw;` is legal.

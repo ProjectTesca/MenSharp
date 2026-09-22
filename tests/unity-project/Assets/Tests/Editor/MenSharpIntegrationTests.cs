@@ -303,6 +303,13 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(1, smoke.GetProgramVariable("smokesInChildren"));
         Assert.AreEqual(true, smoke.GetProgramVariable("componentInParentFound"));
 
+        // `using` disposes its resource however the region is left
+        smoke.RunProgram("UsingDisposal");
+        Assert.AreEqual(7, smoke.GetProgramVariable("usingReported"));
+        Assert.AreEqual("1ba", smoke.GetProgramVariable("usingOrder"));
+        Assert.AreEqual("tc", smoke.GetProgramVariable("usingThrowOrder"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("usingNullSkipped"));
+
         // sizeof of the thirteen constant-size types
         smoke.RunProgram("SizeofConstants");
         Assert.AreEqual("1,1,1,2,2,2,4,4,4,8,8,8,16", smoke.GetProgramVariable("sizeofValues"));

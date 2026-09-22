@@ -799,14 +799,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         match action {
             FinallyAction::Block(block) => self.lower_block(ctx, block),
             FinallyAction::Dispose(disposal) => {
+                // §13.14: a resource that is null is not disposed
+                let skip = disposal.check_null.then(|| {
+                    let null = self.constant("SystemObject", "null", HeapInit::Null);
+                    let is_null = self.temp("SystemBoolean");
+                    self.call_extern(
+                        ctx,
+                        "SystemObject.__ReferenceEquals__SystemObject_SystemObject__SystemBoolean",
+                        &[disposal.resource, null, is_null],
+                        0..0,
+                    );
+                    let present = self.fresh_label("dispose_present");
+                    let skip = self.fresh_label("dispose_skipped");
+                    self.program.code.push(Op::Push(is_null));
+                    self.program
+                        .code
+                        .push(Op::JumpIfFalse(Target::Label(present)));
+                    self.program.code.push(Op::Jump(Target::Label(skip)));
+                    self.program.code.push(Op::Label(present));
+                    skip
+                });
                 self.emit_call(
                     ctx,
                     &disposal.call,
-                    Some((disposal.enumerator, disposal.enumerator_type.clone())),
+                    Some((disposal.resource, disposal.resource_type.clone())),
                     &[],
                     0..0,
                     false,
                 );
+                if let Some(skip) = skip {
+                    self.program.code.push(Op::Label(skip));
+                }
             }
         }
     }

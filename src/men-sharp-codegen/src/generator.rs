@@ -47,7 +47,8 @@ use men_sharp_semantics::types::ExternalTypeId;
 use men_sharp_semantics::{
     Accessibility, BodyCheck, ConstructorChain, ConstructorChainKind, Declarations, ExternalTypes,
     FileId, ForeachEnumeration, MemberOrigin, MemberSignature, ResolvedCall, ResolvedMember,
-    ResolvedTarget, Signatures, SymbolId, SymbolKind, SyntaxRef, Type, TypeTarget,
+    ResolvedTarget, ResourceDisposal, Signatures, SymbolId, SymbolKind, SyntaxRef, Type,
+    TypeTarget,
 };
 
 use crate::externs::{UdonNodes, mangle_dotnet_name};
@@ -713,7 +714,8 @@ enum FinallyAction<'ast> {
     Block(&'ast Block<'ast, 'ast>),
     /// A `foreach` whose enumerator can be disposed: §13.9.5 wraps the loop
     /// in exactly this `try`/`finally`, and it is what runs an iterator's
-    /// pending `finally` blocks when the loop is left early.
+    /// pending `finally` blocks when the loop is left early. A `using`
+    /// region (§13.14) is the same shape over the resource it names.
     Dispose(Box<Disposal>),
 }
 
@@ -721,8 +723,11 @@ enum FinallyAction<'ast> {
 #[derive(Clone)]
 struct Disposal {
     call: ResolvedCall,
-    enumerator: DataId,
-    enumerator_type: Type,
+    resource: DataId,
+    resource_type: Type,
+    /// A resource that may be null is tested first — `using` over a
+    /// reference. A `foreach` enumerator and a value type never are.
+    check_null: bool,
 }
 
 /// An assignable location.

@@ -14830,3 +14830,256 @@ fn constant_expressions_keep_the_selected_unsigned_operator() {
         return;
     };
 }
+
+#[test]
+fn a_using_declaration_disposes_at_the_end_of_its_block() {
+    // `using var d = h;` used to compile to a plain local: the `using`
+    // keyword was recorded on the declaration and never read again, so
+    // `Dispose()` was simply dropped (issue). Every way out of the region
+    // has to run it, in reverse order of declaration (§13.14)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Res : System.IDisposable
+        {
+            public static string log;
+            public string name;
+            public int N;
+            public Res(string n) { name = n; }
+            public void Dispose() { log += name; N = 7; }
+        }
+
+        public class Probe : MenSharpBehaviour
+        {
+            public int reported;
+            public string blockOrder;
+            public string returnOrder;
+            public string breakOrder;
+            public string throwOrder;
+            public int nullDisposals;
+
+            void Ordered()
+            {
+                using var a = new Res("a");
+                using var b = new Res("b");
+            }
+
+            void Returned()
+            {
+                using var a = new Res("r");
+                return;
+            }
+
+            void Looped()
+            {
+                for (int i = 0; i < 3; i++)
+                {
+                    using var a = new Res("L");
+                    if (i == 1) break;
+                }
+            }
+
+            void Thrown()
+            {
+                using var a = new Res("t");
+                throw new System.Exception("boom");
+            }
+
+            public void Interact()
+            {
+                // the issue as reported: the inner block's `using` must have
+                // run by the time the outer block reads the field again
+                Res h = new Res("h");
+                {
+                    using var d = h;
+                    h.N = 3;
+                }
+                reported = h.N;
+
+                Res.log = "";
+                Ordered();
+                blockOrder = Res.log;
+
+                Res.log = "";
+                Returned();
+                returnOrder = Res.log;
+
+                Res.log = "";
+                Looped();
+                breakOrder = Res.log;
+
+                Res.log = "";
+                try { Thrown(); } catch (System.Exception) { Res.log += "c"; }
+                throwOrder = Res.log;
+
+                // a null resource is not disposed, it is skipped
+                Res.log = "";
+                {
+                    using Res missing = null;
+                    Res.log += "n";
+                }
+                nullDisposals = Res.log.Length;
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "reported"), 7);
+    assert_eq!(string_of(&emulator, "blockOrder"), "ba");
+    assert_eq!(string_of(&emulator, "returnOrder"), "r");
+    assert_eq!(string_of(&emulator, "breakOrder"), "LL");
+    // the `finally` runs on the second pass, after the `catch` was chosen
+    assert_eq!(string_of(&emulator, "throwOrder"), "tc");
+    assert_eq!(int_of(&emulator, "nullDisposals"), 1);
+}
+
+#[test]
+fn a_using_statement_disposes_its_resource() {
+    // `using (resource) { }` used to be rejected outright by the code
+    // generator ("this statement is not supported")
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Res2 : System.IDisposable
+        {
+            public static string log;
+            public string name;
+            public Res2(string n) { name = n; }
+            public void Dispose() { log += name; }
+        }
+
+        public class Probe2 : MenSharpBehaviour
+        {
+            public string declared;
+            public string byExpression;
+            public string nested;
+            public int afterNull;
+
+            public void Interact()
+            {
+                Res2.log = "";
+                using (var a = new Res2("a")) { Res2.log += "1"; }
+                declared = Res2.log;
+
+                Res2.log = "";
+                Res2 held = new Res2("e");
+                using (held) { Res2.log += "2"; }
+                byExpression = Res2.log;
+
+                Res2.log = "";
+                using (var a = new Res2("a"))
+                using (var b = new Res2("b"))
+                {
+                    Res2.log += "3";
+                }
+                nested = Res2.log;
+
+                Res2 missing = null;
+                using (missing) { afterNull = 5; }
+            }
+        }
+        "#,
+        "Probe2",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(string_of(&emulator, "declared"), "1a");
+    assert_eq!(string_of(&emulator, "byExpression"), "2e");
+    assert_eq!(string_of(&emulator, "nested"), "3ba");
+    assert_eq!(int_of(&emulator, "afterNull"), 5);
+}
+
+#[test]
+fn a_using_resource_that_is_not_disposable_is_an_error() {
+    // a `using` that disposes of nothing would be silently wrong; say so
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(vec![SourceCode::new(
+        "test.cs",
+        r#"
+        namespace Game
+        {
+            public class Bag { public int Count; public void Dispose() { } }
+            public class Program
+            {
+                public static int result;
+                public static void Main()
+                {
+                    using var bag = new Bag();
+                    result = bag.Count;
+                }
+            }
+        }
+        "#,
+    )]);
+    assert_no_syntax_errors(&files);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::NotDisposable { .. }
+        )),
+        "{:#?}",
+        bodies.errors
+    );
+}
+
+#[test]
+fn a_using_in_an_iterator_is_disposed_when_the_loop_stops_early() {
+    // an iterator's `using` is part of what its `Dispose()` has to run, so
+    // a `foreach` that breaks out still closes the resource
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        using System.Collections.Generic;
+
+        public class Res3 : System.IDisposable
+        {
+            public static string log;
+            public void Dispose() { log += "d"; }
+        }
+
+        public class Probe3 : MenSharpBehaviour
+        {
+            public string whole;
+            public string early;
+
+            IEnumerable<int> Numbers()
+            {
+                using var r = new Res3();
+                yield return 1;
+                yield return 2;
+            }
+
+            public void Interact()
+            {
+                Res3.log = "";
+                foreach (int n in Numbers()) { Res3.log += n.ToString(); }
+                whole = Res3.log;
+
+                Res3.log = "";
+                foreach (int n in Numbers()) { Res3.log += n.ToString(); break; }
+                early = Res3.log;
+            }
+        }
+        "#,
+        "Probe3",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(string_of(&emulator, "whole"), "12d");
+    assert_eq!(string_of(&emulator, "early"), "1d");
+}
