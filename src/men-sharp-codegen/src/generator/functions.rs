@@ -243,6 +243,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.functions.contains_key(key) {
             return;
         }
+        // reaching any member of a generic class reaches the class
+        let owner = self.declarations.table.symbol(key.symbol).parent;
+        self.note_generic_static_constructor(owner);
         let name = self.mangle_key(key);
         let (parameter_types, return_type) = self.function_shape(key);
         let has_this = self.function_has_this(key);

@@ -15083,3 +15083,112 @@ fn a_using_in_an_iterator_is_disposed_when_the_loop_stops_early() {
     assert_eq!(string_of(&emulator, "whole"), "12d");
     assert_eq!(string_of(&emulator, "early"), "1d");
 }
+
+#[test]
+fn a_librarys_static_constructors_are_not_this_compilations() {
+    // a library file is read for its declarations; its bodies belong to
+    // another compiler. A generic class with a static constructor anywhere
+    // under Assets used to fail the whole compilation (issue), and a plain
+    // one was compiled into — and run by — the M# program
+    let mut sources = vec![
+        SourceCode::new(
+            "test.cs",
+            r#"
+            using MenSharp;
+            public class Probe : MenSharpBehaviour
+            {
+                public int result;
+                public void Interact() { result = 1; }
+            }
+            "#,
+        ),
+        SourceCode::foreign(
+            "lib.cs",
+            r#"
+            public class UnusedGeneric<T>
+            {
+                static UnusedGeneric() { }
+            }
+            public class UnusedPlain
+            {
+                public static int Value;
+                static UnusedPlain() { Value = 12345; }
+            }
+            "#,
+        ),
+    ];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, "Probe").expect("no program");
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.dump();
+    assert!(
+        !text.contains("UnusedPlain"),
+        "the library's static constructor was compiled in"
+    );
+}
+
+#[test]
+fn a_generic_static_constructor_is_an_error_only_where_the_class_is_used() {
+    // one run per closed type is what C# asks for and the backend has no
+    // model for; a class the program never reaches is no one's problem
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Unused<T>
+        {
+            public T Value;
+            static Unused() { }
+        }
+        public class Probe : MenSharpBehaviour
+        {
+            public int result;
+            public void Interact() { result = 1; }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, "Probe").expect("no program");
+    assert!(
+        program.output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        program.output.errors
+    );
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Used<T>
+        {
+            public T Value;
+            static Used() { }
+        }
+        public class Probe : MenSharpBehaviour
+        {
+            public int result;
+            public void Interact()
+            {
+                Used<int> box = new Used<int>();
+                box.Value = 1;
+                result = box.Value;
+            }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, "Probe").expect("no program");
+    let reported: Vec<String> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| format!("{:?}", error.message))
+        .filter(|text| text.contains("static constructor of a generic class"))
+        .collect();
+    assert_eq!(reported.len(), 1, "{:#?}", program.output.errors);
+    assert!(reported[0].contains("Used"), "{:#?}", reported);
+}

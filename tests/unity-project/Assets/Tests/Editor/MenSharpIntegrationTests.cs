@@ -405,7 +405,9 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(true, smoke.GetProgramVariable("decimalExact"));
         Assert.AreEqual("0.3", smoke.GetProgramVariable("decimalSum"));
 
-        // a library in its own auto-referenced asmdef is read as a library
+        // a library in its own auto-referenced asmdef is read as a library —
+        // static constructors and all, including a generic class's, which the
+        // compiler must neither run nor trip over (see Library/Toolbox)
         smoke.RunProgram("UseToolbox");
         Assert.AreEqual(42, smoke.GetProgramVariable("toolboxTwice"));
 

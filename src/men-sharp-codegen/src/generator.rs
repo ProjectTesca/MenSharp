@@ -106,6 +106,8 @@ pub fn generate(
         static_init_emitted: HashSet::default(),
         static_init_phase: false,
         static_constructors: Vec::new(),
+        generic_static_constructors: HashSet::default(),
+        reported_generic_static_constructors: HashSet::default(),
         shared: None,
         static_storage_cache: HashMap::default(),
         shared_slot: None,
@@ -460,6 +462,13 @@ struct Generator<'a, 'ast> {
     /// Every static constructor in the compilation, in declaration order;
     /// the static initializer runs them after the field initializers.
     static_constructors: Vec<FunctionKey>,
+    /// Generic classes that declare a static constructor, by class symbol.
+    /// One run per closed type is what C# asks for and nothing here models,
+    /// so reaching such a class is an error — but only reaching it: a class
+    /// the program never uses (one that came in with a library) is no one's
+    /// problem. `reported` keeps the error to one per class.
+    generic_static_constructors: HashSet<SymbolId>,
+    reported_generic_static_constructors: HashSet<SymbolId>,
     /// The static fields every behaviour shares, once computed — see
     /// [`Self::shared_statics`].
     shared: Option<SharedStatics>,
@@ -1656,10 +1665,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.extend(deferred);
     }
 
-    /// Every `static T()` in the compilation, queued for compilation and
-    /// remembered for the static initializer. A generic class's static
-    /// constructor would need one run per instantiation, which nothing
-    /// here models yet — an error rather than a silent skip.
+    /// Every `static T()` this compilation owns, queued for compilation and
+    /// remembered for the static initializer. A foreign file is a library
+    /// read for its declarations — its bodies are another compiler's, and
+    /// running them here would be wrong. A generic class's static
+    /// constructor would need one run per instantiation, which nothing here
+    /// models yet: noted, and reported if the program reaches the class.
     fn schedule_static_constructors(&mut self) {
         let mut found = Vec::new();
         for (symbol, entry) in self.declarations.table.iter() {
@@ -1669,6 +1680,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let Some(owner) = entry.parent else {
                 continue;
             };
+            let (file, _) = self.declaration_site(symbol);
+            if self.declarations.is_foreign(file) {
+                continue;
+            }
             if !self
                 .declarations
                 .table
@@ -1676,14 +1691,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 .type_parameters
                 .is_empty()
             {
-                let (file, span) = self.declaration_site(symbol);
-                self.errors.push(CodegenError {
-                    message: "a static constructor of a generic class is not supported by the \
-                              Udon backend yet"
-                        .into(),
-                    file,
-                    span,
-                });
+                self.generic_static_constructors.insert(owner);
                 continue;
             }
             found.push(FunctionKey {
@@ -1696,6 +1704,32 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.ensure_function(key);
         }
         self.static_constructors = found;
+    }
+
+    /// A generic class the program actually reached: its static constructor
+    /// cannot be run once per closed type here, and saying so is better than
+    /// skipping it. Quiet for a class nothing uses — see
+    /// [`Self::schedule_static_constructors`].
+    pub(super) fn note_generic_static_constructor(&mut self, owner: Option<SymbolId>) {
+        let Some(owner) = owner else {
+            return;
+        };
+        if !self.generic_static_constructors.contains(&owner)
+            || !self.reported_generic_static_constructors.insert(owner)
+        {
+            return;
+        }
+        let (file, span) = self.declaration_site(owner);
+        let name = self.display_path(owner);
+        self.errors.push(CodegenError {
+            message: format!(
+                "`{name}` has a static constructor, and a static constructor of a generic \
+                 class is not supported by the Udon backend yet"
+            )
+            .into(),
+            file,
+            span,
+        });
     }
 
     fn emit_static_field_initializer(&mut self, field: SymbolId, file: FileId) {
@@ -2080,6 +2114,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // (`Cache<int>` gives T = int), so a field typed or initialized in
         // terms of T resolves to the concrete type
         let class = self.declarations.table.symbol(field).parent;
+        self.note_generic_static_constructor(class);
         let class_bindings: Vec<(SymbolId, Type)> = match (class, declaring) {
             (Some(class), Type::Named { arguments, .. }) => self
                 .declarations
@@ -4041,6 +4076,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         };
         let symbol = *symbol;
+        if !arguments.is_empty() {
+            self.note_generic_static_constructor(Some(symbol));
+        }
         // a type that cannot be compiled, or that is an engine object in
         // disguise, has no layout worth building: the error names why
         if let Some(reason) = self.uncompilable_reason(symbol) {
