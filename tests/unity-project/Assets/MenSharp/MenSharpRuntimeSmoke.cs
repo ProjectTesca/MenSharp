@@ -6,6 +6,7 @@ using MenSharp.Json;
 using UnityEngine;
 using VRC.SDK3.Image;
 using VRC.SDKBase;
+using VRC.Udon.Common.Interfaces;
 
 // A deliberately small black-box test program. The Unity test runner invokes
 // its exported events through the SDK's real UdonBehaviour and reads these
@@ -372,6 +373,24 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         componentsByType = GetComponentsInChildren(typeof(MeshFilter), true).Length;
         smokesInChildren = GetComponentsInChildren<MenSharpRuntimeSmoke>().Length;
         componentInParentFound = GetComponentInParent<Transform>(true) == transform;
+    }
+
+    // `this` is what it is at run time — the UdonBehaviour: an Object for
+    // Debug.Log's context, an IUdonEventReceiver for the SDK's APIs (request)
+    public string receiverLog;
+
+    public void ReceiverIdentity()
+    {
+        Debug.Log("meow", this);
+        UnityEngine.Object asObject = this;
+        IUdonEventReceiver receiver = this;
+        receiverLog = asObject == null ? "null" : "object";
+        receiver.SendCustomEvent("ReceiverTarget");
+    }
+
+    public void ReceiverTarget()
+    {
+        receiverLog += "+event";
     }
 
     // a Unity message is an event whatever its accessibility, as on a

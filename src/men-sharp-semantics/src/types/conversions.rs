@@ -428,6 +428,15 @@ impl TypeSystem<'_, '_> {
             return true;
         }
 
+        // a behaviour is, at run time, the UdonBehaviour it compiled to: a
+        // Component, an Object, an IUdonEventReceiver. `Debug.Log("x", this)`
+        // and `IUdonEventReceiver r = this` are what the Unity-side twin — a
+        // MonoBehaviour implementing the interface — allows, so they are
+        // allowed here, and nothing more: what the twin rejects, this does
+        if self.is_behaviour_type(from) && self.is_behaviour_identity_type(to) {
+            return true;
+        }
+
         // reference conversion: `to` somewhere in `from`'s base/interface closure
         if matches!(from, Type::Named { .. }) && matches!(to, Type::Named { .. }) {
             return self.inheritance_closure_contains(from, to);
@@ -522,6 +531,63 @@ impl TypeSystem<'_, '_> {
         } else {
             None
         }
+    }
+
+    /// A class deriving from `MenSharp.MenSharpBehaviour` (the base itself
+    /// included): what compiles to an Udon program.
+    pub fn is_behaviour_type(&self, ty: &Type) -> bool {
+        let mut current = ty.clone();
+        for _ in 0..64 {
+            if !matches!(
+                current,
+                Type::Named {
+                    target: TypeTarget::Source(_),
+                    ..
+                }
+            ) {
+                return false;
+            }
+            if self.is_source_type_path(&current, &["MenSharp", "MenSharpBehaviour"]) {
+                return true;
+            }
+            match self.base_of(&current) {
+                Some(base) => current = base,
+                None => return false,
+            }
+        }
+        false
+    }
+
+    /// The external types a behaviour converts to by being an UdonBehaviour:
+    /// the Unity twin's base chain and the interface it implements.
+    fn is_behaviour_identity_type(&self, ty: &Type) -> bool {
+        let Type::Named {
+            target: TypeTarget::External(id),
+            arguments,
+        } = ty
+        else {
+            return false;
+        };
+        if !arguments.is_empty() {
+            return false;
+        }
+        const IDENTITIES: [(&[&str], &str); 6] = [
+            (&["UnityEngine"], "Object"),
+            (&["UnityEngine"], "Component"),
+            (&["UnityEngine"], "Behaviour"),
+            (&["UnityEngine"], "MonoBehaviour"),
+            (
+                &["VRC", "Udon", "Common", "Interfaces"],
+                "IUdonEventReceiver",
+            ),
+            (
+                &["VRC", "Udon", "Common", "Interfaces"],
+                "IUdonProgramVariableAccessTarget",
+            ),
+        ];
+        IDENTITIES
+            .iter()
+            .any(|(namespace, name)| self.external.find_type(namespace, name, 0) == Some(*id))
     }
 
     /// Walks base classes and interfaces (instantiated) looking for `wanted`.

@@ -9,7 +9,7 @@ using UnityEngine;
 
 namespace MenSharp
 {
-    public class MenSharpBehaviour : MonoBehaviour
+    public class MenSharpBehaviour : MonoBehaviour, VRC.Udon.Common.Interfaces.IUdonEventReceiver
     {
         // Stubs, so that source calling them is valid Unity C#. What runs is
         // the compiled Udon program, where each of these is an extern on the
@@ -138,6 +138,32 @@ namespace MenSharp
         public virtual void OnStationEntered() { }
         public virtual void OnStationExited() { }
         public virtual void OnOwnershipTransferred() { }
+
+
+        // ------------------------------------------- IUdonEventReceiver
+        // What a compiled program is: the SDK's APIs take one where they
+        // take an UdonBehaviour, so `this` must be one here too. Explicit
+        // stubs, so nothing of this shows up beside your own members; the
+        // public methods above already cover the rest of the interface.
+        void VRC.Udon.Common.Interfaces.IUdonEventReceiver.SendCustomEventDelayedSeconds(string eventName, float delaySeconds, VRC.Udon.Common.Enums.EventTiming eventTiming) { }
+        void VRC.Udon.Common.Interfaces.IUdonEventReceiver.SendCustomEventDelayedFrames(string eventName, int delayFrames, VRC.Udon.Common.Enums.EventTiming eventTiming) { }
+        bool VRC.Udon.Common.Interfaces.IUdonEventReceiver.DisableInteractive { get { return false; } set { } }
+        bool VRC.Udon.Common.Interfaces.IUdonEventReceiver.DisableEventProcessing { get { return false; } set { } }
+        string VRC.Udon.Common.Interfaces.IUdonEventReceiver.InteractionText { get { return null; } set { } }
+        void VRC.Udon.Common.Interfaces.IUdonEventReceiver.RunProgram(string eventName) { }
+        bool VRC.Udon.Common.Interfaces.IUdonEventReceiver.RunEvent(string eventName) { return false; }
+        bool VRC.Udon.Common.Interfaces.IUdonEventReceiver.RunEvent<T0>(string eventName, (string symbolName, T0 value) parameter0) { return false; }
+        bool VRC.Udon.Common.Interfaces.IUdonEventReceiver.RunEvent<T0, T1>(string eventName, (string symbolName, T0 value) parameter0, (string symbolName, T1 value) parameter1) { return false; }
+        bool VRC.Udon.Common.Interfaces.IUdonEventReceiver.RunEvent<T0, T1, T2>(string eventName, (string symbolName, T0 value) parameter0, (string symbolName, T1 value) parameter1, (string symbolName, T2 value) parameter2) { return false; }
+        bool VRC.Udon.Common.Interfaces.IUdonEventReceiver.RunEvent(string eventName, params (string symbolName, object value)[] programVariables) { return false; }
+        void VRC.Udon.Common.Interfaces.IUdonEventReceiver.RunInputEvent(string eventName, VRC.Udon.Common.UdonInputEventArgs args) { }
+        System.Type VRC.Udon.Common.Interfaces.IUdonProgramVariableAccessTarget.GetProgramVariableType(string symbolName) { return null; }
+        T VRC.Udon.Common.Interfaces.IUdonProgramVariableAccessTarget.GetProgramVariable<T>(string symbolName) { return default; }
+        object VRC.Udon.Common.Interfaces.IUdonProgramVariableAccessTarget.GetProgramVariable(string symbolName) { return null; }
+        bool VRC.Udon.Common.Interfaces.IUdonProgramVariableAccessTarget.TryGetProgramVariable<T>(string symbolName, out T value) { value = default; return false; }
+        bool VRC.Udon.Common.Interfaces.IUdonProgramVariableAccessTarget.TryGetProgramVariable(string symbolName, out object value) { value = null; return false; }
+        void VRC.Udon.Common.Interfaces.IUdonProgramVariableAccessTarget.SetProgramVariable<T>(string symbolName, T value) { }
+        void VRC.Udon.Common.Interfaces.IUdonProgramVariableAccessTarget.SetProgramVariable(string symbolName, object value) { }
 
     }
 }

@@ -15322,3 +15322,131 @@ fn a_vrc_event_is_an_override_of_the_base_class() {
     let text = program.output.program.to_uasm().unwrap();
     assert!(!text.contains(".export _interact"), "{text}");
 }
+
+/// The SDK's `VRC.Udon.Common.dll`, from a VRChat project on this machine —
+/// what `IUdonEventReceiver` lives in. None: the test is skipped.
+fn vrc_udon_common_dll() -> Option<std::path::PathBuf> {
+    let projects = std::path::Path::new(&std::env::var("HOME").ok()?).join("ALCOM/Projects");
+    for project in std::fs::read_dir(projects).ok()?.flatten() {
+        let dll = project
+            .path()
+            .join("Packages/com.vrchat.worlds/Runtime/Udon/External/VRC.Udon.Common.dll");
+        if dll.exists() {
+            return Some(dll);
+        }
+    }
+    None
+}
+
+#[test]
+fn a_behaviour_is_an_object_and_an_event_receiver() {
+    // `Debug.Log("meow", this)`, `IUdonEventReceiver r = this`: at run time
+    // `this` is the UdonBehaviour — a Component, an Object, the interface —
+    // and the Unity-side twin allows exactly these, so the compiler does too
+    // (request). A class that is no behaviour converts to none of them
+    let (Some(dotnet), Some(unity), Some(udon)) = (
+        dotnet_shared_dir(),
+        unity_managed_dir(),
+        vrc_udon_common_dll(),
+    ) else {
+        eprintln!("skipped: no .NET runtime, Unity or VRChat SDK on this machine");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dotnet.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+        std::fs::read(udon).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+
+    let check = |source: &str| {
+        let mut sources = vec![SourceCode::new("test.cs", source)];
+        sources.extend(Compiler::corlib_sources_for(&references));
+        let files = compiler.parse(sources);
+        assert_no_syntax_errors(&files);
+        let declarations = compiler.collect_declarations(&files);
+        let signatures = compiler.resolve_signatures(&declarations, &references);
+        let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+        let output = compiler.generate_udon(
+            &declarations,
+            &signatures,
+            &bodies,
+            &references,
+            &["Game", "Probe"],
+        );
+        (bodies.errors, output)
+    };
+
+    let (errors, output) = check(
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        using VRC.Udon.Common.Interfaces;
+        namespace Game
+        {
+            public class Probe : MenSharpBehaviour
+            {
+                public string log;
+                public void Interact()
+                {
+                    Debug.Log("meow", this);
+                    Debug.LogWarning("meow", this);
+                    Object asObject = this;
+                    Component asComponent = this;
+                    MonoBehaviour asMono = this;
+                    IUdonEventReceiver receiver = this;
+                    receiver.SendCustomEvent("Target");
+                    Announce(this);
+                    log = asObject == null ? "null" : "object";
+                }
+                public void Target() { log += "+event"; }
+                private void Announce(Object context) { Debug.Log("announce", context); }
+            }
+        }
+        "#,
+    );
+    assert_eq!(errors, vec![], "type errors");
+    assert!(
+        output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        output.errors
+    );
+    let text = output.program.to_uasm().unwrap();
+    assert!(
+        text.contains("UnityEngineDebug.__Log__SystemObject_UnityEngineObject__SystemVoid"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "VRCUdonCommonInterfacesIUdonEventReceiver.__SendCustomEvent__SystemString__SystemVoid"
+        ),
+        "{text}"
+    );
+
+    // a plain class is none of these
+    let (errors, _) = check(
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Plain { }
+            public class Probe : MenSharpBehaviour
+            {
+                public void Interact()
+                {
+                    Object asObject = new Plain();
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::TypeMismatch { .. }
+        )),
+        "{errors:#?}"
+    );
+}

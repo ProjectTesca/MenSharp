@@ -303,6 +303,10 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(1, smoke.GetProgramVariable("smokesInChildren"));
         Assert.AreEqual(true, smoke.GetProgramVariable("componentInParentFound"));
 
+        // `this` converts to Object and IUdonEventReceiver, and is the program
+        smoke.RunProgram("ReceiverIdentity");
+        Assert.AreEqual("object+event", smoke.GetProgramVariable("receiverLog"));
+
         // a private Unity message and an overridden VRC event are both events
         // (`_update` also pumps the async scheduler, so earlier sections have
         // raised it already: count from here)
