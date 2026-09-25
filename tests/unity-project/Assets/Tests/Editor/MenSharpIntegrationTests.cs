@@ -354,6 +354,10 @@ public class MenSharpIntegrationTests
         secondSmoke.RunProgram("StaticConstructors");
         Assert.AreEqual(9, secondSmoke.GetProgramVariable("reachedTrace"), "once across behaviours");
 
+        // a static constructor runs after the ones its body needs
+        smoke.RunProgram("OrderedStaticConstructors");
+        Assert.AreEqual(11, smoke.GetProgramVariable("orderedTrace"));
+
         // a generic class's static constructor runs once per closed type
         smoke.RunProgram("GenericStaticConstructors");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));

@@ -396,6 +396,15 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     public int genericIntRuns;
     public int genericStringRuns;
 
+    // a static constructor runs after the ones its body needs (issue:
+    // `First.Value = Second.Value + 1` gave 1, not 11)
+    public int orderedTrace;
+
+    public void OrderedStaticConstructors()
+    {
+        orderedTrace = SmokeFirst.Value;
+    }
+
     public void GenericStaticConstructors()
     {
         nestedGenericValue = SmokeOuter<int>.Inner.Value;
@@ -1029,5 +1038,26 @@ public class SmokeCounter<T>
 
     public static void Touch()
     {
+    }
+}
+
+
+public class SmokeFirst
+{
+    public static int Value;
+
+    static SmokeFirst()
+    {
+        Value = SmokeSecond.Value + 1;
+    }
+}
+
+public class SmokeSecond
+{
+    public static int Value;
+
+    static SmokeSecond()
+    {
+        Value = 10;
     }
 }

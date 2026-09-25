@@ -15881,3 +15881,82 @@ fn a_behaviours_unreached_static_constructor_never_runs() {
     assert_eq!(int_of(&emulator, "used"), 9);
     assert_eq!(int_of(&emulator, "twice"), 4);
 }
+
+#[test]
+fn a_static_constructor_runs_after_the_ones_its_body_needs() {
+    // issue: `static First() { Value = Second.Value + 1; }` gave 1 — First
+    // ran before Second, which C# runs first ("before first use"). The
+    // constructors run in dependency order, through helper methods too
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class First
+            {
+                public static int Value;
+                static First() { Value = Second.Value + 1; }
+            }
+            public class Second
+            {
+                public static int Value;
+                static Second() { Value = 10; }
+            }
+            public class Third
+            {
+                public static int Value;
+                static Third() { Value = Helper.Read() * 2; }
+            }
+            public static class Helper
+            {
+                public static int Read() { return Fourth.Value; }
+            }
+            public class Fourth
+            {
+                public static int Value;
+                static Fourth() { Value = 21; }
+            }
+            public class Program
+            {
+                public static int first;
+                public static int third;
+                public static void Main()
+                {
+                    third = Third.Value;
+                    first = First.Value;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "first"), 11);
+    assert_eq!(int_of(&emulator, "third"), 42, "through a helper method");
+
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public class First
+        {
+            public static int Value;
+            static First() { Value = Second.Value + 1; }
+        }
+        public class Second
+        {
+            public static int Value;
+            static Second() { Value = 10; }
+        }
+        public class Probe : MenSharpBehaviour
+        {
+            public int first;
+            public void Interact() { first = First.Value; }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "first"), 11);
+}

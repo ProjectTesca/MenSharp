@@ -240,6 +240,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// Registers (and queues) a function instance; returns nothing — look it
     /// up in `self.functions`.
     pub(super) fn ensure_function(&mut self, key: &FunctionKey) {
+        // the call graph the static constructors are ordered by
+        if let Some(current) = self.current_frame.clone()
+            && current != *key
+        {
+            let calls = self.function_calls.entry(current).or_default();
+            if !calls.contains(key) {
+                calls.push(key.clone());
+            }
+        }
         if self.functions.contains_key(key) {
             return;
         }

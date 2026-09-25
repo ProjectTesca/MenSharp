@@ -108,6 +108,8 @@ pub fn generate(
         static_constructors: Vec::new(),
         static_constructor_of: HashMap::default(),
         static_constructor_order: Vec::new(),
+        constructor_reaches: HashMap::default(),
+        function_calls: HashMap::default(),
         shared: None,
         static_storage_cache: HashMap::default(),
         shared_slot: None,
@@ -475,6 +477,13 @@ struct Generator<'a, 'ast> {
     /// program of the compilation agrees on for the flags in the shared
     /// array. A closed generic type's flag is a registry entry instead.
     static_constructor_order: Vec<SymbolId>,
+    /// What each compiled function reaches: the static constructors of the
+    /// classes its body touches, and the functions it calls. A static
+    /// constructor runs after those it reaches through this graph — C#'s
+    /// "before first use" for `static First() { Value = Second.Value + 1; }`
+    /// (issue: 1 where C# gives 11).
+    constructor_reaches: HashMap<FunctionKey, Vec<FunctionKey>>,
+    function_calls: HashMap<FunctionKey, Vec<FunctionKey>>,
     /// The static fields every behaviour shares, once computed — see
     /// [`Self::shared_statics`].
     shared: Option<SharedStatics>,
@@ -1658,10 +1667,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let mut emitted: HashSet<FunctionKey> = HashSet::default();
         loop {
             let pending: Vec<FunctionKey> = self
-                .static_constructors
-                .iter()
+                .constructor_order()
+                .into_iter()
                 .filter(|key| !emitted.contains(key))
-                .cloned()
                 .collect();
             if pending.is_empty() {
                 break;
@@ -1830,6 +1838,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             role: Role::Constructor,
             bindings,
         };
+        // reached from inside a function: that function (and so any static
+        // constructor calling it) runs after this constructor
+        if let Some(current) = self.current_frame.clone()
+            && current != key
+        {
+            let reached = self.constructor_reaches.entry(current).or_default();
+            if !reached.contains(&key) {
+                reached.push(key.clone());
+            }
+        }
         if self.static_constructors.contains(&key) {
             return;
         }
@@ -1839,6 +1857,60 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         self.static_constructors.push(key.clone());
         self.ensure_function(&key);
+    }
+
+    /// The scheduled static constructors, each after the ones its body
+    /// reaches — directly or through the functions it calls — so that
+    /// `static First() { Value = Second.Value + 1; }` sees `Second`
+    /// initialized, as C# guarantees. A cycle keeps discovery order (C#
+    /// too hands the partly initialized class to the other).
+    fn constructor_order(&self) -> Vec<FunctionKey> {
+        fn dependencies(
+            generator: &Generator<'_, '_>,
+            key: &FunctionKey,
+            seen: &mut HashSet<FunctionKey>,
+            out: &mut Vec<FunctionKey>,
+        ) {
+            if !seen.insert(key.clone()) {
+                return;
+            }
+            for reached in generator.constructor_reaches.get(key).into_iter().flatten() {
+                if !out.contains(reached) {
+                    out.push(reached.clone());
+                }
+            }
+            for callee in generator.function_calls.get(key).into_iter().flatten() {
+                dependencies(generator, callee, seen, out);
+            }
+        }
+        fn visit(
+            generator: &Generator<'_, '_>,
+            key: &FunctionKey,
+            visiting: &mut HashSet<FunctionKey>,
+            done: &mut HashSet<FunctionKey>,
+            order: &mut Vec<FunctionKey>,
+        ) {
+            if done.contains(key) || !visiting.insert(key.clone()) {
+                return;
+            }
+            let mut deps = Vec::new();
+            dependencies(generator, key, &mut HashSet::default(), &mut deps);
+            for dep in deps {
+                if dep != *key && generator.static_constructors.contains(&dep) {
+                    visit(generator, &dep, visiting, done, order);
+                }
+            }
+            visiting.remove(key);
+            done.insert(key.clone());
+            order.push(key.clone());
+        }
+        let mut order = Vec::new();
+        let mut visiting = HashSet::default();
+        let mut done = HashSet::default();
+        for key in &self.static_constructors {
+            visit(self, key, &mut visiting, &mut done, &mut order);
+        }
+        order
     }
 
     /// Compiles whatever the queue holds, to the side buffer the static
