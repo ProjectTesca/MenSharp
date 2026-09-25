@@ -376,6 +376,19 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         componentInParentFound = GetComponentInParent<Transform>(true) == transform;
     }
 
+    // a static constructor runs only when its class is reached, and once
+    // across the scene (issue: an unreached class's constructor ran at
+    // startup and wrote its static)
+    public int unreachedTrace;
+    public int reachedTrace;
+
+    public void StaticConstructors()
+    {
+        SmokeReached.Touch();
+        unreachedTrace = SmokeTrace.Unreached;
+        reachedTrace = SmokeTrace.Reached;
+    }
+
     // components the SDK's generic table lacks (issue: `GetComponent<UdonBehaviour>()`
     // halted the VM with "the given key was not present"): found by type
     public bool udonFound;
@@ -947,4 +960,31 @@ public class SmokeResource : IDisposable
     public int N;
     public SmokeResource(string n) { name = n; }
     public void Dispose() { log += name; N = 7; }
+}
+
+// what `StaticConstructors` reads: a class nothing reaches, and one it does
+public static class SmokeTrace
+{
+    public static int Unreached;
+    public static int Reached;
+}
+
+public class SmokeUnreached
+{
+    static SmokeUnreached()
+    {
+        SmokeTrace.Unreached = 9;
+    }
+}
+
+public class SmokeReached
+{
+    static SmokeReached()
+    {
+        SmokeTrace.Reached += 9;
+    }
+
+    public static void Touch()
+    {
+    }
 }

@@ -15717,3 +15717,124 @@ fn the_meta_carries_the_layout_of_an_exported_dictionary_field() {
         assert_eq!(slot.udon_type, udon_type, "{field}");
     }
 }
+
+#[test]
+fn a_static_constructor_runs_only_when_its_class_is_reached() {
+    // issue: `Unused`'s static constructor ran at startup and wrote 9 into
+    // `Trace.Value`, which the program then read — C# never runs it (§15.12:
+    // before the class's first use, which never comes). A class the program
+    // does reach — by `new`, a static method, a static field — gets its run,
+    // and a constructor that reaches another class schedules that one too
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public static class Trace
+            {
+                public static int Value;
+                public static int Used;
+                public static int Chained;
+                public static int ByField;
+            }
+            public class Unused
+            {
+                static Unused() { Trace.Value = 9; }
+            }
+            public class Used
+            {
+                static Used() { Trace.Used = 9; Second.Touch(); }
+                public static void Touch() { }
+            }
+            public class Second
+            {
+                static Second() { Trace.Chained = 9; }
+                public static void Touch() { }
+            }
+            public class ByField
+            {
+                public static int Count;
+                static ByField() { Trace.ByField = 9; }
+            }
+            public class Program
+            {
+                public static int value;
+                public static int used;
+                public static int chained;
+                public static int byField;
+                public static void Main()
+                {
+                    Used.Touch();
+                    ByField.Count += 1;
+                    value = Trace.Value;
+                    used = Trace.Used;
+                    chained = Trace.Chained;
+                    byField = Trace.ByField;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        int_of(&emulator, "value"),
+        0,
+        "an unreached class's constructor never runs"
+    );
+    assert_eq!(int_of(&emulator, "used"), 9);
+    assert_eq!(
+        int_of(&emulator, "chained"),
+        9,
+        "reached from another static constructor"
+    );
+    assert_eq!(
+        int_of(&emulator, "byField"),
+        9,
+        "reached through a static field"
+    );
+}
+
+#[test]
+fn a_behaviours_unreached_static_constructor_never_runs() {
+    // the same on a behaviour, whose statics are shared: the reached class
+    // runs, guarded by its flag in the shared array; the other never does
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public static class Trace
+        {
+            public static int Value;
+            public static int Used;
+        }
+        public class Unused
+        {
+            static Unused() { Trace.Value = 9; }
+        }
+        public class Used
+        {
+            static Used() { Trace.Used += 9; }
+            public static int Twice(int n) { return n * 2; }
+        }
+        public class Probe : MenSharpBehaviour
+        {
+            public int value;
+            public int used;
+            public int twice;
+            public void Interact()
+            {
+                twice = Used.Twice(2);
+                value = Trace.Value;
+                used = Trace.Used;
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "value"), 0);
+    assert_eq!(int_of(&emulator, "used"), 9);
+    assert_eq!(int_of(&emulator, "twice"), 4);
+}

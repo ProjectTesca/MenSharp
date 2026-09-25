@@ -106,6 +106,8 @@ pub fn generate(
         static_init_emitted: HashSet::default(),
         static_init_phase: false,
         static_constructors: Vec::new(),
+        static_constructor_of: HashMap::default(),
+        static_constructor_order: Vec::new(),
         generic_static_constructors: HashSet::default(),
         reported_generic_static_constructors: HashSet::default(),
         shared: None,
@@ -460,9 +462,18 @@ struct Generator<'a, 'ast> {
     /// field first met there gets its initializer emitted on the spot,
     /// before the read that met it — C#'s "initialized before first use".
     static_init_phase: bool,
-    /// Every static constructor in the compilation, in declaration order;
-    /// the static initializer runs them after the field initializers.
+    /// The static constructors the program runs: those of the classes it
+    /// reached (§15.12 runs one before the class's first use; a class the
+    /// program never touches never has its run). The static initializer
+    /// runs them after the field initializers, each once across every
+    /// behaviour (see `constructor_flag`).
     static_constructors: Vec<FunctionKey>,
+    /// Every non-generic static constructor of the compilation, by its
+    /// class — what `note_class_reached` schedules from.
+    static_constructor_of: HashMap<SymbolId, FunctionKey>,
+    /// Those classes in declaration order: the order every program of the
+    /// compilation agrees on for the flags in the shared array.
+    static_constructor_order: Vec<SymbolId>,
     /// Generic classes that declare a static constructor, by class symbol.
     /// One run per closed type is what C# asks for and nothing here models,
     /// so reaching such a class is an error — but only reaching it: a class
@@ -1066,9 +1077,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return;
         }
 
-        // static constructors run at startup whether or not anything else
-        // refers to their class; compile them with everything else so their
-        // bodies take part in the dispatch fixpoint below
+        // static constructors: recorded here, scheduled as their classes
+        // are reached while the bodies below compile (`note_class_reached`)
         self.schedule_static_constructors();
         // where every uncaught exception ends: compiled with everything
         // else, since it dispatches `ToString` and `Message`
@@ -1621,7 +1631,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // program with no plain shared statics still needs the array when it
         // reached a generic class's static (the registry rides in the array).
         if self.entry_class.is_some()
-            && (!self.shared_statics().fields.is_empty() || self.uses_generic_statics)
+            && (!self.shared_statics().fields.is_empty()
+                || self.uses_generic_statics
+                || !self.static_constructors.is_empty())
         {
             self.emit_shared_statics_prologue();
         }
@@ -1640,34 +1652,57 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         self.static_init_phase = false;
 
-        // then every static constructor body (§15.12): after its class's
-        // field initializers — all of them ran above — and once: a class of
-        // the user's has shared statics, so only the program that made the
-        // array runs its constructor; the corlib's statics are each
-        // program's own, so their constructors run everywhere
-        let constructors = self.static_constructors.clone();
-        for key in constructors {
-            let (file, span) = self.declaration_site(key.symbol);
-            let guard = (self.shared_owner.is_some() && !self.is_corlib_file(file))
-                .then(|| self.begin_owner_guard());
-            let mut ctx = Ctx {
-                key: key.clone(),
-                file,
-                locals: vec![HashMap::default()],
-                boxed: Vec::new(),
-                this_slot: None,
-                this_type: None,
-                value_locals: Vec::new(),
-                loop_stack: Vec::new(),
-                result: None,
-                return_slot: init_return, // unused
-                caught: Vec::new(),
-                async_state: None,
-                iterator_state: None,
-            };
-            self.call_function(&mut ctx, &key, None, &[], &[], span);
-            if let Some(skip) = guard {
-                self.end_owner_guard(skip);
+        // then the static constructors of the classes this program reached
+        // (§15.12): after its class's field initializers — all of them ran
+        // above — and once across the scene: a class of the user's has
+        // shared statics, so the shared array carries a flag per class that
+        // whichever behaviour reaches it first sets (see
+        // `begin_constructor_guard`); the corlib's statics are each
+        // program's own, so its constructors would run everywhere. A
+        // constructor's body may reach a class not met before — its
+        // constructor joins the list, so this is a loop to a fixed point
+        let mut emitted: HashSet<FunctionKey> = HashSet::default();
+        loop {
+            let pending: Vec<FunctionKey> = self
+                .static_constructors
+                .iter()
+                .filter(|key| !emitted.contains(key))
+                .cloned()
+                .collect();
+            if pending.is_empty() {
+                break;
+            }
+            for key in pending {
+                emitted.insert(key.clone());
+                self.drain_queue_aside();
+                let (file, span) = self.declaration_site(key.symbol);
+                let owner = self.declarations.table.symbol(key.symbol).parent;
+                let mut ctx = Ctx {
+                    key: key.clone(),
+                    file,
+                    locals: vec![HashMap::default()],
+                    boxed: Vec::new(),
+                    this_slot: None,
+                    this_type: None,
+                    value_locals: Vec::new(),
+                    loop_stack: Vec::new(),
+                    result: None,
+                    return_slot: init_return, // unused
+                    caught: Vec::new(),
+                    async_state: None,
+                    iterator_state: None,
+                };
+                let guard = match owner {
+                    Some(owner) if self.shared_owner.is_some() && !self.is_corlib_file(file) => {
+                        Some(self.begin_constructor_guard(&ctx, owner, span.clone()))
+                    }
+                    _ => None,
+                };
+                self.call_function(&mut ctx, &key, None, &[], &[], span);
+                if let Some(skip) = guard {
+                    self.end_owner_guard(skip);
+                }
+                self.drain_queue_aside();
             }
         }
         self.program.code.push(Op::JumpIndirect(init_return));
@@ -1676,12 +1711,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.extend(deferred);
     }
 
-    /// Every `static T()` this compilation owns, queued for compilation and
-    /// remembered for the static initializer. A foreign file is a library
-    /// read for its declarations — its bodies are another compiler's, and
-    /// running them here would be wrong. A generic class's static
-    /// constructor would need one run per instantiation, which nothing here
-    /// models yet: noted, and reported if the program reaches the class.
+    /// Every `static T()` this compilation owns, by class — run by a
+    /// program only when it reaches the class (issue: an `Unused` class's
+    /// constructor wrote a static the program then read as 9, not 0). A
+    /// foreign file is a library read for its declarations — its bodies are
+    /// another compiler's, and running them here would be wrong. A generic
+    /// class's static constructor would need one run per instantiation,
+    /// which nothing here models yet: noted, and reported if the program
+    /// reaches the class.
     fn schedule_static_constructors(&mut self) {
         let mut found = Vec::new();
         for (symbol, entry) in self.declarations.table.iter() {
@@ -1705,16 +1742,81 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.generic_static_constructors.insert(owner);
                 continue;
             }
-            found.push(FunctionKey {
-                symbol,
-                role: Role::Constructor,
-                bindings: Vec::new(),
-            });
+            found.push((
+                owner,
+                FunctionKey {
+                    symbol,
+                    role: Role::Constructor,
+                    bindings: Vec::new(),
+                },
+            ));
         }
-        for key in &found {
-            self.ensure_function(key);
+        for (owner, key) in found {
+            if self.static_constructor_of.insert(owner, key).is_none() {
+                self.static_constructor_order.push(owner);
+            }
         }
-        self.static_constructors = found;
+    }
+
+    /// A class the program reached — a member of it compiled, an object of
+    /// it laid out, a static of it touched: its static constructor, if it
+    /// has one, joins the static initializer (and is compiled). Also where
+    /// a generic class's is reported. Quiet for every other class.
+    pub(super) fn note_class_reached(&mut self, owner: Option<SymbolId>) {
+        self.note_generic_static_constructor(owner);
+        let Some(owner) = owner else {
+            return;
+        };
+        let Some(key) = self.static_constructor_of.get(&owner).cloned() else {
+            return;
+        };
+        if self.static_constructors.contains(&key) {
+            return;
+        }
+        self.static_constructors.push(key.clone());
+        self.ensure_function(&key);
+    }
+
+    /// Compiles whatever the queue holds, to the side buffer the static
+    /// initializer appends after itself — so that a static constructor's
+    /// body, compiled here, can reach (and so schedule) another class's
+    /// constructor before the initializer's loop over them ends.
+    fn drain_queue_aside(&mut self) {
+        if self.queue.is_empty() {
+            return;
+        }
+        let mut side = Vec::new();
+        std::mem::swap(&mut self.program.code, &mut side);
+        while let Some(key) = self.queue.pop_front() {
+            self.compile_function(&key);
+        }
+        std::mem::swap(&mut self.program.code, &mut side);
+        self.deferred_function_code.extend(side);
+    }
+
+    /// Opens the stretch that runs one class's static constructor: skipped
+    /// when the flag for that class in the shared array is set, set on the
+    /// way in — so across every behaviour of the scene the constructor
+    /// runs once, by whichever of them reaches the class first, as C# runs
+    /// it once per program. `end_owner_guard` closes it.
+    fn begin_constructor_guard(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        owner: SymbolId,
+        span: Range<usize>,
+    ) -> LabelId {
+        let position = self.shared_statics().constructor_flags[&owner];
+        let array = self.shared_statics_slot();
+        let index = self.int_constant(position as i32);
+        let object = self.corlib_type("Object");
+        let flag = self.get_element(ctx, array, index, &object, span.clone());
+        let unset = self.is_null(ctx, flag, span.clone());
+        let skip = self.fresh_label("cctor_ran");
+        self.program.code.push(Op::Push(unset));
+        self.program.code.push(Op::JumpIfFalse(Target::Label(skip)));
+        let ran = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
+        self.set_element(ctx, array, index, ran, span);
+        skip
     }
 
     /// A generic class the program actually reached: its static constructor
@@ -1995,7 +2097,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             // were added, so an array from before them is never mistaken for
             // one that has them.
             let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
-            for byte in b"v2\n" {
+            for byte in b"v3\n" {
                 hash ^= u64::from(*byte);
                 hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
@@ -2014,9 +2116,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
                 }
             }
+            // the constructor flags: the classes in declaration order, which
+            // every program of the compilation sees alike, named in the hash
+            let mut constructor_flags = HashMap::default();
+            let first_flag = fields.len() + 3;
+            for (position, owner) in self.static_constructor_order.clone().iter().enumerate() {
+                constructor_flags.insert(*owner, first_flag + position);
+                for byte in format!("cctor:{}\n", self.display_path(*owner)).bytes() {
+                    hash ^= u64::from(byte);
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            let size = first_flag + constructor_flags.len();
             self.shared = Some(SharedStatics {
                 fields: fields.into_iter().map(|(_, field)| field).collect(),
                 index_of,
+                constructor_flags,
+                size,
                 id: format!("mensharp-statics:{hash:016x}"),
             });
         }
@@ -2049,6 +2165,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         ty: Type,
         span: Range<usize>,
     ) -> Place {
+        // a static of the class is a use of the class: its constructor runs
+        let owner = self.declarations.table.symbol(field).parent;
+        self.note_class_reached(owner);
         match self.static_storage(field) {
             StaticStorage::Shared => {
                 // met while the static initializer is being emitted (by
@@ -2125,7 +2244,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // (`Cache<int>` gives T = int), so a field typed or initialized in
         // terms of T resolves to the concrete type
         let class = self.declarations.table.symbol(field).parent;
-        self.note_generic_static_constructor(class);
+        self.note_class_reached(class);
         let class_bindings: Vec<(SymbolId, Type)> = match (class, declaring) {
             (Some(class), Type::Named { arguments, .. }) => self
                 .declarations
@@ -2327,9 +2446,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     fn emit_shared_statics_prologue(&mut self) {
         let entry = self.entry.expect("an entry class");
         let (file, span) = self.declaration_site(entry);
-        let (fields, id) = {
+        let (fields, id, array_size) = {
             let shared = self.shared_statics();
-            (shared.fields.clone(), shared.id.clone())
+            (shared.fields.clone(), shared.id.clone(), shared.size)
         };
         let ctx = Ctx {
             key: FunctionKey {
@@ -2463,9 +2582,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // none yet: this program makes it, and publishes it before running
         // any initializer, so a program the initializers reach finds it
         self.program.code.push(Op::Label(allocate));
-        // element 0 is the layout id; 1..=N the plain shared statics; the last
-        // two are the generic-static registry (keys and values arrays)
-        let size = self.int_constant(fields.len() as i32 + 3);
+        // element 0 is the layout id; 1..=N the plain shared statics; then
+        // the generic-static registry (keys and values arrays); then one
+        // flag per class with a static constructor
+        let size = self.int_constant(array_size as i32);
         self.call_extern(
             &ctx,
             "SystemObjectArray.__ctor__SystemInt32__SystemObjectArray",
@@ -4090,6 +4210,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if !arguments.is_empty() {
             self.note_generic_static_constructor(Some(symbol));
         }
+        self.note_class_reached(Some(symbol));
         // a type that cannot be compiled, or that is an engine object in
         // disguise, has no layout worth building: the error names why
         if let Some(reason) = self.uncompilable_reason(symbol) {
@@ -5275,6 +5396,11 @@ struct SharedStatics {
     fields: Vec<SymbolId>,
     /// Each field's element index.
     index_of: HashMap<SymbolId, usize>,
+    /// After the fields and the two registry slots: one element per class
+    /// with a static constructor, null until some behaviour ran it.
+    constructor_flags: HashMap<SymbolId, usize>,
+    /// The array's length: fields, layout id, registry, flags.
+    size: usize,
     /// The layout's id, held in element 0: a hash over the fields' names and
     /// types, so a program compiled against another layout does not read
     /// this array as its own.

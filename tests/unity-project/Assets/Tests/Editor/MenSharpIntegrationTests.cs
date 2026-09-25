@@ -345,6 +345,15 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(1, smoke.GetProgramVariable("smokesInChildren"));
         Assert.AreEqual(true, smoke.GetProgramVariable("componentInParentFound"));
 
+        // an unreached class's static constructor never runs; a reached one
+        // runs once for the whole scene (two smoke behaviours reach it)
+        smoke.RunProgram("StaticConstructors");
+        Assert.AreEqual(0, smoke.GetProgramVariable("unreachedTrace"));
+        Assert.AreEqual(9, smoke.GetProgramVariable("reachedTrace"));
+        UdonBehaviour secondSmoke = FindUdon("MenSharpRuntimeSmoke2");
+        secondSmoke.RunProgram("StaticConstructors");
+        Assert.AreEqual(9, secondSmoke.GetProgramVariable("reachedTrace"), "once across behaviours");
+
         // components the SDK's generic GetComponent table lacks are found by type
         smoke.RunProgram("ComponentsByType");
         Assert.AreEqual(true, smoke.GetProgramVariable("udonFound"));
