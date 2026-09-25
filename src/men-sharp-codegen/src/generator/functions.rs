@@ -243,10 +243,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if self.functions.contains_key(key) {
             return;
         }
-        // reaching any member of a class reaches the class: its static
-        // constructor runs (and a generic class's is reported)
-        let owner = self.declarations.table.symbol(key.symbol).parent;
-        self.note_class_reached(owner);
+        // reaching any member of a class reaches the class — for a generic
+        // class, the closed type the key binds: its static constructor runs
+        if let Some(owner) = self.declarations.table.symbol(key.symbol).parent {
+            match self.closed_type_of_key(owner, key) {
+                Some(closed) => self.note_type_reached(&closed),
+                None => self.note_class_reached(Some(owner)),
+            }
+        }
         let name = self.mangle_key(key);
         let (parameter_types, return_type) = self.function_shape(key);
         let has_this = self.function_has_this(key);

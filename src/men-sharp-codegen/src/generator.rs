@@ -108,8 +108,6 @@ pub fn generate(
         static_constructors: Vec::new(),
         static_constructor_of: HashMap::default(),
         static_constructor_order: Vec::new(),
-        generic_static_constructors: HashSet::default(),
-        reported_generic_static_constructors: HashSet::default(),
         shared: None,
         static_storage_cache: HashMap::default(),
         shared_slot: None,
@@ -468,19 +466,15 @@ struct Generator<'a, 'ast> {
     /// runs them after the field initializers, each once across every
     /// behaviour (see `constructor_flag`).
     static_constructors: Vec<FunctionKey>,
-    /// Every non-generic static constructor of the compilation, by its
-    /// class — what `note_class_reached` schedules from.
+    /// Every static constructor of the compilation, by its class — what
+    /// `note_type_reached` schedules from. A generic class's (a class nested
+    /// in a generic one included) is scheduled once per closed type, with
+    /// that type's bindings, as C# runs it once per closed type.
     static_constructor_of: HashMap<SymbolId, FunctionKey>,
-    /// Those classes in declaration order: the order every program of the
-    /// compilation agrees on for the flags in the shared array.
+    /// The non-generic ones' classes in declaration order: the order every
+    /// program of the compilation agrees on for the flags in the shared
+    /// array. A closed generic type's flag is a registry entry instead.
     static_constructor_order: Vec<SymbolId>,
-    /// Generic classes that declare a static constructor, by class symbol.
-    /// One run per closed type is what C# asks for and nothing here models,
-    /// so reaching such a class is an error — but only reaching it: a class
-    /// the program never uses (one that came in with a library) is no one's
-    /// problem. `reported` keeps the error to one per class.
-    generic_static_constructors: HashSet<SymbolId>,
-    reported_generic_static_constructors: HashSet<SymbolId>,
     /// The static fields every behaviour shares, once computed — see
     /// [`Self::shared_statics`].
     shared: Option<SharedStatics>,
@@ -1694,7 +1688,19 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 };
                 let guard = match owner {
                     Some(owner) if self.shared_owner.is_some() && !self.is_corlib_file(file) => {
-                        Some(self.begin_constructor_guard(&ctx, owner, span.clone()))
+                        if key.bindings.is_empty() {
+                            Some(self.begin_constructor_guard(&ctx, owner, span.clone()))
+                        } else {
+                            let closed = self.closed_type_of_key(owner, &key);
+                            let registry_key = format!(
+                                "{}#cctor",
+                                closed
+                                    .as_ref()
+                                    .map(|ty| self.display_type(ty))
+                                    .unwrap_or_default()
+                            );
+                            Some(self.begin_registry_guard(&ctx, &registry_key, span.clone()))
+                        }
                     }
                     _ => None,
                 };
@@ -1713,12 +1719,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// Every `static T()` this compilation owns, by class — run by a
     /// program only when it reaches the class (issue: an `Unused` class's
-    /// constructor wrote a static the program then read as 9, not 0). A
-    /// foreign file is a library read for its declarations — its bodies are
-    /// another compiler's, and running them here would be wrong. A generic
-    /// class's static constructor would need one run per instantiation,
-    /// which nothing here models yet: noted, and reported if the program
-    /// reaches the class.
+    /// constructor wrote a static the program then read as 9, not 0), and a
+    /// generic class's once per closed type it reaches (issue:
+    /// `Outer<int>.Inner`'s never ran for the closed type). A foreign file
+    /// is a library read for its declarations — its bodies are another
+    /// compiler's, and running them here would be wrong.
     fn schedule_static_constructors(&mut self) {
         let mut found = Vec::new();
         for (symbol, entry) in self.declarations.table.iter() {
@@ -1732,16 +1737,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             if self.declarations.is_foreign(file) {
                 continue;
             }
-            if !self
-                .declarations
-                .table
-                .symbol(owner)
-                .type_parameters
-                .is_empty()
-            {
-                self.generic_static_constructors.insert(owner);
-                continue;
-            }
             found.push((
                 owner,
                 FunctionKey {
@@ -1752,7 +1747,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             ));
         }
         for (owner, key) in found {
-            if self.static_constructor_of.insert(owner, key).is_none() {
+            if self.static_constructor_of.insert(owner, key).is_none()
+                && self.type_parameter_chain(owner).is_empty()
+            {
                 self.static_constructor_order.push(owner);
             }
         }
@@ -1760,18 +1757,85 @@ impl<'a, 'ast> Generator<'a, 'ast> {
 
     /// A class the program reached — a member of it compiled, an object of
     /// it laid out, a static of it touched: its static constructor, if it
-    /// has one, joins the static initializer (and is compiled). Also where
-    /// a generic class's is reported. Quiet for every other class.
+    /// has one, joins the static initializer (and is compiled). Quiet for
+    /// every other class. A generic class (or one nested in a generic
+    /// class) needs its closed type — see `note_type_reached`; reached
+    /// open, it is left to the reach that closes it.
     pub(super) fn note_class_reached(&mut self, owner: Option<SymbolId>) {
-        self.note_generic_static_constructor(owner);
         let Some(owner) = owner else {
             return;
         };
-        let Some(key) = self.static_constructor_of.get(&owner).cloned() else {
+        if !self.type_parameter_chain(owner).is_empty() {
             return;
+        }
+        self.schedule_constructor_of(owner, Vec::new());
+    }
+
+    /// A closed type the program reached: a generic class's static
+    /// constructor is scheduled for exactly that closed type (`Outer<int>`
+    /// and `Outer<string>` each get a run), its statics living in the
+    /// shared registry under the closed type's key like the constructor's
+    /// own flag. A non-generic type is `note_class_reached`.
+    pub(super) fn note_type_reached(&mut self, ty: &Type) {
+        let Type::Named {
+            target: TypeTarget::Source(symbol),
+            arguments,
+        } = ty
+        else {
+            return;
+        };
+        let parameters = self.type_parameter_chain(*symbol);
+        if parameters.is_empty() {
+            self.schedule_constructor_of(*symbol, Vec::new());
+            return;
+        }
+        if parameters.len() != arguments.len()
+            || arguments
+                .iter()
+                .any(|argument| matches!(argument, Type::TypeParameter(_) | Type::Error))
+        {
+            return;
+        }
+        let bindings: Vec<(SymbolId, Type)> = parameters
+            .into_iter()
+            .zip(arguments.iter().cloned())
+            .collect();
+        self.schedule_constructor_of(*symbol, bindings);
+    }
+
+    /// The closed type a member's function instance belongs to, from its
+    /// key's bindings — `None` when the class's parameters are not all bound.
+    fn closed_type_of_key(&self, owner: SymbolId, key: &FunctionKey) -> Option<Type> {
+        let parameters = self.type_parameter_chain(owner);
+        let mut arguments = Vec::new();
+        for parameter in parameters {
+            let (_, bound) = key
+                .bindings
+                .iter()
+                .find(|(symbol, _)| *symbol == parameter)?;
+            arguments.push(bound.clone());
+        }
+        Some(Type::Named {
+            target: TypeTarget::Source(owner),
+            arguments,
+        })
+    }
+
+    fn schedule_constructor_of(&mut self, owner: SymbolId, bindings: Vec<(SymbolId, Type)>) {
+        let Some(declared) = self.static_constructor_of.get(&owner) else {
+            return;
+        };
+        let key = FunctionKey {
+            symbol: declared.symbol,
+            role: Role::Constructor,
+            bindings,
         };
         if self.static_constructors.contains(&key) {
             return;
+        }
+        if !key.bindings.is_empty() {
+            // the closed type's flag rides in the registry
+            self.uses_generic_statics = true;
         }
         self.static_constructors.push(key.clone());
         self.ensure_function(&key);
@@ -1792,6 +1856,65 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         std::mem::swap(&mut self.program.code, &mut side);
         self.deferred_function_code.extend(side);
+    }
+
+    /// Opens the stretch that runs a closed generic type's static
+    /// constructor: skipped when the registry already holds the type's
+    /// `#cctor` key, which is appended (with `true`) on the way in — so the
+    /// constructor runs once per closed type across the scene, like the
+    /// non-generic flags. `end_owner_guard` closes it.
+    fn begin_registry_guard(&mut self, ctx: &Ctx<'ast>, key: &str, span: Range<usize>) -> LabelId {
+        let array = self.shared_statics_slot();
+        let plain = self.shared_statics().fields.len();
+        let keys_index = self.int_constant(plain as i32 + 1);
+        let values_index = self.int_constant(plain as i32 + 2);
+        let object_array = Type::Array {
+            element: Box::new(self.corlib_type("Object")),
+            rank: 1,
+        };
+        let keys = self.get_element(ctx, array, keys_index, &object_array, span.clone());
+        let values = self.get_element(ctx, array, values_index, &object_array, span.clone());
+        let key_constant = self.string_constant(key);
+        let index = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemArray.__IndexOf__SystemArray_SystemObject__SystemInt32",
+            &[keys, key_constant, index],
+            span.clone(),
+        );
+        let zero = self.int_constant(0);
+        let missing = self.temp("SystemBoolean");
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_LessThan__SystemInt32_SystemInt32__SystemBoolean",
+            &[index, zero, missing],
+            span.clone(),
+        );
+        let skip = self.fresh_label("cctor_ran");
+        self.program.code.push(Op::Push(missing));
+        self.program.code.push(Op::JumpIfFalse(Target::Label(skip)));
+        // not yet: append the key, with `true` as its value, and run
+        let length = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemArray.__get_Length__SystemInt32",
+            &[keys, length],
+            span.clone(),
+        );
+        let one = self.int_constant(1);
+        let grown = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemInt32.__op_Addition__SystemInt32_SystemInt32__SystemInt32",
+            &[length, one, grown],
+            span.clone(),
+        );
+        let new_keys = self.grow_object_array(ctx, keys, length, grown, key_constant, span.clone());
+        let ran = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
+        let new_values = self.grow_object_array(ctx, values, length, grown, ran, span.clone());
+        self.set_element(ctx, array, keys_index, new_keys, span.clone());
+        self.set_element(ctx, array, values_index, new_values, span);
+        skip
     }
 
     /// Opens the stretch that runs one class's static constructor: skipped
@@ -1817,32 +1940,6 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let ran = self.constant("SystemBoolean", "true", HeapInit::Boolean(true));
         self.set_element(ctx, array, index, ran, span);
         skip
-    }
-
-    /// A generic class the program actually reached: its static constructor
-    /// cannot be run once per closed type here, and saying so is better than
-    /// skipping it. Quiet for a class nothing uses — see
-    /// [`Self::schedule_static_constructors`].
-    pub(super) fn note_generic_static_constructor(&mut self, owner: Option<SymbolId>) {
-        let Some(owner) = owner else {
-            return;
-        };
-        if !self.generic_static_constructors.contains(&owner)
-            || !self.reported_generic_static_constructors.insert(owner)
-        {
-            return;
-        }
-        let (file, span) = self.declaration_site(owner);
-        let name = self.display_path(owner);
-        self.errors.push(CodegenError {
-            message: format!(
-                "`{name}` has a static constructor, and a static constructor of a generic \
-                 class is not supported by the Udon backend yet"
-            )
-            .into(),
-            file,
-            span,
-        });
     }
 
     fn emit_static_field_initializer(&mut self, field: SymbolId, file: FileId) {
@@ -2244,7 +2341,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // (`Cache<int>` gives T = int), so a field typed or initialized in
         // terms of T resolves to the concrete type
         let class = self.declarations.table.symbol(field).parent;
-        self.note_class_reached(class);
+        self.note_type_reached(declaring);
         let class_bindings: Vec<(SymbolId, Type)> = match (class, declaring) {
             (Some(class), Type::Named { arguments, .. }) => self
                 .declarations
@@ -4207,10 +4304,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             return None;
         };
         let symbol = *symbol;
-        if !arguments.is_empty() {
-            self.note_generic_static_constructor(Some(symbol));
-        }
-        self.note_class_reached(Some(symbol));
+        self.note_type_reached(ty);
         // a type that cannot be compiled, or that is an engine object in
         // disguise, has no layout worth building: the error names why
         if let Some(reason) = self.uncompilable_reason(symbol) {

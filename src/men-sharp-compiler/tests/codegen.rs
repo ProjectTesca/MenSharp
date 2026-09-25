@@ -15265,65 +15265,108 @@ fn a_librarys_static_constructors_are_not_this_compilations() {
 }
 
 #[test]
-fn a_generic_static_constructor_is_an_error_only_where_the_class_is_used() {
-    // one run per closed type is what C# asks for and the backend has no
-    // model for; a class the program never reaches is no one's problem
-    let mut sources = vec![SourceCode::new(
-        "test.cs",
+fn a_generic_classs_static_constructor_runs_once_per_closed_type() {
+    // C# runs a generic class's static constructor once per closed type —
+    // `Counter<int>` and `Counter<string>` apart — and the statics it
+    // writes are that closed type's. A class nested in a generic class is
+    // generic through its outer: `Outer<int>.Inner` is a closed type of its
+    // own (issue: its constructor never ran, `Value` read 0 instead of 7)
+    let Some(emulator) = run(
         r#"
-        using MenSharp;
-        public class Unused<T>
+        namespace Game
         {
-            public T Value;
-            static Unused() { }
-        }
-        public class Probe : MenSharpBehaviour
-        {
-            public int result;
-            public void Interact() { result = 1; }
-        }
-        "#,
-    )];
-    sources.extend(Compiler::corlib_sources());
-    let program = compile_behaviour(sources, "Probe").expect("no program");
-    assert!(
-        program.output.errors.is_empty(),
-        "codegen errors: {:#?}",
-        program.output.errors
-    );
-
-    let mut sources = vec![SourceCode::new(
-        "test.cs",
-        r#"
-        using MenSharp;
-        public class Used<T>
-        {
-            public T Value;
-            static Used() { }
-        }
-        public class Probe : MenSharpBehaviour
-        {
-            public int result;
-            public void Interact()
+            public class Counter<T>
             {
-                Used<int> box = new Used<int>();
-                box.Value = 1;
-                result = box.Value;
+                public static int Runs;
+                static Counter() { Runs += 1; }
+                public static int Get() { return Runs; }
+            }
+            public class Outer<T>
+            {
+                public class Inner
+                {
+                    public static int Value;
+                    static Inner() { Value = 7; }
+                }
+            }
+            public class Unused<T>
+            {
+                public static int Value;
+                static Unused() { Value = 9; }
+            }
+            public class Program
+            {
+                public static int intRuns;
+                public static int inner;
+                public static int innerString;
+                public static int unused;
+                public static void Main()
+                {
+                    Counter<int>.Get();
+                    intRuns = Counter<int>.Get();
+                    inner = Outer<int>.Inner.Value;
+                    innerString = Outer<string>.Inner.Value;
+                    unused = Unused<int>.Value;
+                }
             }
         }
         "#,
-    )];
-    sources.extend(Compiler::corlib_sources());
-    let program = compile_behaviour(sources, "Probe").expect("no program");
-    let reported: Vec<String> = program
-        .output
-        .errors
-        .iter()
-        .map(|error| format!("{:?}", error.message))
-        .filter(|text| text.contains("static constructor of a generic class"))
-        .collect();
-    assert_eq!(reported.len(), 1, "{:#?}", program.output.errors);
-    assert!(reported[0].contains("Used"), "{:#?}", reported);
+        "Main",
+    ) else {
+        return;
+    };
+    // (a plain program keeps one slot per generic static, whatever the
+    // closed type — only a behaviour's shared registry tells them apart)
+    assert_eq!(int_of(&emulator, "intRuns"), 1);
+    assert_eq!(int_of(&emulator, "inner"), 7);
+    assert_eq!(int_of(&emulator, "innerString"), 7);
+    assert_eq!(
+        int_of(&emulator, "unused"),
+        9,
+        "reached through its static field"
+    );
+
+    // on a behaviour the statics are shared and kept per closed type in the
+    // registry: `Counter<int>` and `Counter<string>` each run once
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public class Counter<T>
+        {
+            public static int Runs;
+            static Counter() { Runs += 1; }
+            public static int Get() { return Runs; }
+        }
+        public class Outer<T>
+        {
+            public class Inner
+            {
+                public static int Value;
+                static Inner() { Value = 7; }
+            }
+        }
+        public class Probe : MenSharpBehaviour
+        {
+            public int intRuns;
+            public int stringRuns;
+            public int inner;
+            public void Interact()
+            {
+                Counter<int>.Get();
+                intRuns = Counter<int>.Get();
+                stringRuns = Counter<string>.Get();
+                inner = Outer<int>.Inner.Value;
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "intRuns"), 1);
+    assert_eq!(int_of(&emulator, "stringRuns"), 1);
+    assert_eq!(int_of(&emulator, "inner"), 7);
 }
 
 #[test]

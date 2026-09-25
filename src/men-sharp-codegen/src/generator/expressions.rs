@@ -3203,6 +3203,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                         // apart): it lives in the shared array's registry,
                         // keyed by type. `const`/immutable `readonly` are
                         // Local (folded or copied per program) — left alone.
+                        // a static of the closed type is a use of it: its
+                        // static constructor runs (for that closed type)
+                        self.note_type_reached(&declaring);
                         if self.static_storage(symbol) == StaticStorage::Shared
                             && let Some(key) = self.generic_static_key(&declaring, symbol)
                         {

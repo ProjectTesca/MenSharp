@@ -389,6 +389,21 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         reachedTrace = SmokeTrace.Reached;
     }
 
+    // a generic class's static constructor runs once per closed type, a
+    // class nested in a generic class being generic through its outer
+    // (issue: `Outer<int>.Inner`'s never ran, Value read 0)
+    public int nestedGenericValue;
+    public int genericIntRuns;
+    public int genericStringRuns;
+
+    public void GenericStaticConstructors()
+    {
+        nestedGenericValue = SmokeOuter<int>.Inner.Value;
+        SmokeCounter<int>.Touch();
+        genericIntRuns = SmokeCounter<int>.Runs;
+        genericStringRuns = SmokeCounter<string>.Runs;
+    }
+
     // components the SDK's generic table lacks (issue: `GetComponent<UdonBehaviour>()`
     // halted the VM with "the given key was not present"): found by type
     public bool udonFound;
@@ -982,6 +997,34 @@ public class SmokeReached
     static SmokeReached()
     {
         SmokeTrace.Reached += 9;
+    }
+
+    public static void Touch()
+    {
+    }
+}
+
+
+public class SmokeOuter<T>
+{
+    public class Inner
+    {
+        public static int Value;
+
+        static Inner()
+        {
+            Value = 7;
+        }
+    }
+}
+
+public class SmokeCounter<T>
+{
+    public static int Runs;
+
+    static SmokeCounter()
+    {
+        Runs += 1;
     }
 
     public static void Touch()

@@ -354,6 +354,15 @@ public class MenSharpIntegrationTests
         secondSmoke.RunProgram("StaticConstructors");
         Assert.AreEqual(9, secondSmoke.GetProgramVariable("reachedTrace"), "once across behaviours");
 
+        // a generic class's static constructor runs once per closed type
+        smoke.RunProgram("GenericStaticConstructors");
+        Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("genericIntRuns"));
+        Assert.AreEqual(1, smoke.GetProgramVariable("genericStringRuns"));
+        secondSmoke.RunProgram("GenericStaticConstructors");
+        Assert.AreEqual(1, secondSmoke.GetProgramVariable("genericIntRuns"), "once across behaviours");
+        Assert.AreEqual(7, secondSmoke.GetProgramVariable("nestedGenericValue"));
+
         // components the SDK's generic GetComponent table lacks are found by type
         smoke.RunProgram("ComponentsByType");
         Assert.AreEqual(true, smoke.GetProgramVariable("udonFound"));
