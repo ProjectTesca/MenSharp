@@ -906,9 +906,13 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
 
         // public methods are events (instance ones only on a behaviour; static
-        // ones always, which is also what tests use). A behaviour exports its
-        // inherited events too — walking the chain most-derived first means an
-        // override claims the event name before the method it overrides.
+        // ones always, which is also what tests use), and so is a behaviour's
+        // method named after a built-in event whatever its accessibility —
+        // `private void Start()` is how a MonoBehaviour is written, and the
+        // runtime raises `_start` by name, never through C# visibility. A
+        // behaviour exports its inherited events too — walking the chain
+        // most-derived first means an override claims the event name before
+        // the method it overrides.
         let mut entries: Vec<EventEntry> = Vec::new();
         let mut claimed: HashSet<String> = HashSet::default();
         let classes = if self.entry_chain.is_empty() {
@@ -920,14 +924,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             let members: Vec<SymbolId> = self.declarations.table.symbol(class).members.to_vec();
             for member in members {
                 let symbol = self.declarations.table.symbol(member);
-                let eligible = symbol.kind == SymbolKind::Method
-                    && symbol.accessibility == Accessibility::Public
-                    && (symbol.is_static || self.entry_class.is_some());
-                if !eligible {
+                if symbol.kind != SymbolKind::Method {
                     continue;
                 }
                 let method_name = symbol.name.to_string();
                 let event = self.nodes.event(&method_name).cloned();
+                let on_behaviour = self.entry_class.is_some() && !symbol.is_static;
+                let eligible = if symbol.accessibility == Accessibility::Public {
+                    symbol.is_static || self.entry_class.is_some()
+                } else {
+                    event.is_some() && on_behaviour
+                };
+                if !eligible {
+                    continue;
+                }
                 let name = match &event {
                     Some(_) => udon_event_name(&method_name),
                     None => method_name.clone(),

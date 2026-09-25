@@ -11,14 +11,35 @@
 // (that is what powers IDE completion and drag-and-drop onto GameObjects).
 //
 // This is the Unity-free flavour, compiled when UnityEngine is not among the
-// references — the compiler's own tests, mostly. It declares no members: with
-// no UnityEngine.GameObject to name, `gameObject` cannot be given a type, and
-// what is not declared cannot be miscompiled. When UnityEngine *is*
+// references — the compiler's own tests, mostly. It declares next to nothing:
+// with no UnityEngine.GameObject to name, `gameObject` cannot be given a type,
+// and what is not declared cannot be miscompiled. When UnityEngine *is*
 // referenced, MenSharpBehaviour.Unity.cs is compiled instead of this file.
 
 namespace MenSharp
 {
     public class MenSharpBehaviour
     {
+        // The VRC events that take no arguments, as `virtual` methods (see
+        // MenSharpBehaviour.Unity.cs for the whole set and why): what a test
+        // without UnityEngine can still `override`.
+        public virtual void PostLateUpdate() { }
+        public virtual void Interact() { }
+        public virtual void OnDrop() { }
+        public virtual void OnPickup() { }
+        public virtual void OnPickupUseDown() { }
+        public virtual void OnPickupUseUp() { }
+        public virtual void OnSpawn() { }
+        public virtual void OnVideoEnd() { }
+        public virtual void OnVideoLoop() { }
+        public virtual void OnVideoReady() { }
+        public virtual void OnVideoStart() { }
+        public virtual void OnPreSerialization() { }
+        public virtual void OnDeserialization() { }
+        public virtual void OnVRCQualitySettingsChanged() { }
+        public virtual void OnPersistenceUsageUpdated() { }
+        public virtual void OnStationEntered() { }
+        public virtual void OnStationExited() { }
+        public virtual void OnOwnershipTransferred() { }
     }
 }

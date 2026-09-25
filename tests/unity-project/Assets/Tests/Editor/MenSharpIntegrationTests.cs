@@ -303,6 +303,16 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(1, smoke.GetProgramVariable("smokesInChildren"));
         Assert.AreEqual(true, smoke.GetProgramVariable("componentInParentFound"));
 
+        // a private Unity message and an overridden VRC event are both events
+        // (`_update` also pumps the async scheduler, so earlier sections have
+        // raised it already: count from here)
+        int updatesBefore = (int)smoke.GetProgramVariable("privateUpdates");
+        smoke.RunProgram("_update");
+        smoke.RunProgram("_update");
+        Assert.AreEqual(updatesBefore + 2, smoke.GetProgramVariable("privateUpdates"));
+        smoke.RunProgram("_onPickup");
+        Assert.AreEqual("picked", smoke.GetProgramVariable("pickupLog"));
+
         // `using` disposes its resource however the region is left
         smoke.RunProgram("UsingDisposal");
         Assert.AreEqual(7, smoke.GetProgramVariable("usingReported"));

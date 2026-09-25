@@ -374,6 +374,23 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         componentInParentFound = GetComponentInParent<Transform>(true) == transform;
     }
 
+    // a Unity message is an event whatever its accessibility, as on a
+    // MonoBehaviour; a VRC event is an override of the base class's virtual,
+    // as on an UdonSharpBehaviour (request)
+    public int privateUpdates;
+    public string pickupLog;
+
+    private void Update()
+    {
+        privateUpdates += 1;
+    }
+
+    public override void OnPickup()
+    {
+        base.OnPickup();
+        pickupLog = "picked";
+    }
+
     // `using`: the resource is disposed however the region is left (issue:
     // a `using` declaration compiled to a plain local and dropped Dispose)
     public int usingReported;

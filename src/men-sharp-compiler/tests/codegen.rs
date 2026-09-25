@@ -15192,3 +15192,133 @@ fn a_generic_static_constructor_is_an_error_only_where_the_class_is_used() {
     assert_eq!(reported.len(), 1, "{:#?}", program.output.errors);
     assert!(reported[0].contains("Used"), "{:#?}", reported);
 }
+
+#[test]
+fn a_built_in_event_is_exported_whatever_its_accessibility() {
+    // `private void Start()` is how a MonoBehaviour is written, and the
+    // runtime raises `_start` by name: exported like a public one. A private
+    // method with a name of its own stays internal (request)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Probe : MenSharpBehaviour
+        {
+            public string log = "";
+            private void Start() { log += "s"; Helper(); }
+            protected void Update() { log += "u"; }
+            internal void LateUpdate() { log += "l"; }
+            private void Helper() { log += "h"; }
+            public void Interact() { log += "i"; }
+        }
+        "#,
+        "Probe",
+        "_start",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(string_of(&emulator, "log"), "sh");
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Probe : MenSharpBehaviour
+        {
+            private void Start() { }
+            protected void Update() { }
+            internal void LateUpdate() { }
+            private void Helper() { }
+            public void Interact() { }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, "Probe").expect("no program");
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    for event in ["_start", "_update", "_lateUpdate", "_interact"] {
+        assert!(
+            text.contains(&format!(".export {event}")),
+            "{event} missing:\n{text}"
+        );
+    }
+    assert!(
+        !text.contains(".export Helper"),
+        "a private helper is no event:\n{text}"
+    );
+}
+
+#[test]
+fn a_vrc_event_is_an_override_of_the_base_class() {
+    // `public override void Interact()` — the shape UdonSharpBehaviour gives
+    // VRC events — runs as the event, `base.Interact()` is the empty base
+    // body, and a chain of overrides runs most-base first (request)
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+
+        public class Base : MenSharpBehaviour
+        {
+            public string log = "";
+            public override void Interact() { base.Interact(); log += "B"; }
+            public override void OnPickup() { log += "p"; }
+        }
+
+        public class Probe : Base
+        {
+            public override void Interact() { base.Interact(); log += "D"; }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(string_of(&emulator, "log"), "BD");
+
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Base : MenSharpBehaviour
+        {
+            public override void Interact() { }
+            public override void OnPickup() { }
+        }
+        public class Probe : Base
+        {
+            public override void Interact() { }
+        }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, "Probe").expect("no program");
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let text = program.output.program.to_uasm().unwrap();
+    assert_eq!(text.matches(".export _interact").count(), 1, "{text}");
+    assert!(
+        text.contains(".export _onPickup"),
+        "the inherited override is an event too:\n{text}"
+    );
+    // a class that overrides nothing exports nothing of the base's
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Quiet : MenSharpBehaviour { public int n; }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let program = compile_behaviour(sources, "Quiet").expect("no program");
+    let text = program.output.program.to_uasm().unwrap();
+    assert!(!text.contains(".export _interact"), "{text}");
+}
