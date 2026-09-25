@@ -143,6 +143,130 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// The engine's `GetComponent<T>()` family with an engine type as `T`.
+    /// Udon's generic externs (`__GetComponent__T`) are a table of the types
+    /// the SDK wrapper knows, and a whitelisted component missing from it
+    /// (UdonBehaviour, VRCStation, ArticulationBody, ...) halts the VM with
+    /// "the given key was not present" — after compiling fine. The
+    /// non-generic `GetComponent(System.Type)` externs take any type, so the
+    /// family is lowered through those: a scalar is copied into a `T` slot,
+    /// an array is rebuilt as a `T[]` (as UdonSharp's shim does). A `T` with
+    /// no `T[]` in Udon at all cannot be an array result, and says so.
+    /// `None` when the call is not that.
+    pub(super) fn try_get_engine_component(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        call: &ResolvedCall,
+        receiver: &Option<(DataId, Type)>,
+        values: &[DataId],
+        span: Range<usize>,
+    ) -> Option<Piece> {
+        let MemberOrigin::External { member, .. } = &call.origin else {
+            return None;
+        };
+        if call.is_static
+            || call.type_arguments.len() != 1
+            || !GET_COMPONENT_NAMES.contains(&member.name.as_str())
+        {
+            return None;
+        }
+        let target = self.substitute(&call.type_arguments[0], &ctx.key.bindings);
+        if !matches!(
+            target,
+            Type::Named {
+                target: TypeTarget::External(_),
+                ..
+            }
+        ) || self.is_program_reference(&target)
+        {
+            return None;
+        }
+        let declaring = self.substitute(&call.declaring_type, &ctx.key.bindings);
+        let owner = self.external_display_name(&declaring)?;
+        if !matches!(
+            owner.as_str(),
+            "UnityEngine.GameObject" | "UnityEngine.Component"
+        ) {
+            return None;
+        }
+        let (receiver_slot, receiver_type) = receiver.clone()?;
+        let receiver_owner = match self.external_display_name(&receiver_type).as_deref() {
+            Some("UnityEngine.GameObject") => "UnityEngineGameObject",
+            _ => "UnityEngineComponent",
+        };
+        let type_value = self.type_constant(&target)?;
+        let name = member.name.clone();
+        let is_array = name.starts_with("GetComponents");
+        let result_part = if is_array {
+            "UnityEngineComponentArray"
+        } else {
+            "UnityEngineComponent"
+        };
+
+        // the `(System.Type[, bool])` extern the call's arguments select;
+        // a parameterless `InChildren`/`InParent` may only exist with the
+        // bool, which then defaults to false as the engine does
+        let mut arguments = vec![receiver_slot, type_value];
+        arguments.extend(values.iter().copied());
+        let with_bool = values.len() == 1;
+        let mut signature = format!(
+            "{receiver_owner}.__{name}__SystemType{}__{result_part}",
+            if with_bool { "_SystemBoolean" } else { "" }
+        );
+        if !self.nodes.has_signature(&signature) && !with_bool {
+            signature =
+                format!("{receiver_owner}.__{name}__SystemType_SystemBoolean__{result_part}");
+            arguments.push(self.constant("SystemBoolean", "false", HeapInit::Boolean(false)));
+        }
+        if !self.nodes.has_signature(&signature) {
+            return None;
+        }
+        let return_type = self.substitute(&call.signature.return_type, &ctx.key.bindings);
+        let found = self.temp(result_part);
+        arguments.push(found);
+
+        if !is_array {
+            self.call_extern(ctx, &signature, &arguments, span);
+            let result = self.temp_for(&return_type);
+            self.copy(found, result);
+            return Some(Piece::Value(result, return_type));
+        }
+
+        // `T[]` from the `Component[]`: Udon has no cast, so a new array of
+        // the element type takes a copy of the elements
+        let array_type = self.heap_type(&return_type);
+        let constructor = format!("{array_type}.__ctor__SystemInt32__{array_type}");
+        if !self.nodes.has_signature(&constructor) {
+            let type_name = self.describe_type(&target);
+            self.error(
+                ctx,
+                format!(
+                    "Udon has no `{type_name}[]`, so `{name}<{type_name}>()` cannot return one; \
+                     `{name}(typeof({type_name}))` returns the components as a Component[]"
+                ),
+                span,
+            );
+            return Some(Piece::Error);
+        }
+        self.call_extern(ctx, &signature, &arguments, span.clone());
+        let length = self.temp("SystemInt32");
+        self.call_extern(
+            ctx,
+            "SystemArray.__get_Length__SystemInt32",
+            &[found, length],
+            span.clone(),
+        );
+        let result = self.temp(&array_type);
+        self.call_extern(ctx, &constructor, &[length, result], span.clone());
+        self.call_extern(
+            ctx,
+            "SystemArray.__Copy__SystemArray_SystemArray_SystemInt32__SystemVoid",
+            &[found, result, length],
+            span,
+        );
+        Some(Piece::Value(result, return_type))
+    }
+
     /// The five intrinsics of `MenSharp.Internal.Programs`, lowered in
     /// place. `None` for any other call.
     pub(super) fn try_program_intrinsic(

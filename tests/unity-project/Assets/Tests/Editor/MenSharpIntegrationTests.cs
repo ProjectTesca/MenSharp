@@ -345,6 +345,13 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(1, smoke.GetProgramVariable("smokesInChildren"));
         Assert.AreEqual(true, smoke.GetProgramVariable("componentInParentFound"));
 
+        // components the SDK's generic GetComponent table lacks are found by type
+        smoke.RunProgram("ComponentsByType");
+        Assert.AreEqual(true, smoke.GetProgramVariable("udonFound"));
+        Assert.GreaterOrEqual((int)smoke.GetProgramVariable("udonCount"), 1);
+        Assert.AreEqual(true, smoke.GetProgramVariable("stationMissing"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("articulationMissing"));
+
         // `this` converts to Object and IUdonEventReceiver, and is the program
         smoke.RunProgram("ReceiverIdentity");
         Assert.AreEqual("object+event", smoke.GetProgramVariable("receiverLog"));

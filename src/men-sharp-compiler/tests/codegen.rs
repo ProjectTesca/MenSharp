@@ -4061,9 +4061,20 @@ fn a_generic_extern_passes_its_type_as_a_value() {
     );
 
     let text = program.output.program.to_uasm().unwrap();
+    // the type still travels as a `System.Type` value — to the `(System.Type)`
+    // extern, which takes every component type (the generic `__T` one is a
+    // table of some; see `components`)
     assert!(
-        text.contains("EXTERN, \"UnityEngineGameObject.__GetComponent__T\""),
+        text.contains(
+            "EXTERN, \"UnityEngineGameObject.__GetComponent__SystemType__UnityEngineComponent\""
+        ),
         "{text}"
+    );
+    // (a type constant's value lives in the heap sidecar, not the .uasm)
+    let meta = program.output.program.to_meta_json().unwrap();
+    assert!(
+        meta.contains("UnityEngine.Transform"),
+        "the type value:\n{meta}"
     );
     // `Transform == null` binds to the operator UnityEngine.Object declares,
     // which is only found by looking up the base chain — and it is the one
@@ -4151,26 +4162,148 @@ fn the_whole_get_component_family_is_callable_on_the_behaviour() {
         program.output.errors
     );
     let text = program.output.program.to_uasm().unwrap();
+    // an engine type goes through the `(System.Type)` externs — the generic
+    // `__T` ones are a table of types the SDK wrapper knows, and halt on the
+    // rest (issue: `GetComponent<UdonBehaviour>()` — "the given key was not
+    // present") — with an array rebuilt as the `T[]` Udon does have
     for extern_name in [
-        "UnityEngineGameObject.__GetComponentsInChildren__TArray",
-        "UnityEngineGameObject.__GetComponentsInChildren__SystemBoolean__TArray",
-        "UnityEngineGameObject.__GetComponentsInParent__TArray",
-        "UnityEngineGameObject.__GetComponentsInParent__SystemBoolean__TArray",
-        "UnityEngineGameObject.__GetComponents__TArray",
-        "UnityEngineGameObject.__GetComponentInChildren__SystemBoolean__T",
-        "UnityEngineGameObject.__GetComponentInParent__T",
-        "UnityEngineGameObject.__GetComponentInParent__SystemBoolean__T",
+        "UnityEngineGameObject.__GetComponentsInChildren__SystemType_SystemBoolean__UnityEngineComponentArray",
+        "UnityEngineGameObject.__GetComponentsInParent__SystemType_SystemBoolean__UnityEngineComponentArray",
+        "UnityEngineGameObject.__GetComponents__SystemType__UnityEngineComponentArray",
+        "UnityEngineGameObject.__GetComponentInChildren__SystemType_SystemBoolean__UnityEngineComponent",
+        "UnityEngineGameObject.__GetComponentInParent__SystemType_SystemBoolean__UnityEngineComponent",
         "UnityEngineGameObject.__GetComponent__SystemType__UnityEngineComponent",
         "UnityEngineGameObject.__GetComponent__SystemString__UnityEngineComponent",
-        "UnityEngineGameObject.__GetComponentsInChildren__SystemType_SystemBoolean__UnityEngineComponentArray",
+        "UnityEngineRendererArray.__ctor__SystemInt32__UnityEngineRendererArray",
+        "UnityEngineTransformArray.__ctor__SystemInt32__UnityEngineTransformArray",
+        "SystemArray.__Copy__SystemArray_SystemArray_SystemInt32__SystemVoid",
     ] {
         assert!(
             text.contains(&format!("EXTERN, \"{extern_name}\"")),
             "missing {extern_name}"
         );
     }
-    // a program type goes through the program search, not the engine
-    assert!(!text.contains("__GetComponentsInChildren__T\""), "{text}");
+    assert!(
+        !text.contains("__T\""),
+        "no generic extern is left:\n{text}"
+    );
+    assert!(
+        !text.contains("__TArray\""),
+        "no generic extern is left:\n{text}"
+    );
+}
+
+#[test]
+fn a_component_the_sdk_table_lacks_is_found_by_type() {
+    // issue: `GetComponent<UdonBehaviour>()` (and VRCStation, ArticulationBody,
+    // LightProbeProxyVolume, ...) compiled to `__GetComponent__T`, which the
+    // VM halts on: "The given key 'VRC.Udon.UdonBehaviour' was not present".
+    // The `(System.Type)` extern finds any of them, and an array of one is
+    // rebuilt from the `Component[]` it returns
+    let (Some(dotnet), Some(unity)) = (dotnet_shared_dir(), unity_managed_dir()) else {
+        eprintln!("skipped: needs both a .NET runtime and a Unity install");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dotnet.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.PhysicsModule.dll")).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+    let build = |source: &str| {
+        let mut sources = vec![SourceCode::new("test.cs", source)];
+        sources.extend(Compiler::corlib_sources_for(&references));
+        let files = compiler.parse(sources);
+        assert_no_syntax_errors(&files);
+        let declarations = compiler.collect_declarations(&files);
+        let signatures = compiler.resolve_signatures(&declarations, &references);
+        let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+        assert_eq!(bodies.errors, vec![], "type errors");
+        compiler.generate_udon(
+            &declarations,
+            &signatures,
+            &bodies,
+            &references,
+            &["Game", "Finder"],
+        )
+    };
+
+    let output = build(
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Finder : MenSharpBehaviour
+            {
+                public bool found;
+                public void Interact()
+                {
+                    ArticulationBody body = GetComponent<ArticulationBody>();
+                    LightProbeProxyVolume volume = GetComponentInChildren<LightProbeProxyVolume>(true);
+                    ArticulationBody above = transform.GetComponentInParent<ArticulationBody>();
+                    found = body != null || volume != null || above != null;
+                }
+            }
+        }
+        "#,
+    );
+    assert!(
+        output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        output.errors
+    );
+    let text = output.program.to_uasm().unwrap();
+    assert!(
+        text.contains("UnityEngineGameObject.__GetComponent__SystemType__UnityEngineComponent"),
+        "{text}"
+    );
+    assert!(text.contains("UnityEngineComponent.__GetComponentInParent__SystemType__UnityEngineComponent")
+        || text.contains("UnityEngineComponent.__GetComponentInParent__SystemType_SystemBoolean__UnityEngineComponent"), "{text}");
+    assert!(!text.contains("__T\""), "{text}");
+
+    let output = build(
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Finder : MenSharpBehaviour
+            {
+                public int count;
+                public void Interact()
+                {
+                    count = GetComponents<ArticulationBody>().Length;
+                }
+            }
+        }
+        "#,
+    );
+    // Udon has no `ArticulationBody[]`: the array is the `object[]` every
+    // such array already is here, filled by `Array.Copy` from the
+    // `Component[]` the type-taking extern returns
+    assert!(
+        output.errors.is_empty(),
+        "codegen errors: {:#?}",
+        output.errors
+    );
+    let text = output.program.to_uasm().unwrap();
+    assert!(
+        text.contains(
+            "UnityEngineGameObject.__GetComponents__SystemType__UnityEngineComponentArray"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("SystemObjectArray.__ctor__SystemInt32__SystemObjectArray"),
+        "{text}"
+    );
+    assert!(
+        text.contains("SystemArray.__Copy__SystemArray_SystemArray_SystemInt32__SystemVoid"),
+        "{text}"
+    );
+    assert!(!text.contains("__TArray\""), "{text}");
 }
 
 #[test]

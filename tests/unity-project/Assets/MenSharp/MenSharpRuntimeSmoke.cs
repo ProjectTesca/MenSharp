@@ -6,6 +6,7 @@ using MenSharp.Json;
 using UnityEngine;
 using VRC.SDK3.Image;
 using VRC.SDKBase;
+using VRC.Udon;
 using VRC.Udon.Common.Interfaces;
 
 // A deliberately small black-box test program. The Unity test runner invokes
@@ -373,6 +374,22 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         componentsByType = GetComponentsInChildren(typeof(MeshFilter), true).Length;
         smokesInChildren = GetComponentsInChildren<MenSharpRuntimeSmoke>().Length;
         componentInParentFound = GetComponentInParent<Transform>(true) == transform;
+    }
+
+    // components the SDK's generic table lacks (issue: `GetComponent<UdonBehaviour>()`
+    // halted the VM with "the given key was not present"): found by type
+    public bool udonFound;
+    public int udonCount;
+    public bool stationMissing;
+    public bool articulationMissing;
+
+    public void ComponentsByType()
+    {
+        UdonBehaviour udon = GetComponent<UdonBehaviour>();
+        udonFound = udon != null;
+        udonCount = GetComponents<UdonBehaviour>().Length;
+        stationMissing = GetComponent<VRCStation>() == null;
+        articulationMissing = GetComponentInChildren<ArticulationBody>(true) == null;
     }
 
     // a List<int> typed into the inspector arrives as the program's own

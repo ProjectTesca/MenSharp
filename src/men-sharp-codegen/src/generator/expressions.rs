@@ -5276,6 +5276,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 {
                     return piece;
                 }
+                // `GetComponent<Rigidbody>()`: through the `(System.Type)`
+                // extern, which takes every type — the generic one halts
+                // on a component the SDK's table lacks (see `components`)
+                if let Some(piece) =
+                    self.try_get_engine_component(ctx, call, &receiver, &values, span.clone())
+                {
+                    return piece;
+                }
                 let receiver_type = receiver.as_ref().map(|(_, ty)| ty);
                 let Some((signature, passes_type_arguments)) =
                     self.external_signature(ctx, call, receiver_type, &span)
