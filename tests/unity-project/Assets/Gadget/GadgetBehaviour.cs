@@ -1,5 +1,5 @@
 // A behaviour living outside Assets/MenSharp, in a folder marked with a
-// `.mensharp` file. It exists to prove the marker path end to end: MenSharp
+// `MenSharp.mensharp` marker. It exists to prove the marker path end to end: MenSharp
 // compiles it, and its program lands under this folder's own Programs. Kept to
 // plain C# so UdonSharp's scanner never trips over it even for the instant
 // before isolation registers the folder.

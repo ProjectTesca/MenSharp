@@ -1,14 +1,19 @@
 #if UNITY_EDITOR
+using System;
+using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
+using System.Text;
 using NUnit.Framework;
 using UnityEditor;
 
-/// A `.mensharp` file makes its folder — and every subfolder — MenSharp's,
-/// wherever it lives, and each source's programs land under the nearest marked
-/// folder to it. The probe files are written straight to disk and removed
-/// before anything refreshes the AssetDatabase, so Unity never imports them;
-/// MenSharpSources reads them off disk, which is exactly the path under test.
+/// A `MenSharp.mensharp` marker makes its folder — and every subfolder —
+/// MenSharp's, wherever it lives, and each source's programs land under the
+/// nearest marked folder to it. The probe files are written straight to disk
+/// and removed before anything refreshes the AssetDatabase, so Unity never
+/// imports them; MenSharpSources reads them off disk, which is exactly the
+/// path under test (a marker counts the moment it is written).
 /// (A folder ending in `~` would hide them from Unity too — but MenSharp now
 /// skips those folders like Unity does, which the last tests check.)
 public class MenSharpMarkerTests
@@ -93,6 +98,33 @@ public class MenSharpMarkerTests
         }
     }
 
+    /// The base name is free, as an .asmdef's is: `Gimmick.mensharp` marks too.
+    [Test]
+    public void AnyBaseNameWithTheExtensionMarks()
+    {
+        File.WriteAllText(Inner + "/Gimmick.mensharp", "# test\n");
+        Assert.AreEqual(Inner, MenSharpMarker.MarkedRootOf(Inner + "/Inner.cs"));
+        Assert.IsTrue(MenSharpMarker.HasMarker(Inner));
+        Assert.IsTrue(MenSharpMarker.MarkedRoots().Contains(Inner));
+    }
+
+    /// The dotfile of earlier versions still marks its folder, and migrating
+    /// turns it into the asset form — which is what a package export carries.
+    [Test]
+    public void ALegacyDotfileStillMarksAndIsMigratedToTheAssetForm()
+    {
+        File.WriteAllText(Inner + "/" + MenSharpMarker.LegacyMarkerFileName, "# old\n");
+        Assert.AreEqual(Inner, MenSharpMarker.MarkedRootOf(Inner + "/Inner.cs"));
+
+        var migrated = MenSharpMarker.MigrateLegacyMarkers(false);
+        Assert.IsTrue(migrated.Contains(Inner), "the dotfile's folder is reported as migrated");
+        Assert.IsFalse(File.Exists(Inner + "/" + MenSharpMarker.LegacyMarkerFileName), "the dotfile is gone");
+        Assert.IsTrue(File.Exists(Inner + "/" + MenSharpMarker.MarkerFileName), "the asset form is there");
+        Assert.AreEqual(Inner, MenSharpMarker.MarkedRootOf(Inner + "/Inner.cs"), "still marked");
+        // the outer folder, marked the new way from the start, was not touched
+        Assert.IsFalse(migrated.Contains(Outer));
+    }
+
     /// `Tests~`, `Samples~`, `.hidden`: Unity imports nothing under them, so
     /// MenSharp compiles nothing from there either — not in a marked folder,
     /// not in Assets/MenSharp, not as a library — and a marker inside one
@@ -151,6 +183,68 @@ public class MenSharpMarkerTests
 /// AssetDatabase, which must not happen while the probe files above exist.
 public class MenSharpMarkerCompileTests
 {
+    private const string GadgetMarker = "Assets/Gadget/" + MenSharpMarker.MarkerFileName;
+
+    /// The point of the asset form: a marker has a GUID, so it is an asset a
+    /// unitypackage carries — the dotfile it replaced was invisible to Unity
+    /// and so to every export (issue: an imported gimmick arrived unmarked).
+    [Test]
+    public void TheMarkerIsAnImportedAssetThatAPackageExportCarries()
+    {
+        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+        Assert.IsFalse(string.IsNullOrEmpty(AssetDatabase.AssetPathToGUID(GadgetMarker)), "the marker has a GUID");
+        Assert.IsNotNull(
+            AssetDatabase.LoadAssetAtPath<MenSharpMarkerAsset>(GadgetMarker),
+            "the marker imports through MenSharpMarkerImporter");
+
+        string package = Path.Combine(Path.GetTempPath(), "mensharp-marker-" + System.Guid.NewGuid().ToString("N") + ".unitypackage");
+        try
+        {
+            AssetDatabase.ExportPackage(new[] { GadgetMarker }, package, ExportPackageOptions.Default);
+            Assert.IsTrue(File.Exists(package), "the package was written");
+            CollectionAssert.Contains(PackagedPaths(package), GadgetMarker);
+        }
+        finally
+        {
+            if (File.Exists(package))
+            {
+                File.Delete(package);
+            }
+        }
+    }
+
+    /// The asset paths a .unitypackage carries: it is a gzipped tar with one
+    /// `<guid>/pathname` entry per asset, whose first line is the path.
+    private static List<string> PackagedPaths(string package)
+    {
+        var paths = new List<string>();
+        using (var file = File.OpenRead(package))
+        using (var gzip = new GZipStream(file, CompressionMode.Decompress))
+        using (var tar = new MemoryStream())
+        {
+            gzip.CopyTo(tar);
+            byte[] bytes = tar.ToArray();
+            int offset = 0;
+            while (offset + 512 <= bytes.Length)
+            {
+                string name = Encoding.ASCII.GetString(bytes, offset, 100).TrimEnd('\0');
+                if (name.Length == 0)
+                {
+                    break;
+                }
+                string sizeField = Encoding.ASCII.GetString(bytes, offset + 124, 12).Trim('\0', ' ');
+                long size = sizeField.Length == 0 ? 0 : Convert.ToInt64(sizeField, 8);
+                if (name.EndsWith("/pathname"))
+                {
+                    string content = Encoding.UTF8.GetString(bytes, offset + 512, (int)size);
+                    paths.Add(content.Split('\n')[0].Trim());
+                }
+                offset += 512 + (int)((size + 511) / 512 * 512);
+            }
+        }
+        return paths;
+    }
+
     [Test]
     public void ABehaviourInAMarkedFolderCompilesToThatFoldersPrograms()
     {

@@ -58,6 +58,9 @@ public static class MenSharpCompiler
 
     private static void Compile(bool force, bool onlyIfChanged)
     {
+        // a dotfile marker from an earlier version becomes an asset first,
+        // so this compile's package exports carry it
+        MenSharpMarker.MigrateLegacyMarkers(true);
         if (!Directory.Exists(SourceRoot))
         {
             Directory.CreateDirectory(SourceRoot);

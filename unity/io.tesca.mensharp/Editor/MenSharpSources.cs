@@ -5,7 +5,7 @@
 // every assembly definition that references ProjectTesca.MenSharp.Runtime —
 // the reference `MenSharpBehaviour` needs to resolve at all, so an asset
 // author has it whether or not they think about it — plus any folder marked
-// with a `.mensharp` file (see MenSharpMarker) and everything under it, and
+// with a `.mensharp` marker (see MenSharpMarker) and everything under it, and
 // Assets/MenSharp, which is such a folder implicitly. The marker is for the
 // project that dropped its asmdef to live in Assembly-CSharp but wants its
 // sources somewhere other than Assets/MenSharp. A program asset is written
@@ -92,7 +92,7 @@ public static class MenSharpSources
                 AddMenSharp(source, DefaultProgramsFolder);
             }
         }
-        // folders the user marked with a .mensharp file, and their subtrees;
+        // folders the user marked with a .mensharp marker, and their subtrees;
         // each file's programs go under the nearest marked folder to it
         foreach (string root in MenSharpMarker.MarkedRoots())
         {

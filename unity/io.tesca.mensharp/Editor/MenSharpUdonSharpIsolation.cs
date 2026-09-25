@@ -7,7 +7,7 @@
 //
 // UdonSharp has the answer built in: a list of path prefixes its scanner
 // skips (`scanningDirectoryBlacklist` in its settings asset). This registers
-// Assets/MenSharp and every folder marked with a `.mensharp` file there, on
+// Assets/MenSharp and every folder marked with a `.mensharp` marker there, on
 // load and before every compile. That is what lets MenSharp sources live in
 // Assembly-CSharp — where they can see every UdonSharp asset dropped into
 // Assets — without an assembly definition of their own.
