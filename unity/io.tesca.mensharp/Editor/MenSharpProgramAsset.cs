@@ -14,6 +14,7 @@
 
 #if UNITY_EDITOR
 using System;
+using System.Collections.Generic;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using UnityEngine;
@@ -42,6 +43,38 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
     /// programs of one compile (MenSharpCompiler resets and reports them).
     public static long AssembleMilliseconds;
     public static long MetaMilliseconds;
+
+    // the parsed meta, kept while the JSON it came from is the one stored
+    [NonSerialized] private string layoutsFrom;
+    [NonSerialized] private Dictionary<string, MenSharpLayout> layoutsByName;
+
+    /// The layout of a type the program uses, by the compiler's spelling of
+    /// it (see MenSharpLayout.name), or null.
+    public MenSharpLayout LayoutOf(string typeName)
+    {
+        if (string.IsNullOrEmpty(metaJson) || string.IsNullOrEmpty(typeName))
+        {
+            return null;
+        }
+        if (layoutsByName == null || !ReferenceEquals(layoutsFrom, metaJson))
+        {
+            layoutsByName = new Dictionary<string, MenSharpLayout>(StringComparer.Ordinal);
+            MenSharpMeta meta = null;
+            try
+            {
+                meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
+            }
+            catch (Exception)
+            {
+            }
+            foreach (MenSharpLayout layout in meta?.layouts ?? Array.Empty<MenSharpLayout>())
+            {
+                layoutsByName[layout.name] = layout;
+            }
+            layoutsFrom = metaJson;
+        }
+        return layoutsByName.TryGetValue(typeName, out MenSharpLayout found) ? found : null;
+    }
 
     protected override void RefreshProgramImpl()
     {
@@ -647,6 +680,32 @@ public class MenSharpMeta
     /// importer constructs the proxy, whose initializer runs in real C#, and
     /// bakes the field's value into the heap. Same idea as UdonSharp.
     public MenSharpProxyInit[] proxyInitialized;
+    /// Every object shape the program lays out (a class, a struct, a
+    /// `List<int>`): what the inspector builds a collection from and reads
+    /// one back through. See MenSharpProxy's encoding.
+    public MenSharpLayout[] layouts;
+}
+
+[Serializable]
+public class MenSharpLayout
+{
+    public int typeId;
+    /// The type as the compiler spells it (`System.Collections.Generic.List`1<System.Int32>`).
+    public string name;
+    /// Elements in the `object[]`; element 0 is the type id.
+    public int size;
+    public MenSharpLayoutSlot[] slots;
+}
+
+[Serializable]
+public class MenSharpLayoutSlot
+{
+    public string field;
+    public int index;
+    /// The Udon heap type of the slot (`SystemInt32Array`).
+    public string type;
+    /// The .NET spelling of the field's type.
+    public string dotnet;
 }
 
 [Serializable]

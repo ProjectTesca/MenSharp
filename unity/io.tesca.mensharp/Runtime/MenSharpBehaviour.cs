@@ -9,8 +9,23 @@ using UnityEngine;
 
 namespace MenSharp
 {
-    public class MenSharpBehaviour : MonoBehaviour, VRC.Udon.Common.Interfaces.IUdonEventReceiver
+    public class MenSharpBehaviour : MonoBehaviour, VRC.Udon.Common.Interfaces.IUdonEventReceiver, ISerializationCallbackReceiver
     {
+        // A Dictionary<K, V> field's entries, in a form Unity serializes; the
+        // field itself is rebuilt from here on load. See MenSharpDictionaryStore.
+        [SerializeField, HideInInspector]
+        private MenSharpDictionaryStore[] menSharpDictionaries;
+
+        void ISerializationCallbackReceiver.OnBeforeSerialize()
+        {
+            menSharpDictionaries = MenSharpDictionarySerialization.Save(this);
+        }
+
+        void ISerializationCallbackReceiver.OnAfterDeserialize()
+        {
+            MenSharpDictionarySerialization.Load(this, menSharpDictionaries);
+        }
+
         // Stubs, so that source calling them is valid Unity C#. What runs is
         // the compiled Udon program, where each of these is an extern on the
         // UdonBehaviour itself; this component is stripped before play.

@@ -155,6 +155,7 @@ pub fn generate(
         incoming_resume: None,
     };
     generator.run(entry_path);
+    generator.export_layouts();
     CodegenOutput {
         source_file: generator.entry_file,
         program: generator.program,
@@ -4177,6 +4178,60 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         Some(layout)
     }
 
+    /// Every object shape the program uses, for the Unity package (see
+    /// `Program::layouts`): the inspector builds a `List<int>` a field was
+    /// given from this, and reads one back while the program runs.
+    fn export_layouts(&mut self) {
+        let mut layouts = Vec::new();
+        for ty in self.type_order.clone() {
+            let Some(layout) = self.layouts.get(&ty).cloned() else {
+                continue;
+            };
+            let Type::Named {
+                target: TypeTarget::Source(symbol),
+                arguments,
+            } = &ty
+            else {
+                continue;
+            };
+            let bindings: Vec<(SymbolId, Type)> = self
+                .declarations
+                .table
+                .symbol(*symbol)
+                .type_parameters
+                .iter()
+                .copied()
+                .zip(arguments.iter().cloned())
+                .collect();
+            let mut slots: Vec<men_sharp_asm::LayoutSlot> = layout
+                .slots
+                .iter()
+                .map(|(member, index)| {
+                    let field_type = match self.signatures.members.get(member) {
+                        Some(MemberSignature::Field(ty)) | Some(MemberSignature::Property(ty)) => {
+                            self.substitute(ty, &bindings)
+                        }
+                        _ => Type::Error,
+                    };
+                    men_sharp_asm::LayoutSlot {
+                        field: self.declarations.table.symbol(*member).name.to_string(),
+                        index: *index,
+                        udon_type: self.heap_type(&field_type),
+                        dotnet: self.display_type(&field_type),
+                    }
+                })
+                .collect();
+            slots.sort_by_key(|slot| slot.index);
+            layouts.push(men_sharp_asm::TypeLayout {
+                type_id: layout.type_id,
+                name: self.display_type(&ty),
+                size: layout.size,
+                slots,
+            });
+        }
+        self.program.layouts = layouts;
+    }
+
     fn is_source_class(&self, ty: &Type) -> bool {
         matches!(
             ty,
@@ -4724,6 +4779,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // exported field never runs one. A non-exported field (a private
         // field, a static) has no proxy value, so it must.
         let runs_at_startup = initializer.is_some() && baked.is_none() && !export;
+        // an exported collection is built by the inspector from the shape
+        // the program would give it, so the shape must exist even when the
+        // program only ever reads the one it was handed
+        if export && self.is_source_class(&ty) {
+            self.layout_of(&ty);
+        }
 
         let sync = self.sync_mode_of(field);
         let slot = self.program.add_data(DataSymbol {

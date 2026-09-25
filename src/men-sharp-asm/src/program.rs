@@ -246,6 +246,33 @@ pub struct Program {
     /// which runs the initializer in real C#, and bakes the field's value
     /// into the heap default. See `generator`'s proxy-baking.
     pub proxy_initialized: Vec<ProxyInit>,
+    /// The shape of every object the program lays out (a class, a struct,
+    /// a monomorphized corlib collection): what the Unity inspector needs
+    /// to build one from a C# value — a `List<int>` typed into a field —
+    /// and to read one back while the program runs.
+    pub layouts: Vec<TypeLayout>,
+}
+
+/// One object shape: an `object[]` of `size` elements whose element 0 is
+/// the type id, the fields at the indices `slots` name.
+#[derive(Debug, Clone)]
+pub struct TypeLayout {
+    pub type_id: i32,
+    /// The type as .NET spells it (`System.Collections.Generic.List<System.Int32>`).
+    pub name: String,
+    pub size: usize,
+    pub slots: Vec<LayoutSlot>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LayoutSlot {
+    pub field: String,
+    pub index: usize,
+    /// The Udon heap type of the slot (`SystemInt32Array`): how the value is
+    /// stored, which for an enum or a user class is not its C# type.
+    pub udon_type: String,
+    /// The .NET spelling of the field's type after substitution.
+    pub dotnet: String,
 }
 
 /// One field the Unity importer fills from a constructed proxy instance.
@@ -771,6 +798,31 @@ impl Program {
                     out.push('}');
                 }
                 out.push_str(" ]}");
+            }
+            out.push_str("\n  ]");
+        }
+        if !self.layouts.is_empty() {
+            out.push_str(",\n  \"layouts\": [");
+            for (index, layout) in self.layouts.iter().enumerate() {
+                if index > 0 {
+                    out.push(',');
+                }
+                let _ = write!(out, "\n    {{\"typeId\": {}, \"name\": ", layout.type_id);
+                write_json_string(&mut out, &layout.name);
+                let _ = write!(out, ", \"size\": {}, \"slots\": [", layout.size);
+                for (slot_index, slot) in layout.slots.iter().enumerate() {
+                    if slot_index > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str("{\"field\": ");
+                    write_json_string(&mut out, &slot.field);
+                    let _ = write!(out, ", \"index\": {}, \"type\": ", slot.index);
+                    write_json_string(&mut out, &slot.udon_type);
+                    out.push_str(", \"dotnet\": ");
+                    write_json_string(&mut out, &slot.dotnet);
+                    out.push('}');
+                }
+                out.push_str("]}");
             }
             out.push_str("\n  ]");
         }

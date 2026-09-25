@@ -105,7 +105,37 @@ namespace System.Collections.Generic
             freeCount = 0;
         }
 
-        public int Count => count - freeCount;
+        public int Count
+        {
+            get
+            {
+                EnsureBuckets();
+                return count - freeCount;
+            }
+        }
+
+        /// A dictionary the Unity inspector handed over is its entries only —
+        /// `keys`, `values` and `count`, no hash table (the editor cannot know
+        /// this program's hash codes). The first use builds the table here,
+        /// hashing each key the way `Insert` does. A dictionary this program
+        /// made itself always has its buckets and skips this.
+        private void EnsureBuckets()
+        {
+            if (buckets != null) { return; }
+            if (keys == null)
+            {
+                Initialize(4);
+                return;
+            }
+            TKey[] givenKeys = keys;
+            TValue[] givenValues = values;
+            int given = count;
+            Initialize(given < 4 ? 4 : given);
+            for (int i = 0; i < given; i++)
+            {
+                Insert(givenKeys[i], givenValues[i]);
+            }
+        }
 
         // on the key's own static type, so a struct key (synthesized
         // field-wise Equals/GetHashCode) or a class overriding them is
@@ -139,15 +169,21 @@ namespace System.Collections.Generic
         {
             get
             {
+                EnsureBuckets();
                 int i = FindEntry(key);
                 if (i >= 0) { return values[i]; }
                 throw new KeyNotFoundException("The given key '" + key + "' was not present in the dictionary.");
             }
-            set { Insert(key, value); }
+            set
+            {
+                EnsureBuckets();
+                Insert(key, value);
+            }
         }
 
         public void Add(TKey key, TValue value)
         {
+            EnsureBuckets();
             if (FindEntry(key) >= 0)
             {
                 throw new ArgumentException("An item with the same key has already been added. Key: " + key);
@@ -223,11 +259,13 @@ namespace System.Collections.Generic
 
         public bool ContainsKey(TKey key)
         {
+            EnsureBuckets();
             return FindEntry(key) >= 0;
         }
 
         public bool ContainsValue(TValue value)
         {
+            EnsureBuckets();
             for (int i = 0; i < count; i++)
             {
                 if (hashes[i] >= 0)
@@ -242,6 +280,7 @@ namespace System.Collections.Generic
 
         public bool TryGetValue(TKey key, out TValue value)
         {
+            EnsureBuckets();
             int i = FindEntry(key);
             if (i >= 0)
             {
@@ -254,6 +293,7 @@ namespace System.Collections.Generic
 
         public bool Remove(TKey key)
         {
+            EnsureBuckets();
             int hash = Hash(key);
             int bucket = hash % buckets.Length;
             int last = -1;
@@ -280,7 +320,7 @@ namespace System.Collections.Generic
 
         public void Clear()
         {
-            Initialize(keys.Length);
+            Initialize(keys == null ? 4 : keys.Length);
         }
 
         public DictionaryKeyCollection<TKey, TValue> Keys => new DictionaryKeyCollection<TKey, TValue>(this);
@@ -288,22 +328,26 @@ namespace System.Collections.Generic
 
         public DictionaryEnumerator<TKey, TValue> GetEnumerator()
         {
+            EnsureBuckets();
             return new DictionaryEnumerator<TKey, TValue>(hashes, keys, values, count);
         }
 
         IEnumerator<KeyValuePair<TKey, TValue>> IEnumerable<KeyValuePair<TKey, TValue>>.GetEnumerator()
         {
+            EnsureBuckets();
             return new DictionaryEnumerator<TKey, TValue>(hashes, keys, values, count);
         }
 
         // for the collections' enumerators: the live entry arrays
         public DictionaryKeyEnumerator<TKey, TValue> KeyEnumerator()
         {
+            EnsureBuckets();
             return new DictionaryKeyEnumerator<TKey, TValue>(hashes, keys, count);
         }
 
         public DictionaryValueEnumerator<TKey, TValue> ValueEnumerator()
         {
+            EnsureBuckets();
             return new DictionaryValueEnumerator<TKey, TValue>(hashes, values, count);
         }
     }

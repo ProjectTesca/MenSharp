@@ -13,8 +13,10 @@
 //     hidden component nobody can see);
 //   - when entering play mode or building, every proxy's public fields are
 //     copied into the paired UdonBehaviour's public variables (this is how
-//     inspector-edited values and scene references reach the Udon heap), and
-//     the proxy component is then stripped so it can never double-execute.
+//     inspector-edited values and scene references reach the Udon heap); a
+//     build then strips the proxy component so it can never double-execute,
+//     and play mode disables it and keeps it as the inspector's live view of
+//     the program (ReadBack / WriteLive below).
 
 #if UNITY_EDITOR
 using System;
@@ -778,25 +780,28 @@ public static class MenSharpProxy
         }
     }
 
-    /// Copies the proxy's serialized instance fields into the UdonBehaviour's
-    /// public variable table — the values the Udon heap starts from. Every
-    /// other entry in the table goes: the runtime writes each entry over the
-    /// heap slot of the same name, whether the program exports it or not,
-    /// and the SDK's UdonBehaviour inspector (shown by Reveal) adds a null
-    /// entry for every exported symbol it finds no value for — which is how
-    /// a `const string` on a scene saved by an earlier compiler came up null.
-    public static void TransferValues(MenSharpBehaviour proxy, UdonBehaviour udon)
+    // ------------------------------------------------------------ encoding
+
+    /// A proxy field's value as the program stores it: behaviours as their
+    /// UdonBehaviours, user enums as their integers, a `List<T>` as the
+    /// `object[]` the compiled class is. `valueType` is the type the heap
+    /// slot takes. Shared by the edit-mode transfer and the play-mode write.
+    private static object EncodeField(
+        FieldInfo field, object value, MenSharpBehaviour proxy, UdonBehaviour udon,
+        ref IUdonSymbolTable declared, out Type valueType)
     {
-        IUdonVariableTable table = udon.publicVariables;
-        var summary = new System.Text.StringBuilder();
-        var transferred = new HashSet<string>(StringComparer.Ordinal);
-        // the compiled program's symbol table, fetched once and only if a
-        // field needs it (see the enum case below)
-        IUdonSymbolTable declared = null;
-        foreach (FieldInfo field in SerializedFields(proxy.GetType()))
+        valueType = field.FieldType;
+        Type fieldType = field.FieldType;
+        if (fieldType.IsGenericType && fieldType.GetGenericTypeDefinition() == typeof(List<>))
         {
-            transferred.Add(field.Name);
-            object value = field.GetValue(proxy);
+            valueType = typeof(object[]);
+            return EncodeList(field, value as System.Collections.IList, proxy, udon, ref declared);
+        }
+        if (MenSharpDictionarySerialization.IsDictionaryType(fieldType))
+        {
+            valueType = typeof(object[]);
+            return EncodeDictionary(field, value as System.Collections.IDictionary, proxy, udon);
+        }
             // an unassigned or destroyed reference is Unity's "fake null": an
             // object whose native side is gone, which anything reading it
             // throws on (TextAsset.ToString did, summarizing below). The
@@ -805,7 +810,6 @@ public static class MenSharpProxy
             {
                 value = null;
             }
-            Type valueType = field.FieldType;
             // what you drag in is a proxy component; what the program can talk
             // to is the UdonBehaviour paired with it
             if (typeof(MenSharpBehaviour).IsAssignableFrom(valueType))
@@ -908,6 +912,423 @@ public static class MenSharpProxy
                     }
                 }
             }
+        return value;
+    }
+
+    /// The compiled program's name for a C# type, as the layouts spell it:
+    /// `System.Collections.Generic.List`1<System.Int32>`.
+    private static string LayoutName(Type type)
+    {
+        if (type.IsArray)
+        {
+            return LayoutName(type.GetElementType()) + "[]";
+        }
+        if (type.IsGenericType)
+        {
+            var arguments = new List<string>();
+            foreach (Type argument in type.GetGenericArguments())
+            {
+                arguments.Add(LayoutName(argument));
+            }
+            return type.GetGenericTypeDefinition().FullName + "<" + string.Join(", ", arguments) + ">";
+        }
+        return type.FullName;
+    }
+
+    private static MenSharpLayout LayoutFor(UdonBehaviour udon, Type type, MenSharpBehaviour from, string field)
+    {
+        var program = udon.programSource as MenSharpProgramAsset;
+        MenSharpLayout layout = program?.LayoutOf(LayoutName(type));
+        if (layout == null)
+        {
+            Debug.LogWarning(
+                $"MenSharp: {from.GetType().Name}.{field} is a {type.Name} the program has no "
+                + "layout for (compile again?); it is left null.",
+                from);
+        }
+        return layout;
+    }
+
+    private static MenSharpLayoutSlot SlotNamed(MenSharpLayout layout, string name)
+    {
+        foreach (MenSharpLayoutSlot slot in layout.slots ?? Array.Empty<MenSharpLayoutSlot>())
+        {
+            if (slot.field == name)
+            {
+                return slot;
+            }
+        }
+        return null;
+    }
+
+    /// The element type of the array a slot stores: what the heap type says,
+    /// which for a user enum or a behaviour reference is not the C# type.
+    private static Type StorageElementType(MenSharpLayoutSlot slot, Type element)
+    {
+        switch (slot.type)
+        {
+            case "SystemObjectArray": return typeof(object);
+            case "SystemInt32Array": return typeof(int);
+            case "SystemInt64Array": return typeof(long);
+            case "VRCUdonCommonInterfacesIUdonEventReceiverArray":
+            case "VRCUdonUdonBehaviourArray": return typeof(UdonBehaviour);
+        }
+        return element;
+    }
+
+    /// One element of a collection as the program stores it.
+    private static object EncodeElement(object value, Type storage, MenSharpBehaviour from, string field)
+    {
+        if (value is UnityEngine.Object unityValue && unityValue == null)
+        {
+            return null;
+        }
+        if (value is MenSharpBehaviour other)
+        {
+            return PairedOrWarn(other, from, field);
+        }
+        if (value is UdonSharp.UdonSharpBehaviour sharp)
+        {
+            return BackingOrWarn(sharp, from, field);
+        }
+        if (value != null && value.GetType().IsEnum && !IsEngineType(value.GetType()))
+        {
+            long bits = EnumBits(value);
+            return storage == typeof(long) ? (object)bits : unchecked((int)bits);
+        }
+        return value;
+    }
+
+    private static bool IsEngineType(Type type)
+    {
+        string assembly = type.Assembly.GetName().Name;
+        return assembly.StartsWith("UnityEngine", StringComparison.Ordinal)
+            || assembly.StartsWith("VRC", StringComparison.Ordinal)
+            || assembly == "mscorlib";
+    }
+
+    /// `List<T>` → the compiled class: `[type id, ..., items: T[], size]` at
+    /// the indices the layout names. An empty or null list is an empty one.
+    private static object EncodeList(
+        FieldInfo field, System.Collections.IList list, MenSharpBehaviour proxy, UdonBehaviour udon,
+        ref IUdonSymbolTable declared)
+    {
+        MenSharpLayout layout = LayoutFor(udon, field.FieldType, proxy, field.Name);
+        MenSharpLayoutSlot itemsSlot = layout == null ? null : SlotNamed(layout, "items");
+        MenSharpLayoutSlot sizeSlot = layout == null ? null : SlotNamed(layout, "size");
+        if (itemsSlot == null || sizeSlot == null)
+        {
+            return null;
+        }
+        Type element = field.FieldType.GetGenericArguments()[0];
+        Type storage = StorageElementType(itemsSlot, element);
+        int count = list == null ? 0 : list.Count;
+        Array items = Array.CreateInstance(storage, count);
+        for (int index = 0; index < count; index++)
+        {
+            items.SetValue(EncodeElement(list[index], storage, proxy, field.Name), index);
+        }
+        var cell = new object[layout.size];
+        cell[0] = layout.typeId;
+        cell[itemsSlot.index] = items;
+        cell[sizeSlot.index] = count;
+        return cell;
+    }
+
+    /// `Dictionary<K, V>` → the compiled class, entries only: `keys`,
+    /// `values` and `count` at the indices the layout names, no hash table
+    /// — the program builds that itself on first use (its hash codes are
+    /// its own; see the corlib's EnsureBuckets). A null dictionary is empty.
+    private static object EncodeDictionary(
+        FieldInfo field, System.Collections.IDictionary dictionary, MenSharpBehaviour proxy, UdonBehaviour udon)
+    {
+        MenSharpLayout layout = LayoutFor(udon, field.FieldType, proxy, field.Name);
+        MenSharpLayoutSlot keysSlot = layout == null ? null : SlotNamed(layout, "keys");
+        MenSharpLayoutSlot valuesSlot = layout == null ? null : SlotNamed(layout, "values");
+        MenSharpLayoutSlot countSlot = layout == null ? null : SlotNamed(layout, "count");
+        if (keysSlot == null || valuesSlot == null || countSlot == null)
+        {
+            return null;
+        }
+        Type[] arguments = field.FieldType.GetGenericArguments();
+        Type keyStorage = StorageElementType(keysSlot, arguments[0]);
+        Type valueStorage = StorageElementType(valuesSlot, arguments[1]);
+        int count = dictionary == null ? 0 : dictionary.Count;
+        Array keys = Array.CreateInstance(keyStorage, count);
+        Array values = Array.CreateInstance(valueStorage, count);
+        int index = 0;
+        if (dictionary != null)
+        {
+            foreach (System.Collections.DictionaryEntry entry in dictionary)
+            {
+                keys.SetValue(EncodeElement(entry.Key, keyStorage, proxy, field.Name), index);
+                values.SetValue(EncodeElement(entry.Value, valueStorage, proxy, field.Name), index);
+                index++;
+            }
+        }
+        var cell = new object[layout.size];
+        cell[0] = layout.typeId;
+        cell[keysSlot.index] = keys;
+        cell[valuesSlot.index] = values;
+        cell[countSlot.index] = count;
+        MenSharpLayoutSlot freeList = SlotNamed(layout, "freeList");
+        if (freeList != null)
+        {
+            cell[freeList.index] = -1;
+        }
+        MenSharpLayoutSlot freeCount = SlotNamed(layout, "freeCount");
+        if (freeCount != null)
+        {
+            cell[freeCount.index] = 0;
+        }
+        return cell;
+    }
+
+    // ------------------------------------------------------------ decoding
+
+    /// The proxy on a GameObject that a running UdonBehaviour belongs to.
+    public static MenSharpBehaviour ProxyOf(UdonBehaviour udon)
+    {
+        if (udon == null)
+        {
+            return null;
+        }
+        foreach (MenSharpBehaviour proxy in udon.GetComponents<MenSharpBehaviour>())
+        {
+            if (FindPaired(proxy) == udon)
+            {
+                return proxy;
+            }
+        }
+        return null;
+    }
+
+    /// A heap value as the proxy field holds it: the inverse of EncodeField.
+    private static object DecodeField(FieldInfo field, object heap, MenSharpBehaviour proxy, UdonBehaviour udon)
+    {
+        Type fieldType = field.FieldType;
+        if (fieldType.IsGenericType && fieldType.GetGenericTypeDefinition() == typeof(List<>))
+        {
+            return DecodeList(field, heap as object[], proxy, udon);
+        }
+        if (MenSharpDictionarySerialization.IsDictionaryType(fieldType))
+        {
+            return DecodeDictionary(field, heap as object[], proxy, udon);
+        }
+        if (fieldType.IsArray)
+        {
+            if (!(heap is Array source))
+            {
+                return null;
+            }
+            Type element = fieldType.GetElementType();
+            Array mapped = Array.CreateInstance(element, source.Length);
+            for (int index = 0; index < source.Length; index++)
+            {
+                mapped.SetValue(DecodeElement(source.GetValue(index), element), index);
+            }
+            return mapped;
+        }
+        return DecodeElement(heap, fieldType);
+    }
+
+    private static object DecodeElement(object heap, Type wanted)
+    {
+        if (heap == null)
+        {
+            return wanted.IsValueType ? Activator.CreateInstance(wanted) : null;
+        }
+        if (typeof(MenSharpBehaviour).IsAssignableFrom(wanted))
+        {
+            return heap is UdonBehaviour udon ? ProxyOf(udon) : null;
+        }
+        if (typeof(UdonSharp.UdonSharpBehaviour).IsAssignableFrom(wanted))
+        {
+            return heap is UdonBehaviour udon
+                ? UdonSharpEditor.UdonSharpEditorUtility.GetProxyBehaviour(udon)
+                : null;
+        }
+        if (wanted.IsEnum)
+        {
+            return heap.GetType() == wanted ? heap : Enum.ToObject(wanted, heap);
+        }
+        if (wanted.IsInstanceOfType(heap))
+        {
+            return heap;
+        }
+        try
+        {
+            return Convert.ChangeType(heap, wanted);
+        }
+        catch (Exception)
+        {
+            return wanted.IsValueType ? Activator.CreateInstance(wanted) : null;
+        }
+    }
+
+    private static object DecodeList(FieldInfo field, object[] cell, MenSharpBehaviour proxy, UdonBehaviour udon)
+    {
+        var list = (System.Collections.IList)Activator.CreateInstance(field.FieldType);
+        if (cell == null)
+        {
+            return list;
+        }
+        var program = udon.programSource as MenSharpProgramAsset;
+        MenSharpLayout layout = program?.LayoutOf(LayoutName(field.FieldType));
+        MenSharpLayoutSlot itemsSlot = layout == null ? null : SlotNamed(layout, "items");
+        MenSharpLayoutSlot sizeSlot = layout == null ? null : SlotNamed(layout, "size");
+        if (itemsSlot == null || sizeSlot == null
+            || itemsSlot.index >= cell.Length || sizeSlot.index >= cell.Length)
+        {
+            return list;
+        }
+        Type element = field.FieldType.GetGenericArguments()[0];
+        var items = cell[itemsSlot.index] as Array;
+        int size = cell[sizeSlot.index] is int n ? n : 0;
+        for (int index = 0; items != null && index < size && index < items.Length; index++)
+        {
+            list.Add(DecodeElement(items.GetValue(index), element));
+        }
+        return list;
+    }
+
+    /// The live entries of a compiled dictionary: every slot below `count`
+    /// whose hash is not the removed marker (-1) — or every one, when the
+    /// table was never built.
+    private static object DecodeDictionary(FieldInfo field, object[] cell, MenSharpBehaviour proxy, UdonBehaviour udon)
+    {
+        var dictionary = (System.Collections.IDictionary)Activator.CreateInstance(field.FieldType);
+        if (cell == null)
+        {
+            return dictionary;
+        }
+        var program = udon.programSource as MenSharpProgramAsset;
+        MenSharpLayout layout = program?.LayoutOf(LayoutName(field.FieldType));
+        MenSharpLayoutSlot keysSlot = layout == null ? null : SlotNamed(layout, "keys");
+        MenSharpLayoutSlot valuesSlot = layout == null ? null : SlotNamed(layout, "values");
+        MenSharpLayoutSlot countSlot = layout == null ? null : SlotNamed(layout, "count");
+        MenSharpLayoutSlot hashesSlot = layout == null ? null : SlotNamed(layout, "hashes");
+        if (keysSlot == null || valuesSlot == null || countSlot == null
+            || keysSlot.index >= cell.Length || valuesSlot.index >= cell.Length || countSlot.index >= cell.Length)
+        {
+            return dictionary;
+        }
+        Type[] arguments = field.FieldType.GetGenericArguments();
+        var keys = cell[keysSlot.index] as Array;
+        var values = cell[valuesSlot.index] as Array;
+        var hashes = hashesSlot != null && hashesSlot.index < cell.Length ? cell[hashesSlot.index] as int[] : null;
+        int count = cell[countSlot.index] is int n ? n : 0;
+        for (int index = 0; keys != null && values != null && index < count
+            && index < keys.Length && index < values.Length; index++)
+        {
+            if (hashes != null && index < hashes.Length && hashes[index] < 0)
+            {
+                continue;
+            }
+            object key = DecodeElement(keys.GetValue(index), arguments[0]);
+            if (key == null || dictionary.Contains(key))
+            {
+                continue;
+            }
+            dictionary.Add(key, DecodeElement(values.GetValue(index), arguments[1]));
+        }
+        return dictionary;
+    }
+
+    // ------------------------------------------------------- play-mode sync
+
+    /// Fields already reported as unreadable or unwritable this session, so
+    /// a repainting inspector does not repeat itself.
+    private static readonly HashSet<string> LiveReported = new HashSet<string>(StringComparer.Ordinal);
+
+    /// Copies the running program's variables into the proxy's fields — what
+    /// the inspector shows in play mode. False when the program is not
+    /// running yet.
+    public static bool ReadBack(MenSharpBehaviour proxy, UdonBehaviour udon)
+    {
+        if (udon == null || !udon.IsInitialized)
+        {
+            return false;
+        }
+        IUdonSymbolTable declared = null;
+        foreach (FieldInfo field in SerializedFields(proxy.GetType()))
+        {
+            if (DeclaredVariableType(udon, field.Name, ref declared) == null)
+            {
+                continue;
+            }
+            try
+            {
+                object heap = udon.GetProgramVariable(field.Name);
+                field.SetValue(proxy, DecodeField(field, heap, proxy, udon));
+            }
+            catch (Exception error)
+            {
+                if (LiveReported.Add(proxy.GetType().Name + "." + field.Name + "<"))
+                {
+                    Debug.LogWarning(
+                        $"MenSharp: could not read {field.Name} back from the running program "
+                        + $"({error.Message}); the inspector keeps its last value.",
+                        proxy);
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Writes the proxy's fields into the running program — what an edit in
+    /// the play-mode inspector does.
+    public static bool WriteLive(MenSharpBehaviour proxy, UdonBehaviour udon)
+    {
+        if (udon == null || !udon.IsInitialized)
+        {
+            return false;
+        }
+        IUdonSymbolTable declared = null;
+        foreach (FieldInfo field in SerializedFields(proxy.GetType()))
+        {
+            if (DeclaredVariableType(udon, field.Name, ref declared) == null)
+            {
+                continue;
+            }
+            try
+            {
+                object value = EncodeField(field, field.GetValue(proxy), proxy, udon, ref declared, out Type _);
+                udon.SetProgramVariable(field.Name, value);
+            }
+            catch (Exception error)
+            {
+                if (LiveReported.Add(proxy.GetType().Name + "." + field.Name + ">"))
+                {
+                    Debug.LogWarning(
+                        $"MenSharp: could not write {field.Name} into the running program "
+                        + $"({error.Message}).",
+                        proxy);
+                }
+            }
+        }
+        return true;
+    }
+
+    /// Copies the proxy's serialized instance fields into the UdonBehaviour's
+    /// public variable table — the values the Udon heap starts from. Every
+    /// other entry in the table goes: the runtime writes each entry over the
+    /// heap slot of the same name, whether the program exports it or not,
+    /// and the SDK's UdonBehaviour inspector (shown by Reveal) adds a null
+    /// entry for every exported symbol it finds no value for — which is how
+    /// a `const string` on a scene saved by an earlier compiler came up null.
+    public static void TransferValues(MenSharpBehaviour proxy, UdonBehaviour udon)
+    {
+        IUdonVariableTable table = udon.publicVariables;
+        var summary = new System.Text.StringBuilder();
+        var transferred = new HashSet<string>(StringComparer.Ordinal);
+        // the compiled program's symbol table, fetched once and only if a
+        // field needs it (see the enum case below)
+        IUdonSymbolTable declared = null;
+        foreach (FieldInfo field in SerializedFields(proxy.GetType()))
+        {
+            transferred.Add(field.Name);
+            object value = EncodeField(field, field.GetValue(proxy), proxy, udon, ref declared, out Type valueType);
             table.RemoveVariable(field.Name);
             Type variableType = typeof(UdonVariable<>).MakeGenericType(valueType);
             var variable = (IUdonVariable)Activator.CreateInstance(
@@ -967,12 +1388,25 @@ public class MenSharpSceneProcessor : IProcessSceneWithReport
         // into play mode and run
         MenSharpProxy.SyncThenTransfer(MenSharpProxy.PairingTargets(scene), undoable: false);
 
+        // a build ships no proxy at all. Play mode keeps them, disabled — no
+        // Unity message reaches a disabled component, so nothing of theirs
+        // runs beside the program — as the inspector's window onto the
+        // running program (see MenSharpBehaviourEditor): the same view as in
+        // edit mode, over live values. Exactly what UdonSharp does.
+        bool building = report != null || BuildPipeline.isBuildingPlayer;
         foreach (GameObject root in scene.GetRootGameObjects())
         {
             foreach (MenSharpBehaviour proxy in
                 root.GetComponentsInChildren<MenSharpBehaviour>(true))
             {
-                UnityEngine.Object.DestroyImmediate(proxy);
+                if (building)
+                {
+                    UnityEngine.Object.DestroyImmediate(proxy);
+                }
+                else
+                {
+                    proxy.enabled = false;
+                }
             }
         }
     }

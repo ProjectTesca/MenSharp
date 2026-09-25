@@ -15450,3 +15450,137 @@ fn a_behaviour_is_an_object_and_an_event_receiver() {
         "{errors:#?}"
     );
 }
+
+#[test]
+fn the_meta_carries_the_layout_of_an_exported_list_field() {
+    // the Unity inspector builds a `List<int>` a field was given — and reads
+    // one back in play mode — from the program's own shape of it: type id
+    // in slot 0, then `items` and `size` at the indices the compiler chose
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using MenSharp;
+        using System.Collections.Generic;
+        public class Probe : MenSharpBehaviour
+        {
+            public List<int> numbers;
+            public int total;
+            public void Interact()
+            {
+                total = 0;
+                foreach (int n in numbers) { total += n; }
+            }
+        }
+        "#,
+        "Probe",
+    ) else {
+        panic!("no program");
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let layouts = &program.output.program.layouts;
+    let list = layouts
+        .iter()
+        .find(|layout| layout.name == "System.Collections.Generic.List`1<System.Int32>")
+        .unwrap_or_else(|| panic!("no List<int> layout in {layouts:#?}"));
+    assert!(list.size >= 3, "{list:#?}");
+    let items = list
+        .slots
+        .iter()
+        .find(|slot| slot.field == "items")
+        .unwrap();
+    let size = list.slots.iter().find(|slot| slot.field == "size").unwrap();
+    assert_eq!(items.udon_type, "SystemInt32Array");
+    assert_eq!(items.dotnet, "System.Int32[]");
+    assert_eq!(size.udon_type, "SystemInt32");
+    assert!(items.index >= 1 && size.index >= 1 && items.index != size.index);
+
+    let meta = program.output.program.to_meta_json().unwrap();
+    assert!(meta.contains("\"layouts\": ["), "{meta}");
+    assert!(
+        meta.contains("\"name\": \"System.Collections.Generic.List`1<System.Int32>\""),
+        "{meta}"
+    );
+    assert!(meta.contains("\"field\": \"items\""), "{meta}");
+
+    // a field of a type the program never touches still gets its shape
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using MenSharp;
+        using System.Collections.Generic;
+        public class Quiet : MenSharpBehaviour
+        {
+            public List<string> names;
+            public int n;
+            public void Interact() { n = 1; }
+        }
+        "#,
+        "Quiet",
+    ) else {
+        panic!("no program");
+    };
+    assert!(
+        program
+            .output
+            .program
+            .layouts
+            .iter()
+            .any(|layout| layout.name == "System.Collections.Generic.List`1<System.String>"),
+        "{:#?}",
+        program.output.program.layouts
+    );
+}
+
+#[test]
+fn the_meta_carries_the_layout_of_an_exported_dictionary_field() {
+    // the inspector hands a dictionary over as its entries — keys, values,
+    // count — and the program builds the hash table on first use; both
+    // sides need the slots by name
+    let Some(program) = compile_behaviour_with_corlib(
+        r#"
+        using MenSharp;
+        using System.Collections.Generic;
+        public class Probe : MenSharpBehaviour
+        {
+            public Dictionary<string, int> table;
+            public int total;
+            public void Interact()
+            {
+                total = 0;
+                foreach (var pair in table) { total += pair.Value; }
+                table["total"] = total;
+            }
+        }
+        "#,
+        "Probe",
+    ) else {
+        panic!("no program");
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let layouts = &program.output.program.layouts;
+    let table = layouts
+        .iter()
+        .find(|layout| {
+            layout.name == "System.Collections.Generic.Dictionary`2<System.String, System.Int32>"
+        })
+        .unwrap_or_else(|| panic!("no Dictionary layout in {layouts:#?}"));
+    for (field, udon_type) in [
+        ("keys", "SystemStringArray"),
+        ("values", "SystemInt32Array"),
+        ("hashes", "SystemInt32Array"),
+        ("count", "SystemInt32"),
+    ] {
+        let slot = table
+            .slots
+            .iter()
+            .find(|slot| slot.field == field)
+            .unwrap_or_else(|| panic!("no {field} slot in {table:#?}"));
+        assert_eq!(slot.udon_type, udon_type, "{field}");
+    }
+}

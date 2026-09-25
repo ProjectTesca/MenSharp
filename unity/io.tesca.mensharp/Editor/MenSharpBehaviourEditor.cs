@@ -9,6 +9,7 @@
 
 #if UNITY_EDITOR
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
 using MenSharp;
@@ -24,10 +25,39 @@ public class MenSharpBehaviourEditor : Editor
     /// assembly reload, which is exactly when it could go stale.
     private static readonly Dictionary<Type, Type[]> SiblingCache = new();
 
+    /// In play mode the fields are the running program's: repaint as it runs.
+    public override bool RequiresConstantRepaint()
+    {
+        return EditorApplication.isPlaying;
+    }
+
     public override void OnInspectorGUI()
     {
+        // play mode: the proxy is disabled and kept as a window onto the
+        // running program — the values shown are read from it before every
+        // draw, and an edit is written straight back (UdonSharp's way)
+        UdonBehaviour live = null;
         if (targets.Length == 1 && target is MenSharpBehaviour proxy)
         {
+            if (EditorApplication.isPlaying)
+            {
+                UdonBehaviour paired = MenSharpProxy.FindPaired(proxy);
+                if (MenSharpProxy.ReadBack(proxy, paired))
+                {
+                    live = paired;
+                    EditorGUILayout.HelpBox(
+                        "Play mode: these are the running program's values. An edit is "
+                        + "written into the program right away.",
+                        MessageType.Info);
+                }
+                else
+                {
+                    EditorGUILayout.HelpBox(
+                        "Play mode: the program is not running yet; these are the values it "
+                        + "will start from.",
+                        MessageType.None);
+                }
+            }
             DrawProgramHeader(proxy);
         }
         else
@@ -36,7 +66,15 @@ public class MenSharpBehaviourEditor : Editor
                 $"{targets.Length} MenSharp behaviours selected.", MessageType.None);
         }
         EditorGUILayout.Space();
-        DrawFields();
+        bool changed = DrawFields();
+        if (targets.Length == 1 && target is MenSharpBehaviour owner)
+        {
+            changed |= DrawDictionaryFields(owner);
+        }
+        if (changed && live != null && target is MenSharpBehaviour edited)
+        {
+            MenSharpProxy.WriteLive(edited, live);
+        }
     }
 
     /// Like DrawDefaultInspector, except a synced variable says so. Whether a
@@ -44,7 +82,7 @@ public class MenSharpBehaviourEditor : Editor
     /// UdonBehaviour that carries the sync metadata is hidden, by design — so
     /// without this the only way to check `[UdonSynced]` took is to read the
     /// generated assembly.
-    private void DrawFields()
+    private bool DrawFields()
     {
         serializedObject.Update();
         SerializedProperty property = serializedObject.GetIterator();
@@ -73,7 +111,172 @@ public class MenSharpBehaviourEditor : Editor
                 "Network-synchronised, interpolation mode " + mode + ".");
             EditorGUILayout.PropertyField(property, label, true);
         }
-        serializedObject.ApplyModifiedProperties();
+        return serializedObject.ApplyModifiedProperties();
+    }
+
+    // ------------------------------------------------------- dictionaries
+
+    /// Unity draws no editor for a Dictionary<K, V>, so this is one: a row
+    /// per entry, a row to add one. The field is edited in place (the
+    /// entries are serialized through MenSharpDictionaryStore), and in play
+    /// mode a change is written into the program like any other.
+    private readonly Dictionary<string, object> pendingKeys = new Dictionary<string, object>();
+    private readonly Dictionary<string, object> pendingValues = new Dictionary<string, object>();
+    private readonly HashSet<string> collapsed = new HashSet<string>();
+
+    private bool DrawDictionaryFields(MenSharpBehaviour owner)
+    {
+        bool changed = false;
+        foreach (FieldInfo field in MenSharpDictionarySerialization.DictionaryFields(owner.GetType()))
+        {
+            Type[] arguments = field.FieldType.GetGenericArguments();
+            string title = ObjectNames.NicifyVariableName(field.Name);
+            if (!MenSharpDictionarySerialization.IsSupportedDictionary(field.FieldType))
+            {
+                EditorGUILayout.LabelField(
+                    title,
+                    $"Dictionary<{arguments[0].Name}, {arguments[1].Name}>: not editable here");
+                continue;
+            }
+            var dictionary = field.GetValue(owner) as IDictionary;
+            if (dictionary == null)
+            {
+                dictionary = (IDictionary)Activator.CreateInstance(field.FieldType);
+                field.SetValue(owner, dictionary);
+            }
+            bool open = !collapsed.Contains(field.Name);
+            bool nowOpen = EditorGUILayout.Foldout(open, $"{title} ({dictionary.Count})", true);
+            if (nowOpen != open)
+            {
+                if (nowOpen) { collapsed.Remove(field.Name); } else { collapsed.Add(field.Name); }
+            }
+            if (!nowOpen)
+            {
+                continue;
+            }
+            EditorGUI.indentLevel++;
+            object removeKey = null;
+            var updates = new List<KeyValuePair<object, object>>();
+            foreach (DictionaryEntry entry in dictionary)
+            {
+                EditorGUILayout.BeginHorizontal();
+                using (new EditorGUI.DisabledScope(true))
+                {
+                    DrawElement(arguments[0], entry.Key, GUILayout.MinWidth(60));
+                }
+                object edited = DrawElement(arguments[1], entry.Value, GUILayout.MinWidth(60));
+                if (!Equals(edited, entry.Value))
+                {
+                    updates.Add(new KeyValuePair<object, object>(entry.Key, edited));
+                }
+                if (GUILayout.Button("−", GUILayout.Width(22)))
+                {
+                    removeKey = entry.Key;
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            // the row a new entry is typed into
+            EditorGUILayout.BeginHorizontal();
+            pendingKeys.TryGetValue(field.Name, out object pendingKey);
+            pendingValues.TryGetValue(field.Name, out object pendingValue);
+            pendingKey = DrawElement(arguments[0], pendingKey ?? DefaultOf(arguments[0]), GUILayout.MinWidth(60));
+            pendingValue = DrawElement(arguments[1], pendingValue ?? DefaultOf(arguments[1]), GUILayout.MinWidth(60));
+            pendingKeys[field.Name] = pendingKey;
+            pendingValues[field.Name] = pendingValue;
+            bool canAdd = pendingKey != null && !dictionary.Contains(pendingKey);
+            using (new EditorGUI.DisabledScope(!canAdd))
+            {
+                if (GUILayout.Button("+", GUILayout.Width(22)))
+                {
+                    Undo.RecordObject(owner, "Add dictionary entry");
+                    dictionary.Add(pendingKey, pendingValue);
+                    pendingKeys.Remove(field.Name);
+                    pendingValues.Remove(field.Name);
+                    changed = true;
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+            EditorGUI.indentLevel--;
+
+            if (updates.Count > 0)
+            {
+                Undo.RecordObject(owner, "Edit dictionary entry");
+                foreach (KeyValuePair<object, object> update in updates)
+                {
+                    dictionary[update.Key] = update.Value;
+                }
+                changed = true;
+            }
+            if (removeKey != null)
+            {
+                Undo.RecordObject(owner, "Remove dictionary entry");
+                dictionary.Remove(removeKey);
+                changed = true;
+            }
+        }
+        if (changed)
+        {
+            EditorUtility.SetDirty(owner);
+        }
+        return changed;
+    }
+
+    private static object DefaultOf(Type type)
+    {
+        if (type == typeof(string))
+        {
+            return "";
+        }
+        return type.IsValueType ? Activator.CreateInstance(type) : null;
+    }
+
+    /// One key or value, in the editor its type gets.
+    private static object DrawElement(Type type, object value, params GUILayoutOption[] options)
+    {
+        if (typeof(UnityEngine.Object).IsAssignableFrom(type))
+        {
+            return EditorGUILayout.ObjectField(value as UnityEngine.Object, type, true, options);
+        }
+        if (type.IsEnum)
+        {
+            var current = value as Enum ?? (Enum)Enum.ToObject(type, 0);
+            return EditorGUILayout.EnumPopup(current, options);
+        }
+        if (type == typeof(string))
+        {
+            return EditorGUILayout.TextField(value as string ?? "", options);
+        }
+        if (type == typeof(bool))
+        {
+            return EditorGUILayout.Toggle(value is bool b && b, options);
+        }
+        if (type == typeof(int) || type == typeof(short) || type == typeof(byte)
+            || type == typeof(sbyte) || type == typeof(ushort))
+        {
+            int edited = EditorGUILayout.IntField(Convert.ToInt32(value ?? 0), options);
+            return Convert.ChangeType(edited, type);
+        }
+        if (type == typeof(uint) || type == typeof(long) || type == typeof(ulong))
+        {
+            long edited = EditorGUILayout.LongField(Convert.ToInt64(value ?? 0L), options);
+            return Convert.ChangeType(edited, type);
+        }
+        if (type == typeof(float))
+        {
+            return EditorGUILayout.FloatField(Convert.ToSingle(value ?? 0f), options);
+        }
+        if (type == typeof(double) || type == typeof(decimal))
+        {
+            double edited = EditorGUILayout.DoubleField(Convert.ToDouble(value ?? 0d), options);
+            return Convert.ChangeType(edited, type);
+        }
+        if (type == typeof(char))
+        {
+            string text = EditorGUILayout.TextField(value is char c ? c.ToString() : "", options);
+            return text.Length > 0 ? text[0] : '\0';
+        }
+        EditorGUILayout.LabelField(value?.ToString() ?? "null", options);
+        return value;
     }
 
     /// The sync mode `[UdonSynced]` asks for on the field behind this

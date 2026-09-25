@@ -375,6 +375,37 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         componentInParentFound = GetComponentInParent<Transform>(true) == transform;
     }
 
+    // a List<int> typed into the inspector arrives as the program's own
+    // List<int>, and goes back to the inspector in play mode (request)
+    public List<int> numbers;
+    public int numbersTotal;
+
+    public void SumNumbers()
+    {
+        numbersTotal = 0;
+        foreach (int n in numbers)
+        {
+            numbersTotal += n;
+        }
+        numbers.Add(numbersTotal);
+    }
+
+    // a Dictionary<string, int> typed into the inspector arrives as the
+    // program's own dictionary (entries only; the hash table is built on
+    // first use), and goes back to the inspector in play mode (request)
+    public Dictionary<string, int> table;
+    public int tableTotal;
+
+    public void SumTable()
+    {
+        tableTotal = 0;
+        foreach (var pair in table)
+        {
+            tableTotal += pair.Value;
+        }
+        table["total"] = tableTotal;
+    }
+
     // `this` is what it is at run time — the UdonBehaviour: an Object for
     // Debug.Log's context, an IUdonEventReceiver for the SDK's APIs (request)
     public string receiverLog;

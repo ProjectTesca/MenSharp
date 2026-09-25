@@ -4,6 +4,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using MenSharp;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.SceneManagement;
@@ -167,6 +168,47 @@ public class MenSharpIntegrationTests
 
         UdonBehaviour smoke = FindUdon("MenSharpRuntimeSmoke");
         Assert.IsTrue(smoke.IsInitialized, "the SDK did not initialise the smoke UdonBehaviour");
+
+        // the proxy stays through play mode, disabled, as the inspector's
+        // window onto the program: a List<int> typed in edit mode arrived as
+        // the program's own list; what the program did to it reads back;
+        // an edit made now is written into the running program
+        MenSharpBehaviour smokeProxy = MenSharpProxy.ProxyOf(smoke);
+        Assert.IsNotNull(smokeProxy, "the proxy is kept in play mode");
+        Assert.IsFalse(smokeProxy.enabled, "the proxy is disabled in play mode");
+        smoke.RunProgram("SumNumbers");
+        Assert.AreEqual(6, smoke.GetProgramVariable("numbersTotal"));
+        Assert.IsTrue(MenSharpProxy.ReadBack(smokeProxy, smoke));
+        FieldInfo numbersField = smokeProxy.GetType().GetField("numbers");
+        CollectionAssert.AreEqual(new[] { 1, 2, 3, 6 }, (List<int>)numbersField.GetValue(smokeProxy));
+        numbersField.SetValue(smokeProxy, new List<int> { 10, 20 });
+        Assert.IsTrue(MenSharpProxy.WriteLive(smokeProxy, smoke));
+        smoke.RunProgram("SumNumbers");
+        Assert.AreEqual(30, smoke.GetProgramVariable("numbersTotal"));
+        Assert.IsTrue(MenSharpProxy.ReadBack(smokeProxy, smoke));
+        CollectionAssert.AreEqual(new[] { 10, 20, 30 }, (List<int>)numbersField.GetValue(smokeProxy));
+
+        // a dictionary typed in edit mode survived the scene's save and
+        // reload (Unity serializes none of it by itself), reached the
+        // program as entries, and reads back with what the program added
+        smoke.RunProgram("SumTable");
+        Assert.AreEqual(3, smoke.GetProgramVariable("tableTotal"));
+        Assert.IsTrue(MenSharpProxy.ReadBack(smokeProxy, smoke));
+        FieldInfo tableField = smokeProxy.GetType().GetField("table");
+        var table = (Dictionary<string, int>)tableField.GetValue(smokeProxy);
+        Assert.AreEqual(3, table.Count);
+        Assert.AreEqual(1, table["a"]);
+        Assert.AreEqual(2, table["b"]);
+        Assert.AreEqual(3, table["total"]);
+        tableField.SetValue(smokeProxy, new Dictionary<string, int> { { "x", 10 }, { "y", 20 } });
+        Assert.IsTrue(MenSharpProxy.WriteLive(smokeProxy, smoke));
+        smoke.RunProgram("SumTable");
+        Assert.AreEqual(30, smoke.GetProgramVariable("tableTotal"));
+        Assert.IsTrue(MenSharpProxy.ReadBack(smokeProxy, smoke));
+        table = (Dictionary<string, int>)tableField.GetValue(smokeProxy);
+        Assert.AreEqual(30, table["total"]);
+        Assert.AreEqual(3, table.Count);
+
         smoke.RunProgram("Greet");
         Assert.AreEqual("Start: Hello", smoke.GetProgramVariable("greeted"));
 
@@ -516,6 +558,8 @@ public class MenSharpIntegrationTests
         {
             Component smokeProxy = MenSharpTestScene.Proxy(smokeObject, "MenSharpRuntimeSmoke");
             MenSharpTestScene.Assign(smokeProxy, "text", "hello");
+            MenSharpTestScene.Assign(smokeProxy, "numbers", new List<int> { 1, 2, 3 });
+            MenSharpTestScene.Assign(smokeProxy, "table", new Dictionary<string, int> { { "a", 1 }, { "b", 2 } });
             var dead = new TextAsset("gone");
             UnityEngine.Object.DestroyImmediate(dead);
             MenSharpTestScene.Assign(smokeProxy, "textAsset", dead);
