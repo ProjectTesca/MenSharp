@@ -110,6 +110,11 @@ pub fn generate(
         static_constructor_order: Vec::new(),
         constructor_reaches: HashMap::default(),
         function_calls: HashMap::default(),
+        field_units_done: HashSet::default(),
+        field_units_in_progress: Vec::new(),
+        constructors_emitted: HashSet::default(),
+        static_init_return: None,
+        compiling_bodies: 0,
         shared: None,
         static_storage_cache: HashMap::default(),
         shared_slot: None,
@@ -484,6 +489,20 @@ struct Generator<'a, 'ast> {
     /// (issue: 1 where C# gives 11).
     constructor_reaches: HashMap<FunctionKey, Vec<FunctionKey>>,
     function_calls: HashMap<FunctionKey, Vec<FunctionKey>>,
+    /// Type initialization is per class: its static field initializers in
+    /// textual order, then its static constructor (§15.12). Which classes'
+    /// field initializers the static initializer has emitted, which class
+    /// is being emitted (a field read from its own class's initializer
+    /// stays at its default, as C# has it), and which constructors ran.
+    field_units_done: HashSet<SymbolId>,
+    field_units_in_progress: Vec<SymbolId>,
+    constructors_emitted: HashSet<FunctionKey>,
+    /// The static initializer's return slot, while it is being emitted.
+    static_init_return: Option<DataId>,
+    /// How many function bodies are being compiled right now (nested when
+    /// the initializer's window compiles one): while any is, code goes to
+    /// a body, not to the initializer, so nothing is initialized on demand.
+    compiling_bodies: usize,
     /// The static fields every behaviour shares, once computed — see
     /// [`Self::shared_statics`].
     shared: Option<SharedStatics>,
@@ -1641,88 +1660,172 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             self.emit_shared_statics_prologue();
         }
 
-        // an initializer's expression may meet further static fields; those
-        // join the list as it is walked (and are emitted inline where met,
-        // see `ensure_static`), so this is an index loop, not an iterator
+        // type initialization, class by class (§15.12): a class's static
+        // field initializers in textual order, then its static constructor
+        // — each class after the classes its initializers and constructor
+        // reach (see `constructor_order`), and, met while another class's
+        // initializer is being emitted, right there ahead of the read
+        // (`ensure_type_initialized`) — C#'s "before first use". The
+        // constructor of a class this program reached runs once across the
+        // scene (the flags of `begin_constructor_guard` and the registry);
+        // an initializer's expression may reach classes not met before, so
+        // this is a loop to a fixed point
         self.static_init_phase = true;
-        let mut index = 0;
-        while index < self.static_init.len() {
-            let (field, file) = self.static_init[index];
-            index += 1;
-            if self.static_init_emitted.insert(field) {
-                self.emit_static_field_initializer(field, file);
+        self.static_init_return = Some(init_return);
+        loop {
+            let mut progressed = false;
+            for key in self.constructor_order() {
+                if self.constructors_emitted.contains(&key) {
+                    continue;
+                }
+                let Some(class) = self.declarations.table.symbol(key.symbol).parent else {
+                    continue;
+                };
+                self.emit_type_unit(class, key.bindings.clone(), init_return);
+                progressed = true;
+            }
+            let pending = self
+                .static_init
+                .iter()
+                .find(|(field, _)| !self.static_init_emitted.contains(field))
+                .copied();
+            if let Some((field, file)) = pending {
+                if let Some(class) = self.declarations.table.symbol(field).parent {
+                    self.emit_type_unit(class, Vec::new(), init_return);
+                }
+                // a field met during its own class's unit, or one with no
+                // class to speak of: on its own, after everything so far
+                if self.static_init_emitted.insert(field) {
+                    self.emit_static_field_initializer(field, file);
+                }
+                progressed = true;
+            }
+            if !progressed {
+                break;
             }
         }
         self.static_init_phase = false;
-
-        // then the static constructors of the classes this program reached
-        // (§15.12): after its class's field initializers — all of them ran
-        // above — and once across the scene: a class of the user's has
-        // shared statics, so the shared array carries a flag per class that
-        // whichever behaviour reaches it first sets (see
-        // `begin_constructor_guard`); the corlib's statics are each
-        // program's own, so its constructors would run everywhere. A
-        // constructor's body may reach a class not met before — its
-        // constructor joins the list, so this is a loop to a fixed point
-        let mut emitted: HashSet<FunctionKey> = HashSet::default();
-        loop {
-            let pending: Vec<FunctionKey> = self
-                .constructor_order()
-                .into_iter()
-                .filter(|key| !emitted.contains(key))
-                .collect();
-            if pending.is_empty() {
-                break;
-            }
-            for key in pending {
-                emitted.insert(key.clone());
-                self.drain_queue_aside();
-                let (file, span) = self.declaration_site(key.symbol);
-                let owner = self.declarations.table.symbol(key.symbol).parent;
-                let mut ctx = Ctx {
-                    key: key.clone(),
-                    file,
-                    locals: vec![HashMap::default()],
-                    boxed: Vec::new(),
-                    this_slot: None,
-                    this_type: None,
-                    value_locals: Vec::new(),
-                    loop_stack: Vec::new(),
-                    result: None,
-                    return_slot: init_return, // unused
-                    caught: Vec::new(),
-                    async_state: None,
-                    iterator_state: None,
-                };
-                let guard = match owner {
-                    Some(owner) if self.shared_owner.is_some() && !self.is_corlib_file(file) => {
-                        if key.bindings.is_empty() {
-                            Some(self.begin_constructor_guard(&ctx, owner, span.clone()))
-                        } else {
-                            let closed = self.closed_type_of_key(owner, &key);
-                            let registry_key = format!(
-                                "{}#cctor",
-                                closed
-                                    .as_ref()
-                                    .map(|ty| self.display_type(ty))
-                                    .unwrap_or_default()
-                            );
-                            Some(self.begin_registry_guard(&ctx, &registry_key, span.clone()))
-                        }
-                    }
-                    _ => None,
-                };
-                self.call_function(&mut ctx, &key, None, &[], &[], span);
-                if let Some(skip) = guard {
-                    self.end_owner_guard(skip);
-                }
-                self.drain_queue_aside();
-            }
-        }
         self.program.code.push(Op::JumpIndirect(init_return));
         // the function bodies an initializer's speculative window compiled
         let deferred = std::mem::take(&mut self.deferred_function_code);
         self.program.code.extend(deferred);
+    }
+
+    /// One class's type initialization, as far as this program has it: its
+    /// pending static field initializers in textual order (for the plain
+    /// class — a closed generic type's statics are registry literals with
+    /// no code), then the static constructor scheduled for exactly this
+    /// closed type, if any and not run yet. Re-entered for the class being
+    /// emitted, it does nothing: a field read by an earlier initializer of
+    /// its own class keeps its default, as in C#.
+    fn emit_type_unit(
+        &mut self,
+        class: SymbolId,
+        bindings: Vec<(SymbolId, Type)>,
+        init_return: DataId,
+    ) {
+        // met again from inside its own field initializers: nothing to do
+        // here — not the constructor either, which follows the initializers
+        if self.field_units_in_progress.contains(&class) {
+            return;
+        }
+        if bindings.is_empty() && !self.field_units_done.contains(&class) {
+            self.field_units_in_progress.push(class);
+            let mut fields: Vec<(SymbolId, FileId, usize)> = self
+                .static_init
+                .iter()
+                .filter(|(field, _)| {
+                    !self.static_init_emitted.contains(field)
+                        && self.declarations.table.symbol(*field).parent == Some(class)
+                })
+                .map(|(field, file)| (*field, *file, self.declaration_site(*field).1.start))
+                .collect();
+            fields.sort_by_key(|(_, _, start)| *start);
+            for (field, file, _) in fields {
+                if self.static_init_emitted.insert(field) {
+                    self.emit_static_field_initializer(field, file);
+                }
+            }
+            self.field_units_in_progress.retain(|other| *other != class);
+            self.field_units_done.insert(class);
+        }
+        let constructor = self
+            .static_constructors
+            .iter()
+            .find(|key| {
+                key.bindings == bindings
+                    && self.declarations.table.symbol(key.symbol).parent == Some(class)
+            })
+            .cloned();
+        if let Some(key) = constructor
+            && !self.constructors_emitted.contains(&key)
+        {
+            self.constructors_emitted.insert(key.clone());
+            self.emit_static_constructor_call(&key, init_return);
+        }
+    }
+
+    /// A class met while the static initializer is being emitted — by a
+    /// field initializer's expression, through a static of the class or a
+    /// use of it — is initialized right there, ahead of what met it. Only
+    /// while the initializer's own code is being written: a function body
+    /// compiled in that window (see `drain_queue_aside`) is a body, and
+    /// the dependency order covers what it reaches.
+    fn ensure_type_initialized(&mut self, class: SymbolId, bindings: Vec<(SymbolId, Type)>) {
+        if !self.static_init_phase || self.compiling_bodies > 0 {
+            return;
+        }
+        let Some(init_return) = self.static_init_return else {
+            return;
+        };
+        self.emit_type_unit(class, bindings, init_return);
+    }
+
+    /// The call that runs one scheduled static constructor from the static
+    /// initializer, under its once-per-scene guard, with the queue drained
+    /// around it so a body compiled here can reach further classes.
+    fn emit_static_constructor_call(&mut self, key: &FunctionKey, init_return: DataId) {
+        self.drain_queue_aside();
+        let (file, span) = self.declaration_site(key.symbol);
+        let owner = self.declarations.table.symbol(key.symbol).parent;
+        let mut ctx = Ctx {
+            key: key.clone(),
+            file,
+            locals: vec![HashMap::default()],
+            boxed: Vec::new(),
+            this_slot: None,
+            this_type: None,
+            value_locals: Vec::new(),
+            loop_stack: Vec::new(),
+            result: None,
+            return_slot: init_return, // unused
+            caught: Vec::new(),
+            async_state: None,
+            iterator_state: None,
+        };
+        let guard = match owner {
+            Some(owner) if self.shared_owner.is_some() && !self.is_corlib_file(file) => {
+                if key.bindings.is_empty() {
+                    Some(self.begin_constructor_guard(&ctx, owner, span.clone()))
+                } else {
+                    let closed = self.closed_type_of_key(owner, key);
+                    let registry_key = format!(
+                        "{}#cctor",
+                        closed
+                            .as_ref()
+                            .map(|ty| self.display_type(ty))
+                            .unwrap_or_default()
+                    );
+                    Some(self.begin_registry_guard(&ctx, &registry_key, span.clone()))
+                }
+            }
+            _ => None,
+        };
+        self.call_function(&mut ctx, key, None, &[], &[], span);
+        if let Some(skip) = guard {
+            self.end_owner_guard(skip);
+        }
+        self.drain_queue_aside();
     }
 
     /// Every `static T()` this compilation owns, by class — run by a
@@ -1857,6 +1960,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         self.static_constructors.push(key.clone());
         self.ensure_function(&key);
+        // reached by an initializer being emitted: run before it goes on
+        self.ensure_type_initialized(owner, key.bindings.clone());
     }
 
     /// The scheduled static constructors, each after the ones its body
@@ -2343,9 +2448,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // another field's initializer): initialized right here,
                 // ahead of the read being lowered — C#'s "initialized before
                 // first use", as `ensure_static` does for a slot
-                if self.static_init_phase && self.static_init_emitted.insert(field) {
-                    let file = self.declaration_site(field).0;
-                    self.emit_static_field_initializer(field, file);
+                if let Some(class) = self.declarations.table.symbol(field).parent {
+                    self.ensure_type_initialized(class, Vec::new());
                 }
                 let position = self.shared_statics().index_of[&field];
                 let object = self.shared_statics_slot();
@@ -5085,10 +5189,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         if runs_at_startup && let Some(file) = file {
             self.static_init.push((field, file));
             // met while the static initializer is being emitted (by another
-            // initializer's expression): initialize it right here, ahead of
-            // the read that is being lowered
-            if self.static_init_phase && self.static_init_emitted.insert(field) {
-                self.emit_static_field_initializer(field, file);
+            // initializer's expression): its class is initialized right
+            // here, ahead of the read that is being lowered
+            if let Some(class) = self.declarations.table.symbol(field).parent {
+                self.ensure_type_initialized(class, Vec::new());
             }
         }
         slot

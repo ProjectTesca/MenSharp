@@ -334,7 +334,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     pub(super) fn compile_function(&mut self, key: &FunctionKey) {
         timescope::scope!("compile function");
         let saved = self.enter_frame(Some(key.clone()));
+        self.compiling_bodies += 1;
         self.compile_function_body(key);
+        self.compiling_bodies -= 1;
         self.leave_frame(saved);
     }
 

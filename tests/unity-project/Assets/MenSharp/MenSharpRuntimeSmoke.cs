@@ -405,6 +405,17 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         orderedTrace = SmokeFirst.Value;
     }
 
+    // a static field initializer is part of its class's initialization:
+    // one that reads another class's static sees that class's constructor
+    // done (C#'s "before first use"), where before every field initializer
+    // ran ahead of every constructor
+    public int initializerTrace;
+
+    public void FieldInitializerOrder()
+    {
+        initializerTrace = SmokeInitReader.Value;
+    }
+
     public void GenericStaticConstructors()
     {
         nestedGenericValue = SmokeOuter<int>.Inner.Value;
@@ -1060,4 +1071,10 @@ public class SmokeSecond
     {
         Value = 10;
     }
+}
+
+
+public static class SmokeInitReader
+{
+    public static int Value = SmokeSecond.Value + 1;
 }

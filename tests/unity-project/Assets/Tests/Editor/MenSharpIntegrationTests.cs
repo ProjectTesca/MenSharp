@@ -358,6 +358,10 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("OrderedStaticConstructors");
         Assert.AreEqual(11, smoke.GetProgramVariable("orderedTrace"));
 
+        // a static field initializer sees the other class's constructor done
+        smoke.RunProgram("FieldInitializerOrder");
+        Assert.AreEqual(11, smoke.GetProgramVariable("initializerTrace"));
+
         // a generic class's static constructor runs once per closed type
         smoke.RunProgram("GenericStaticConstructors");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));

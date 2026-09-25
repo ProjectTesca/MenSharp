@@ -15960,3 +15960,108 @@ fn a_static_constructor_runs_after_the_ones_its_body_needs() {
     };
     assert_eq!(int_of(&emulator, "first"), 11);
 }
+
+#[test]
+fn static_field_initializers_are_part_of_their_classs_initialization() {
+    // §15.12: a class's static field initializers run with its static
+    // constructor, before the class's first use — so one that reads another
+    // class's static sees that class initialized (constructor included), and
+    // a field reads a later field of its own class at its default (textual
+    // order). Before, every field initializer of the program ran before any
+    // constructor: `A.X = B.Y + 1` gave 1
+    let Some(emulator) = run(
+        r#"
+        namespace Game
+        {
+            public class A
+            {
+                public static int X = B.Y + 1;
+            }
+            public class B
+            {
+                public static int Y;
+                static B() { Y = 10; }
+            }
+            public class C
+            {
+                // (a constant initializer is baked into the heap before any
+                // code runs, so Q is computed here to make the order visible)
+                public static int P = Q + 1;
+                public static int Q = Five();
+                static int Five() { return 5; }
+            }
+            public class D
+            {
+                public static int V = 3;
+                static D() { V += 1; }
+            }
+            public class E
+            {
+                public static int W = D.V * 10;
+                static E() { W += 1; }
+            }
+            public class Program
+            {
+                public static int x;
+                public static int p;
+                public static int q;
+                public static int v;
+                public static int w;
+                public static void Main()
+                {
+                    x = A.X;
+                    p = C.P;
+                    q = C.Q;
+                    v = D.V;
+                    w = E.W;
+                }
+            }
+        }
+        "#,
+        "Main",
+    ) else {
+        return;
+    };
+    assert_eq!(
+        int_of(&emulator, "x"),
+        11,
+        "another class's constructor ran first"
+    );
+    assert_eq!(
+        int_of(&emulator, "p"),
+        1,
+        "a later field of the same class is still default"
+    );
+    assert_eq!(int_of(&emulator, "q"), 5);
+    assert_eq!(int_of(&emulator, "v"), 4, "initializer, then constructor");
+    assert_eq!(
+        int_of(&emulator, "w"),
+        41,
+        "D initialized fully before E's initializer"
+    );
+
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public class A
+        {
+            public static int X = B.Y + 1;
+        }
+        public class B
+        {
+            public static int Y;
+            static B() { Y = 10; }
+        }
+        public class Probe : MenSharpBehaviour
+        {
+            public int x;
+            public void Interact() { x = A.X; }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        panic!("no emulator");
+    };
+    assert_eq!(int_of(&emulator, "x"), 11);
+}
