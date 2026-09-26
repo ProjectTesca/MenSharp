@@ -16613,3 +16613,142 @@ fn an_enclosing_types_instance_member_needs_an_instance() {
         bodies.errors
     );
 }
+
+const NETWORK_CALLABLE_BASE: &str = r#"
+    namespace MenSharp
+    {
+        public class MenSharpBehaviour
+        {
+            public object gameObject { get; }
+            public void SendCustomEvent(string eventName) { }
+        }
+    }
+    namespace VRC.SDK3.UdonNetworkCalling
+    {
+        public class NetworkCallableAttribute : System.Attribute
+        {
+            public NetworkCallableAttribute() { }
+            public NetworkCallableAttribute(int maxEventsPerSecond) { }
+        }
+    }
+"#;
+
+#[test]
+fn a_network_callables_rate_is_any_integer_constant_under_any_spelling() {
+    // issue: only a literal rate was read — a `const`, `3 + 4` or `0x7`
+    // silently fell back to the default; and `[NC]` through a using alias
+    // was not recognised at all, so the event lost its metadata
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", NETWORK_CALLABLE_BASE),
+            SourceCode::new(
+                "Assets/MenSharp/Rates.cs",
+                r#"
+                using VRC.SDK3.UdonNetworkCalling;
+                using NC = VRC.SDK3.UdonNetworkCalling.NetworkCallableAttribute;
+                namespace Game
+                {
+                    public static class Limits { public const int Fast = 0x7; }
+                    public class Rates : MenSharp.MenSharpBehaviour
+                    {
+                        private const int Rate = 7;
+                        [NetworkCallable(7)] public void Literal(int x) { }
+                        [NetworkCallable(Rate)] public void Constant(int x) { }
+                        [NetworkCallable(3 + 4)] public void Expression(int x) { }
+                        [NetworkCallable(0x7)] public void Hexadecimal(int x) { }
+                        [NetworkCallable(Limits.Fast)] public void Qualified(int x) { }
+                        [NetworkCallableAttribute(Rate)] public void Suffixed(int x) { }
+                        [NC] public void Aliased(int x) { }
+                        [NC(Rate)] public void AliasedRate(int x) { }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Rates",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    assert!(
+        program.output.errors.is_empty(),
+        "{:#?}",
+        program.output.errors
+    );
+    let meta = program.output.program.to_meta_json().unwrap();
+    for event in [
+        "Literal",
+        "Constant",
+        "Expression",
+        "Hexadecimal",
+        "Qualified",
+        "Suffixed",
+        "AliasedRate",
+    ] {
+        assert!(
+            meta.contains(&format!(
+                r#"{{"event": "{event}", "maxEventsPerSecond": 7, "#
+            )),
+            "{event}: {meta}"
+        );
+    }
+    assert!(
+        meta.contains(r#"{"event": "Aliased", "maxEventsPerSecond": 0, "#),
+        "{meta}"
+    );
+}
+
+#[test]
+fn a_network_callable_refuses_overloads_and_a_rate_that_is_no_constant() {
+    let Some(program) = compile_behaviour(
+        vec![
+            SourceCode::new("base.cs", NETWORK_CALLABLE_BASE),
+            SourceCode::new(
+                "Assets/MenSharp/Turret.cs",
+                r#"
+                using VRC.SDK3.UdonNetworkCalling;
+                namespace Game
+                {
+                    public class Turret : MenSharp.MenSharpBehaviour
+                    {
+                        public int rate = 3;
+                        [NetworkCallable] public void Hit(int value) { }
+                        [NetworkCallable] public void Hit(string value) { }
+                        [NetworkCallable(rate)] public void Variable(int x) { }
+                        [NetworkCallable(-1)] public void Negative(int x) { }
+                    }
+                }
+                "#,
+            ),
+        ],
+        "Game.Turret",
+    ) else {
+        eprintln!("skipped: no .NET runtime for reference assemblies");
+        return;
+    };
+    let messages: Vec<String> = program
+        .output
+        .errors
+        .iter()
+        .map(|error| error.message.to_string())
+        .collect();
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message.contains("cannot be overloaded: `Hit`"))
+            .count(),
+        2,
+        "{messages:?}"
+    );
+    for expected in [
+        "the rate of `[NetworkCallable]` on `Variable` must be an integer constant",
+        "the rate of `[NetworkCallable]` on `Negative` must be a non-negative",
+    ] {
+        assert!(
+            messages.iter().any(|message| message.contains(expected)),
+            "{expected}: {messages:?}"
+        );
+    }
+    let meta = program.output.program.to_meta_json().unwrap();
+    assert!(!meta.contains(r#""event": "Hit""#), "{meta}");
+}

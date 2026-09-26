@@ -89,6 +89,15 @@ pub struct BodyCheck {
     /// (when the class declares constructors). What `Reflect.VisitFields`
     /// builds a `FieldInfo`'s attributes from.
     pub attribute_types: HashMap<EntityID, Type>,
+    /// Every attribute whose name resolved to a class — the compilation's
+    /// own or an external one — by the attribute node: the class's display
+    /// name. What lets `[NetworkCallable]` be recognised however it is
+    /// spelled (`[NC]` through a using alias, `[NetworkCallableAttribute]`).
+    pub attribute_names: HashMap<EntityID, String>,
+    /// The integer constant an attribute argument evaluates to, by the
+    /// argument's expression node: `[NetworkCallable(Rate)]`,
+    /// `[NetworkCallable(3 + 4)]`, `[NetworkCallable(0x7)]`.
+    pub attribute_constants: HashMap<EntityID, i128>,
     /// For every `foreach` that walks a collection by the enumerator pattern
     /// (anything but an array or a string), the three members it bound to.
     /// Keyed by the statement node.
@@ -149,6 +158,8 @@ impl BodyCheck {
         self.resolved_types.extend(other.resolved_types);
         self.targets.extend(other.targets);
         self.attribute_types.extend(other.attribute_types);
+        self.attribute_names.extend(other.attribute_names);
+        self.attribute_constants.extend(other.attribute_constants);
         self.enumerations.extend(other.enumerations);
         self.disposals.extend(other.disposals);
         self.constructor_chains.extend(other.constructor_chains);
@@ -350,6 +361,8 @@ pub fn check_file(
         resolved_types: checker.resolver.out.type_of,
         targets: checker.targets,
         attribute_types: checker.attribute_types,
+        attribute_names: checker.attribute_names,
+        attribute_constants: checker.attribute_constants,
         enumerations: checker.enumerations,
         disposals: checker.disposals,
         constructor_chains: checker.constructor_chains,
@@ -560,6 +573,10 @@ struct Checker<'a, 'ast> {
     targets: HashMap<EntityID, ResolvedTarget>,
     /// See [`BodyCheck::attribute_types`].
     attribute_types: HashMap<EntityID, Type>,
+    /// See [`BodyCheck::attribute_names`].
+    attribute_names: HashMap<EntityID, String>,
+    /// See [`BodyCheck::attribute_constants`].
+    attribute_constants: HashMap<EntityID, i128>,
     /// The type each pattern was matched against, for the exhaustiveness
     /// check (see `exhaustive.rs`).
     pattern_inputs: HashMap<EntityID, Type>,
@@ -676,6 +693,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             expression_types: HashMap::default(),
             numeric_promotions: HashMap::default(),
             attribute_types: HashMap::default(),
+            attribute_names: HashMap::default(),
+            attribute_constants: HashMap::default(),
             targets: HashMap::default(),
             pattern_inputs: HashMap::default(),
             enumerations: HashMap::default(),

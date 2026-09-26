@@ -5031,12 +5031,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             sections
                 .iter()
                 .flat_map(|section| section.attributes)
-                .any(|attribute| {
-                    attribute_name(attribute)
-                        .map(|spelling| spelling.strip_suffix("Attribute").unwrap_or(spelling))
-                        == Some(name)
-                })
+                .any(|attribute| self.attribute_is(attribute, name))
         })
+    }
+
+    /// Is this attribute `[Name]` / `[NameAttribute]`? By the class the
+    /// checker resolved its name to, so a using alias (`[NC]`) counts; by
+    /// its spelling when nothing resolved (no such class among the
+    /// references — a stub-less compile).
+    pub(super) fn attribute_is(
+        &self,
+        attribute: &men_sharp_parser::ast::Attribute<'ast, 'ast>,
+        name: &str,
+    ) -> bool {
+        let spelling = match self.bodies.attribute_names.get(&EntityID::from(attribute)) {
+            Some(display) => display.rsplit('.').next().map(str::to_string),
+            None => attribute_name(attribute).map(str::to_string),
+        };
+        spelling
+            .is_some_and(|spelling| spelling.strip_suffix("Attribute").unwrap_or(&spelling) == name)
     }
 
     /// Where a symbol was declared, for diagnostics that have no expression to

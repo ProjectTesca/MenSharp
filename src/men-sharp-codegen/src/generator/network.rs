@@ -32,11 +32,52 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if self.declarations.table.symbol(member).kind != SymbolKind::Method {
                     continue;
                 }
-                let Some(max_events_per_second) = self.network_callable_attribute(member) else {
+                let Some(rate) = self.network_callable_attribute(member) else {
                     continue;
                 };
                 let name = self.declarations.table.symbol(member).name.to_string();
                 let (file, span) = self.declaration_site(member);
+                let max_events_per_second = match rate {
+                    Ok(rate) => rate,
+                    Err(message) => {
+                        self.errors.push(CodegenError {
+                            message: message.into(),
+                            file,
+                            span,
+                        });
+                        continue;
+                    }
+                };
+                // the event is named by the method, so a second `Hit` would
+                // be the same event with other parameters: refused, as
+                // UdonSharp refuses overloads of a network callable
+                let overloads = self
+                    .entry_chain
+                    .iter()
+                    .flat_map(|class| {
+                        self.declarations
+                            .table
+                            .symbol(*class)
+                            .members_named(&name)
+                            .iter()
+                            .copied()
+                    })
+                    .filter(|other| {
+                        self.declarations.table.symbol(*other).kind == SymbolKind::Method
+                    })
+                    .count();
+                if overloads > 1 {
+                    self.errors.push(CodegenError {
+                        message: format!(
+                            "a network callable method cannot be overloaded: `{name}` is declared \
+                             more than once, and its name is the event's"
+                        )
+                        .into(),
+                        file,
+                        span,
+                    });
+                    continue;
+                }
                 let parameter_types: Vec<Type> = match self.signatures.members.get(&member) {
                     Some(MemberSignature::Function(signature)) => signature
                         .parameters
@@ -129,17 +170,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         Ok(parameters)
     }
 
-    /// `[NetworkCallable]` / `[NetworkCallable(MaxEventsPerSecond = 5)]` on
-    /// a member: `Some(rate)` when present (`None` inside for no rate).
-    fn network_callable_attribute(&self, member: SymbolId) -> Option<Option<u32>> {
+    /// `[NetworkCallable]` / `[NetworkCallable(7)]` / `[NetworkCallable(Rate)]`
+    /// on a member: `Some` when present, with the rate (`None` for none
+    /// written), or why the rate written cannot be one. (A
+    /// `MaxEventsPerSecond = …` property assignment is read too, should a
+    /// version of the attribute offer the property.) The attribute is known by the class its
+    /// name resolved to, so an alias (`[NC]`) counts; a spelling the
+    /// checker could not resolve (no SDK among the references) counts by
+    /// its name.
+    fn network_callable_attribute(&self, member: SymbolId) -> Option<Result<Option<u32>, String>> {
         for sections in self.attribute_sections(member) {
             for attribute in sections.iter().flat_map(|section| section.attributes) {
-                let matches = attribute_name(attribute)
-                    .map(|spelling| spelling.strip_suffix("Attribute").unwrap_or(spelling))
-                    == Some("NetworkCallable");
-                if !matches {
+                if !self.attribute_is(attribute, "NetworkCallable") {
                     continue;
                 }
+                let method = self.declarations.table.symbol(member).name;
                 let mut rate = None;
                 for argument in attribute
                     .arguments
@@ -147,15 +192,53 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .map(|list| list.arguments)
                     .unwrap_or(&[])
                 {
-                    let named = argument.name.as_ref().is_some_and(|name| {
-                        matches!(name.value, "MaxEventsPerSecond" | "maxEventsPerSecond")
-                    });
-                    // the one positional argument is the rate too
-                    if named || argument.name.is_none() {
-                        rate = integer_argument(&argument.value);
+                    // `MaxEventsPerSecond = value` sets the attribute's
+                    // property; the one positional argument is the rate too
+                    let (expression, named) = match &argument.value {
+                        ArgumentValue::Expression(Expression::Assignment(assignment)) => {
+                            let target = match &assignment.target {
+                                Expression::Primary(primary) if primary.chain.is_empty() => {
+                                    match &primary.left {
+                                        PrimaryLeft::Identifier { name, .. } => Some(name.value),
+                                        _ => None,
+                                    }
+                                }
+                                _ => None,
+                            };
+                            match target {
+                                Some("MaxEventsPerSecond" | "maxEventsPerSecond") => {
+                                    (assignment.value.as_ref().ok(), true)
+                                }
+                                _ => continue,
+                            }
+                        }
+                        ArgumentValue::Expression(expression) => (Some(expression), false),
+                        _ => (None, false),
+                    };
+                    if !named && argument.name.is_some() {
+                        continue;
                     }
+                    let constant = expression.and_then(|expression| {
+                        self.bodies
+                            .attribute_constants
+                            .get(&EntityID::from(expression))
+                            .copied()
+                            .or_else(|| integer_literal_value(expression))
+                    });
+                    let Some(constant) = constant else {
+                        return Some(Err(format!(
+                            "the rate of `[NetworkCallable]` on `{method}` must be an integer constant"
+                        )));
+                    };
+                    let Ok(value) = u32::try_from(constant) else {
+                        return Some(Err(format!(
+                            "the rate of `[NetworkCallable]` on `{method}` must be a non-negative \
+                             integer that fits 32 bits, not {constant}"
+                        )));
+                    };
+                    rate = Some(value);
                 }
-                return Some(rate);
+                return Some(Ok(rate));
             }
         }
         None
@@ -248,9 +331,10 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     }
 }
 
-/// An integer literal argument, as the attribute's rate.
-fn integer_argument(value: &ArgumentValue<'_, '_>) -> Option<u32> {
-    let ArgumentValue::Expression(Expression::Primary(primary)) = value else {
+/// An integer literal written as the attribute's rate — for a spelling the
+/// checker could not bind (no attribute class among the references).
+fn integer_literal_value(expression: &Expression<'_, '_>) -> Option<i128> {
+    let Expression::Primary(primary) = expression else {
         return None;
     };
     let PrimaryLeft::Literal(LiteralExpression::Integer(text)) = &primary.left else {

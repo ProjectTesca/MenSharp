@@ -509,16 +509,57 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     ) {
         for section in sections {
             for attribute in section.attributes {
-                let Some(ty) = self.attribute_class(&attribute.name) else {
+                let Some((ty, is_source)) = self.attribute_type(&attribute.name) else {
                     continue;
                 };
                 let node = EntityID::from(attribute);
+                let display = self.describe(&ty);
+                self.attribute_names.insert(node, display);
                 let function = crate::types::FunctionSignature {
                     return_type: Type::Void,
                     parameters: Vec::new(),
                 };
+                // `[A(1, Name = value)]`: the positional arguments go to a
+                // constructor; `Name = value` sets a property of the
+                // attribute afterwards (§22.2) and is not an assignment
+                // expression — only its value is an expression here
+                let all_arguments = attribute
+                    .arguments
+                    .as_ref()
+                    .map(|list| list.arguments)
+                    .unwrap_or(&[]);
+                let positional_count = all_arguments
+                    .iter()
+                    .position(|argument| Self::attribute_property_value(argument).is_some())
+                    .unwrap_or(all_arguments.len());
+                let positional = &all_arguments[..positional_count];
+                let property_values: Vec<&'ast men_sharp_parser::ast::Expression<'ast, 'ast>> =
+                    all_arguments[positional_count..]
+                        .iter()
+                        .filter_map(Self::attribute_property_value)
+                        .collect();
+                if !is_source {
+                    // an external attribute (the SDK's `[NetworkCallable]`):
+                    // no constructor of the compilation's to bind, but its
+                    // arguments are expressions checked in place, and the
+                    // integer constants among them are recorded for the
+                    // code generator (a rate written as a constant)
+                    self.enter_body(&function, &[], is_static, |checker| {
+                        checker.check_arguments(positional);
+                        checker.record_attribute_constants(positional);
+                        for value in &property_values {
+                            checker.check_expression(value);
+                            checker.record_attribute_constant(value);
+                        }
+                    });
+                    continue;
+                }
                 let class = ty.clone();
                 self.enter_body(&function, &[], is_static, |checker| {
+                    for value in &property_values {
+                        checker.check_expression(value);
+                        checker.record_attribute_constant(value);
+                    }
                     let constructors: Vec<MemberCandidate> = checker
                         .system()
                         .members_named(&class, ".ctor")
@@ -529,11 +570,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                                 && candidate.declaring_type == class
                         })
                         .collect();
-                    let arguments = attribute
-                        .arguments
-                        .as_ref()
-                        .map(|list| checker.check_arguments(list.arguments))
-                        .unwrap_or_default();
+                    let arguments = checker.check_arguments(positional);
+                    checker.record_attribute_constants(positional);
                     if constructors.is_empty() {
                         // the implicit parameterless constructor
                         if !arguments.is_empty() {
@@ -562,22 +600,84 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
-    /// The class an attribute's name denotes, when it is one of the
-    /// compilation's own: `[JsonName]` finds `JsonName` or, as C# does,
-    /// `JsonNameAttribute`. Anything else is `None`, and leaves no error
-    /// behind — an unknown spelling is not a mistake here.
-    fn attribute_class(
+    /// The integer constants among an attribute's arguments, by expression
+    /// node, once the arguments are checked.
+    fn record_attribute_constants(
+        &mut self,
+        arguments: &'ast [men_sharp_parser::ast::Argument<'ast, 'ast>],
+    ) {
+        for argument in arguments {
+            let men_sharp_parser::ast::ArgumentValue::Expression(expression) = &argument.value
+            else {
+                continue;
+            };
+            self.record_attribute_constant(expression);
+        }
+    }
+
+    fn record_attribute_constant(&mut self, expression: &'ast Expression<'ast, 'ast>) {
+        if let Some(value) = self.integer_constant(expression) {
+            self.attribute_constants
+                .insert(EntityID::from(expression), value);
+        }
+    }
+
+    /// The value of an attribute argument written `Name = value`: a property
+    /// of the attribute set after construction. `None` for a positional
+    /// argument.
+    pub(super) fn attribute_property_value(
+        argument: &'ast men_sharp_parser::ast::Argument<'ast, 'ast>,
+    ) -> Option<&'ast Expression<'ast, 'ast>> {
+        let men_sharp_parser::ast::ArgumentValue::Expression(Expression::Assignment(assignment)) =
+            &argument.value
+        else {
+            return None;
+        };
+        if assignment.operator.value != men_sharp_parser::ast::AssignmentOperator::Assign {
+            return None;
+        }
+        let Expression::Primary(target) = &assignment.target else {
+            return None;
+        };
+        if !target.chain.is_empty()
+            || !matches!(
+                target.left,
+                men_sharp_parser::ast::PrimaryLeft::Identifier { .. }
+            )
+        {
+            return None;
+        }
+        assignment.value.as_ref().ok()
+    }
+
+    /// The class an attribute's name denotes — one of the compilation's own
+    /// (`true`) or an external one (`false`): `[JsonName]` finds `JsonName`
+    /// or, as C# does, `JsonNameAttribute`. Anything else is `None`, and
+    /// leaves no error behind — an unknown spelling is not a mistake here.
+    fn attribute_type(
         &mut self,
         name: &'ast men_sharp_parser::ast::TypeRef<'ast, 'ast>,
-    ) -> Option<Type> {
+    ) -> Option<(Type, bool)> {
         let before = self.resolver.out.errors.len();
         let resolved = self.resolve_type(name);
         let is_source_class = |ty: &Type| {
             matches!(ty, Type::Named { target: TypeTarget::Source(symbol), .. }
                 if self.resolver.declarations.table.symbol(*symbol).kind == SymbolKind::Class)
         };
+        let is_external = |ty: &Type| {
+            matches!(
+                ty,
+                Type::Named {
+                    target: TypeTarget::External(_),
+                    ..
+                }
+            )
+        };
         if is_source_class(&resolved) {
-            return Some(resolved);
+            return Some((resolved, true));
+        }
+        if is_external(&resolved) {
+            return Some((resolved, false));
         }
         self.resolver.out.errors.truncate(before);
         // `[JsonName]` for `class JsonNameAttribute`: a simple name with the
@@ -599,7 +699,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         match resolution {
             Some(Resolution::Type { target, arguments }) => {
                 let ty = Type::Named { target, arguments };
-                is_source_class(&ty).then_some(ty)
+                if is_source_class(&ty) {
+                    Some((ty, true))
+                } else if is_external(&ty) {
+                    Some((ty, false))
+                } else {
+                    None
+                }
             }
             _ => None,
         }

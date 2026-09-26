@@ -747,6 +747,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         match node.syntax {
             SyntaxRef::Method(method) => {
+                self.check_member_attributes(method.attributes, node.is_static);
                 let Some(MemberSignature::Function(function)) = member_signature else {
                     return;
                 };

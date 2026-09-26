@@ -650,5 +650,27 @@ public class MenSharpIntegrationTests
     }
 
     private static UdonBehaviour FindUdon(string objectName) => MenSharpTestScene.FindUdon(objectName);
+
+    /// `[NetworkCallable]` rates written as constants or through a using
+    /// alias reach the SDK metadata the program asset carries.
+    [Test]
+    public void NetworkCallableRatesComeFromConstantsAndAliases()
+    {
+        MenSharpCompiler.CompileAll();
+        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+        MenSharpProgramAsset program = MenSharpSources.FindProgram("VerifyNetwork");
+        Assert.IsNotNull(program, "VerifyNetwork program asset");
+        MenSharpMeta meta = JsonUtility.FromJson<MenSharpMeta>(program.metaJson);
+        var rates = new Dictionary<string, int>();
+        foreach (MenSharpNetworkCallable callable in meta.networkCallable)
+        {
+            rates[callable.@event] = callable.maxEventsPerSecond;
+        }
+        Assert.AreEqual(7, rates["Rated"]);
+        Assert.AreEqual(7, rates["Aliased"]);
+        Assert.AreEqual(0, rates["AliasedDefault"]);
+        Assert.AreEqual(5, rates["Aim"]);
+        Assert.AreEqual(0, rates["Hit"]);
+    }
 }
 #endif
