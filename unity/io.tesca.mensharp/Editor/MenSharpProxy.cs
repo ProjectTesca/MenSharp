@@ -418,6 +418,14 @@ public static class MenSharpProxy
         {
             return null;
         }
+        // the one it remembers, unless that now carries some other program
+        // (the sweep will sort that out; until then the program decides)
+        UdonBehaviour remembered = RememberedBacking(proxy);
+        if (remembered != null
+            && (remembered.programSource == program || remembered.programSource == null))
+        {
+            return remembered;
+        }
         foreach (UdonBehaviour udon in proxy.GetComponents<UdonBehaviour>())
         {
             if (udon != null && udon.programSource == program)
@@ -428,9 +436,59 @@ public static class MenSharpProxy
         return null;
     }
 
+    private const string BackingFieldName = "menSharpBacking";
+
+    private static readonly FieldInfo BackingField = typeof(MenSharpBehaviour).GetField(
+        BackingFieldName, BindingFlags.Instance | BindingFlags.NonPublic);
+
+    /// The UdonBehaviour a proxy remembers being paired with, when it is
+    /// still a component of the proxy's own GameObject. A reference to
+    /// another object's UdonBehaviour is a pasted component's leftover and
+    /// counts for nothing.
+    private static UdonBehaviour RememberedBacking(MenSharpBehaviour proxy)
+    {
+        if (BackingField == null || proxy == null)
+        {
+            return null;
+        }
+        var udon = BackingField.GetValue(proxy) as UdonBehaviour;
+        if (udon == null || udon.gameObject != proxy.gameObject || IsStaticsHolder(udon))
+        {
+            return null;
+        }
+        return udon;
+    }
+
+    /// Records the pair on the proxy — through its serialized property, so
+    /// that a prefab instance keeps it as an override and the undo step is
+    /// the caller's (`undoable`) or none at all.
+    private static void RememberBacking(MenSharpBehaviour proxy, UdonBehaviour udon, bool undoable)
+    {
+        if (BackingField == null || (BackingField.GetValue(proxy) as UdonBehaviour) == udon)
+        {
+            return;
+        }
+        var serialized = new SerializedObject(proxy);
+        SerializedProperty property = serialized.FindProperty(BackingFieldName);
+        if (property == null)
+        {
+            return;
+        }
+        property.objectReferenceValue = udon;
+        if (undoable)
+        {
+            serialized.ApplyModifiedProperties();
+        }
+        else
+        {
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+        }
+    }
+
     /// Is this an UdonBehaviour *we* placed? Only ones carrying a MenSharp
     /// program qualify, so hand-authored Udon (graphs, UdonSharp) is never
-    /// touched — least of all removed.
+    /// touched — least of all removed. (One a proxy remembers is ours too,
+    /// whatever it carries: see `SyncPairs`.)
     private static bool IsBackingBehaviour(UdonBehaviour udon)
     {
         if (udon == null || IsStaticsHolder(udon))
@@ -473,16 +531,29 @@ public static class MenSharpProxy
             return pairs;
         }
 
+        // what the proxies remember is ours even when nothing else says so:
+        // imported from another project, the program asset it carried is
+        // gone and the hidden flag may be too (saved with Reveal on)
+        MenSharpBehaviour[] proxies = target.GetComponents<MenSharpBehaviour>();
+        var remembered = new HashSet<UdonBehaviour>();
+        foreach (MenSharpBehaviour proxy in proxies)
+        {
+            UdonBehaviour udon = RememberedBacking(proxy);
+            if (udon != null)
+            {
+                remembered.Add(udon);
+            }
+        }
         var spare = new List<UdonBehaviour>();
         foreach (UdonBehaviour udon in target.GetComponents<UdonBehaviour>())
         {
-            if (IsBackingBehaviour(udon))
+            if (IsBackingBehaviour(udon) || remembered.Contains(udon))
             {
                 spare.Add(udon);
             }
         }
 
-        foreach (MenSharpBehaviour proxy in target.GetComponents<MenSharpBehaviour>())
+        foreach (MenSharpBehaviour proxy in proxies)
         {
             MenSharpProgramAsset program = FindProgram(proxy.GetType());
             if (program == null)
@@ -498,7 +569,25 @@ public static class MenSharpProxy
             }
 
             UdonBehaviour paired = null;
-            for (int index = 0; index < spare.Count; index++)
+            // the remembered one first, whatever it carries now — the
+            // component uGUI events and other scripts point at — re-pointed
+            // at the current program. Still in `spare` means no earlier
+            // proxy (a pasted copy remembering the same one) claimed it
+            UdonBehaviour kept = RememberedBacking(proxy);
+            if (kept != null && spare.Remove(kept))
+            {
+                paired = kept;
+                if (paired.programSource != program)
+                {
+                    if (undoable)
+                    {
+                        Undo.RecordObject(paired, "Pair MenSharp behaviour");
+                    }
+                    paired.programSource = program;
+                    EditorUtility.SetDirty(paired);
+                }
+            }
+            for (int index = 0; paired == null && index < spare.Count; index++)
             {
                 if (spare[index].programSource == program)
                 {
@@ -539,6 +628,7 @@ public static class MenSharpProxy
             ApplyVisibility(paired);
             ApplySyncMode(paired, program);
             ApplySerializedProgram(paired, program);
+            RememberBacking(proxy, paired, undoable);
             pairs.Add((proxy, paired));
         }
 

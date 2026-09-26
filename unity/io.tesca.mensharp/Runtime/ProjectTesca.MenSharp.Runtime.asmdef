@@ -1,7 +1,9 @@
 {
     "name": "ProjectTesca.MenSharp.Runtime",
     "rootNamespace": "",
-    "references": [],
+    "references": [
+        "VRC.Udon"
+    ],
     "includePlatforms": [],
     "excludePlatforms": [],
     "allowUnsafeCode": false,

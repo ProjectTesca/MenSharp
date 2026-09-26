@@ -9,6 +9,9 @@
 #if UNITY_EDITOR
 using System.IO;
 using System.Reflection;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 using UnityEditor;
 using UnityEngine;
 using VRC.Udon.Editor.ProgramSources;
@@ -73,6 +76,7 @@ public static class MenSharpImporter
             // the asset must exist on disk before its serialized program
             // sub-asset can be created next to it
             AssetDatabase.CreateAsset(programAsset, assetPath);
+            programAsset = AdoptStableGuid(programAsset, assetPath);
         }
         CreateMilliseconds += watch.ElapsedMilliseconds;
         watch.Restart();
@@ -82,6 +86,70 @@ public static class MenSharpImporter
         EditorUtility.SetDirty(programAsset);
         DirtyMilliseconds += watch.ElapsedMilliseconds;
         return programAsset;
+    }
+
+    /// The GUID a class's program asset gets when it is first created: a
+    /// function of the class path alone, so that the same class compiles
+    /// to the same GUID in every project. A prefab exported from one
+    /// project then finds its programs in another as soon as that project
+    /// has compiled — its UdonBehaviours' Program Source resolves by
+    /// itself instead of reading `None`. (An asset that already exists
+    /// keeps whatever GUID it has: changing it would break the references
+    /// to it.)
+    public static string StableGuid(string classPath)
+    {
+        using (var md5 = MD5.Create())
+        {
+            byte[] hash = md5.ComputeHash(Encoding.UTF8.GetBytes("MenSharp/" + classPath));
+            var text = new StringBuilder(32);
+            foreach (byte value in hash)
+            {
+                text.Append(value.ToString("x2"));
+            }
+            return text.ToString();
+        }
+    }
+
+    /// Rewrites a freshly created asset's `.meta` to the class's stable
+    /// GUID and re-imports it. Nothing references the asset yet, so the
+    /// change is safe; if some other asset already holds that GUID (one
+    /// imported from elsewhere and moved), Unity's own GUID stays.
+    private static MenSharpProgramAsset AdoptStableGuid(MenSharpProgramAsset asset, string assetPath)
+    {
+        string wanted = StableGuid(Path.GetFileNameWithoutExtension(assetPath));
+        if (AssetDatabase.AssetPathToGUID(assetPath) == wanted)
+        {
+            return asset;
+        }
+        string holder = AssetDatabase.GUIDToAssetPath(wanted);
+        if (!string.IsNullOrEmpty(holder) && holder != assetPath)
+        {
+            Debug.LogWarning(
+                $"MenSharp: {assetPath} keeps a project-specific GUID — {holder} already has "
+                + "the one derived from its class. Prefabs from other projects referencing this "
+                + "program will need pairing again.");
+            return asset;
+        }
+        string metaPath = assetPath + ".meta";
+        if (!File.Exists(metaPath))
+        {
+            return asset;
+        }
+        string meta = File.ReadAllText(metaPath);
+        string rewritten = Regex.Replace(
+            meta, @"^guid: [0-9a-fA-F]{32}", "guid: " + wanted, RegexOptions.Multiline);
+        if (rewritten == meta)
+        {
+            return asset;
+        }
+        File.WriteAllText(metaPath, rewritten);
+        AssetDatabase.ImportAsset(assetPath, ImportAssetOptions.ForceSynchronousImport);
+        var reloaded = AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(assetPath);
+        if (AssetDatabase.AssetPathToGUID(assetPath) != wanted)
+        {
+            Debug.LogWarning($"MenSharp: could not give {assetPath} its stable GUID.");
+        }
+        return reloaded != null ? reloaded : asset;
     }
 
     /// Where a compile's import time goes, summed over its programs.

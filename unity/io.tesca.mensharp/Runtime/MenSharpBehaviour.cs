@@ -16,6 +16,16 @@ namespace MenSharp
         [SerializeField, HideInInspector]
         private MenSharpDictionaryStore[] menSharpDictionaries;
 
+        // The UdonBehaviour this component is paired with, remembered so
+        // that the pair survives a trip through a unitypackage: in another
+        // project the program asset is a different object (or missing) and
+        // the hidden-in-inspector flag may be gone, but a reference between
+        // two components of one prefab is kept. The editor's sweep writes
+        // it and re-points the UdonBehaviour at the current program, so
+        // uGUI events targeting that UdonBehaviour keep working.
+        [SerializeField, HideInInspector]
+        private VRC.Udon.UdonBehaviour menSharpBacking;
+
         void ISerializationCallbackReceiver.OnBeforeSerialize()
         {
             menSharpDictionaries = MenSharpDictionarySerialization.Save(this);
