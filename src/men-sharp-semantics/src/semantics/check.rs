@@ -40,8 +40,10 @@
 //! share).
 
 use rustc_hash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use std::cell::RefCell;
 use std::collections::BTreeSet;
 use std::ops::Range;
+use std::rc::Rc;
 
 mod calls;
 mod checker;
@@ -508,8 +510,13 @@ struct LocalFunctionEntry<'ast> {
 
 struct Checker<'a, 'ast> {
     resolver: Resolver<'a, 'ast>,
-    /// Bounds recursive const-field binding as well as value evaluation.
+    /// Bounds the nesting of one constant expression's operators; field
+    /// recursion is bounded by [`ConstantCache`] instead.
     constant_depth: usize,
+    /// Values of source `const` fields, shared with the checkers spun up to
+    /// bind initializers not checked yet, so a chain of constants is
+    /// evaluated once per field rather than once per reference.
+    constant_cache: Rc<RefCell<ConstantCache>>,
     signatures: &'a Signatures,
     scopes: Vec<NamespaceScope<'ast>>,
     type_stack: Vec<SymbolId>,
@@ -621,6 +628,15 @@ fn type_parameter_leaves(ty: &Type) -> usize {
     }
 }
 
+/// Memo of source `const` field values. `in_progress` holds the fields
+/// whose initializers are being evaluated up the call stack: meeting one
+/// again is a cycle, which makes the field non-constant.
+#[derive(Default)]
+struct ConstantCache {
+    values: HashMap<SymbolId, Option<i128>>,
+    in_progress: HashSet<SymbolId>,
+}
+
 impl<'a, 'ast> Checker<'a, 'ast> {
     fn for_file(
         declarations: &'a Declarations<'ast>,
@@ -638,6 +654,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             },
             signatures,
             constant_depth: 64,
+            constant_cache: Rc::new(RefCell::new(ConstantCache::default())),
             scopes: Vec::new(),
             type_stack: Vec::new(),
             locals: Vec::new(),

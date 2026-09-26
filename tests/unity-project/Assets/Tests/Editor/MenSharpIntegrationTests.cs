@@ -362,6 +362,10 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("FieldInitializerOrder");
         Assert.AreEqual(11, smoke.GetProgramVariable("initializerTrace"));
 
+        // a chained constant from another file keeps its value through a byte compound assignment
+        smoke.RunProgram("ChainedConstants");
+        Assert.AreEqual((byte)29, smoke.GetProgramVariable("chainedConstant"));
+
         // a generic class's static constructor runs once per closed type
         smoke.RunProgram("GenericStaticConstructors");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));

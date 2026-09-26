@@ -1731,6 +1731,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         if bindings.is_empty() && !self.field_units_done.contains(&class) {
             self.field_units_in_progress.push(class);
+            // every static field of the class with initializer code gets its
+            // slot now, not only the ones some body happened to read: a
+            // unit is the whole class, and a field's initializer may read
+            // a field nobody else does (`S3 = S2 + 1`), which must already
+            // hold its value — textual order below, over the full set
+            self.materialize_static_fields(class);
             let mut fields: Vec<(SymbolId, FileId, usize)> = self
                 .static_init
                 .iter()
@@ -1762,6 +1768,44 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         {
             self.constructors_emitted.insert(key.clone());
             self.emit_static_constructor_call(&key, init_return);
+        }
+    }
+
+    /// Slots for the static fields of a (non-generic) class whose
+    /// initializers run as code, so that `emit_type_unit` sees the class's
+    /// complete field list. Shared statics were registered by the prologue;
+    /// a generic class's statics live in the registry, not in slots.
+    fn materialize_static_fields(&mut self, class: SymbolId) {
+        if !self.type_parameter_chain(class).is_empty() {
+            return;
+        }
+        let members = self.declarations.table.symbol(class).members.clone();
+        for field in members {
+            let symbol = self.declarations.table.symbol(field);
+            if !symbol.is_static || symbol.kind != SymbolKind::Field {
+                continue;
+            }
+            let Some(site) = symbol.declarations.first() else {
+                continue;
+            };
+            let SyntaxRef::Field { declarator, .. } = &site.syntax else {
+                continue;
+            };
+            let Some(InitializerValue::Expression(expression)) = &declarator.initializer else {
+                continue;
+            };
+            if self.static_storage(field) != StaticStorage::Local {
+                continue;
+            }
+            let ty = match self.signatures.members.get(&field) {
+                Some(MemberSignature::Field(ty)) => ty.clone(),
+                _ => continue,
+            };
+            let udon_type = self.heap_type(&ty);
+            if literal_heap_init(expression, &udon_type).is_some() {
+                continue;
+            }
+            self.ensure_static(field, false);
         }
     }
 

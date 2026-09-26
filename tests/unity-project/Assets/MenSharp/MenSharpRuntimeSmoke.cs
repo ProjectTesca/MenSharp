@@ -416,6 +416,16 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         initializerTrace = SmokeInitReader.Value;
     }
 
+    public byte chainedConstant;
+
+    public void ChainedConstants()
+    {
+        // a 30-link constant chain from another file narrows into a byte
+        byte b = 0;
+        b += SmokeConstants.S29;
+        chainedConstant = b;
+    }
+
     public void GenericStaticConstructors()
     {
         nestedGenericValue = SmokeOuter<int>.Inner.Value;

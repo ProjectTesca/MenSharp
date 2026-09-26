@@ -489,17 +489,40 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         })
     }
 
-    /// Bind an as-yet unchecked initializer in its own file/type scope.
-    /// Reusing the normal checker preserves aliases, qualified names and
-    /// integer promotion; a structural evaluator used to guess these from
-    /// syntax and made constant conversion depend on declaration order.
+    /// The value of a source `const` field, memoised per field. A cycle
+    /// (`const int K = L; const int L = K;`) is caught by the in-progress
+    /// set, so each field costs one evaluation however many references
+    /// or nesting levels lead to it.
     fn source_const_value(&self, field: SymbolId, depth: usize) -> Option<i128> {
         if depth == 0 {
             return None;
         }
+        {
+            let mut cache = self.constant_cache.borrow_mut();
+            if let Some(value) = cache.values.get(&field) {
+                return *value;
+            }
+            if !cache.in_progress.insert(field) {
+                return None;
+            }
+        }
+        let value = self.evaluate_source_const(field);
+        let mut cache = self.constant_cache.borrow_mut();
+        cache.in_progress.remove(&field);
+        cache.values.insert(field, value);
+        value
+    }
+
+    /// Bind an as-yet unchecked initializer in its own file/type scope.
+    /// Reusing the normal checker preserves aliases, qualified names and
+    /// integer promotion; a structural evaluator used to guess these from
+    /// syntax and made constant conversion depend on declaration order.
+    /// The initializer gets a full operator-depth budget of its own: field
+    /// recursion is bounded by the cache, not by the depth.
+    fn evaluate_source_const(&self, field: SymbolId) -> Option<i128> {
         let value = self.const_initializer(field)?;
         if self.expression_types.contains_key(&EntityID::from(value)) {
-            return self.constant_value_inner(value, depth);
+            return self.constant_value_inner(value, self.constant_depth);
         }
         let declarations = self.resolver.declarations;
         let file = declarations.table.symbol(field).declarations.first()?.file;
@@ -509,13 +532,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             .position(|candidate| candidate.file == file)?;
         let mut checker =
             Self::for_file(declarations, self.signatures, self.resolver.external, index);
-        checker.constant_depth = depth - 1;
+        checker.constant_cache = self.constant_cache.clone();
         if !checker.bind_constant_nodes(&declarations.files[index].members, field)
             || !checker.resolver.out.errors.is_empty()
         {
             return None;
         }
-        checker.constant_value_inner(value, depth - 1)
+        checker.constant_value_inner(value, self.constant_depth)
     }
 
     fn sizeof_constant(&self, target: &men_sharp_parser::ast::TypeRef<'ast, 'ast>) -> Option<i32> {

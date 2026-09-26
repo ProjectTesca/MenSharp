@@ -16216,3 +16216,141 @@ fn compound_constants_use_boolean_locals_without_converting_bool_to_int() {
     };
     assert!(messages.is_empty(), "{messages:?}");
 }
+
+#[test]
+fn chained_constants_are_evaluated_once_per_field() {
+    // `S1 = S0 + 1; S2 = S1 + 1; ...` in another file, and a chain declared
+    // below its use: each field is bound once, whatever the chain length,
+    // and its value survives a narrowing compound assignment.
+    let mut chain = String::from("public static class Chain { public const int S0 = 0;");
+    for index in 1..40 {
+        chain.push_str(&format!(" public const int S{index} = S{} + 1;", index - 1));
+    }
+    chain.push('}');
+    let mut sources = vec![
+        SourceCode::new(
+            "caller.cs",
+            r#"
+            using MenSharp;
+            public class Probe : MenSharpBehaviour {
+                public void Interact() {
+                    byte b = 0; b += Chain.S39; b += Local.L29;
+                    uint u = 0; u += Chain.S39;
+                    int x = Chain.S39 * 2;
+                }
+                public static class Local {
+                    public const int L0 = 0; public const int L1 = L0 + 1; public const int L2 = L1 + 1;
+                    public const int L3 = L2 + 1; public const int L4 = L3 + 1; public const int L5 = L4 + 1;
+                    public const int L6 = L5 + 1; public const int L7 = L6 + 1; public const int L8 = L7 + 1;
+                    public const int L9 = L8 + 1; public const int L10 = L9 + 1; public const int L11 = L10 + 1;
+                    public const int L12 = L11 + 1; public const int L13 = L12 + 1; public const int L14 = L13 + 1;
+                    public const int L15 = L14 + 1; public const int L16 = L15 + 1; public const int L17 = L16 + 1;
+                    public const int L18 = L17 + 1; public const int L19 = L18 + 1; public const int L20 = L19 + 1;
+                    public const int L21 = L20 + 1; public const int L22 = L21 + 1; public const int L23 = L22 + 1;
+                    public const int L24 = L23 + 1; public const int L25 = L24 + 1; public const int L26 = L25 + 1;
+                    public const int L27 = L26 + 1; public const int L28 = L27 + 1; public const int L29 = L28 + 1;
+                }
+            }
+        "#,
+        ),
+        SourceCode::new("chain.cs", chain),
+    ];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let started = std::time::Instant::now();
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(bodies.errors.is_empty(), "{:#?}", bodies.errors);
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(5),
+        "constant chains must not be re-evaluated per reference"
+    );
+}
+
+#[test]
+fn cyclic_constants_across_classes_are_rejected_without_looping() {
+    // The memo's in-progress set catches a cycle through two classes in
+    // two files; both fields are then non-constant.
+    let mut sources = vec![
+        SourceCode::new(
+            "caller.cs",
+            r#"
+            using MenSharp;
+            public class Probe : MenSharpBehaviour {
+                public void Interact() { byte b = 0; b += Left.K; b += Right.L; }
+            }
+            public static class Left { public const int K = Right.L + 1; }
+        "#,
+        ),
+        SourceCode::new(
+            "right.cs",
+            "public static class Right { public const int L = Left.K + 1; }",
+        ),
+    ];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    let mismatches = bodies
+        .errors
+        .iter()
+        .filter(|error| {
+            matches!(
+                error.kind,
+                men_sharp_semantics::SemanticErrorKind::TypeMismatch { .. }
+            )
+        })
+        .count();
+    assert_eq!(mismatches, 2, "{:#?}", bodies.errors);
+}
+
+#[test]
+fn chained_constants_initialize_in_declaration_order() {
+    // `S3 = S2 + 1` is initializer code (not a baked literal), so the class's
+    // unit must create and run every field's initializer in textual order —
+    // not only the fields a body read, which put S3 before S2 and gave 1
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public class Probe : MenSharpBehaviour {
+            public int a; public int b; public int c;
+            public void Interact() {
+                a = Chain.S3;
+                b = Chain.S3 * 2;
+                c = Chain.T3;
+            }
+        }
+        public static class Chain {
+            public const int S0 = 0;
+            public const int S1 = S0 + 1;
+            public const int S2 = S1 + 1;
+            public const int S3 = S2 + 1;
+            public static int T0 = 10;
+            public static int T1 = T0 + 1;
+            public static int T2 = T1 + 1;
+            public static int T3 = T2 + 1;
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "a"), 3);
+    assert_eq!(int_of(&emulator, "b"), 6);
+    assert_eq!(int_of(&emulator, "c"), 13);
+}

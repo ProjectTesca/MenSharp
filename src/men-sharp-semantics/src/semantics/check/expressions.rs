@@ -265,12 +265,12 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     use crate::types::conversions::NumericKind::*;
                     let system = self.system();
                     let pair = (system.numeric_kind(&ty), system.numeric_kind(other));
-                    let fits = self.integer_constant(expression).is_some_and(|v| v >= 0);
-                    if fits
-                        && matches!(
-                            pair,
-                            (Some(Int32), Some(UInt32 | UInt64)) | (Some(Int64), Some(UInt64))
-                        )
+                    // evaluate the constant only for a pair it could promote:
+                    // a const field costs a lookup or, once, an evaluation
+                    if matches!(
+                        pair,
+                        (Some(Int32), Some(UInt32 | UInt64)) | (Some(Int64), Some(UInt64))
+                    ) && self.integer_constant(expression).is_some_and(|v| v >= 0)
                     {
                         other.clone()
                     } else {
