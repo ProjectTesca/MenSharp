@@ -337,75 +337,7 @@ pub fn check_file(
 ) -> BodyCheck {
     let file = &declarations.files[file_index];
 
-    let mut checker = Checker {
-        resolver: Resolver {
-            declarations,
-            external,
-            file: file.file,
-            out: Signatures::default(),
-        },
-        signatures,
-        scopes: Vec::new(),
-        type_stack: Vec::new(),
-        locals: Vec::new(),
-        this_type: None,
-        static_context: true,
-        return_type: Type::Void,
-        lambda_probe_returns: None,
-        lambda_stack: Vec::new(),
-        current_member: None,
-        captures: HashMap::default(),
-        captured_locals: HashMap::default(),
-        capture_types: HashMap::default(),
-        local_functions: HashMap::default(),
-        local_calls: HashMap::default(),
-        declared_names: HashMap::default(),
-        static_local_functions: HashSet::default(),
-        local_order: 0,
-        local_function_order: HashMap::default(),
-        expression_types: HashMap::default(),
-        numeric_promotions: HashMap::default(),
-        attribute_types: HashMap::default(),
-        targets: HashMap::default(),
-        pattern_inputs: HashMap::default(),
-        enumerations: HashMap::default(),
-        disposals: HashMap::default(),
-        constructor_chains: HashMap::default(),
-        catch_depth: 0,
-        in_async: false,
-        awaits: HashMap::default(),
-        iterator_element: None,
-        yield_seen: false,
-        value_return_seen: false,
-        guarded_depth: 0,
-        catch_depth_for_yield: 0,
-        finally_depth: 0,
-        iterators: HashSet::default(),
-    };
-
-    // rebuild the same file scope signature resolution used
-    checker.scopes.push(NamespaceScope {
-        path: Vec::new(),
-        symbol: Some(declarations.table.root()),
-        usings: Vec::new(),
-    });
-    let mut root_usings = Vec::new();
-    for (_, using) in declarations.global_usings() {
-        if let Some(resolved) = checker.resolve_using(using) {
-            root_usings.push(resolved);
-        }
-    }
-    for using in &file.usings {
-        if using.global.is_none()
-            && let Some(resolved) = checker.resolve_using(using)
-        {
-            root_usings.push(resolved);
-        }
-    }
-    // using-target resolution errors were already reported by the resolve phase;
-    // this rebuild must not duplicate them
-    checker.resolver.out.errors.clear();
-    checker.scopes[0].usings = root_usings;
+    let mut checker = Checker::for_file(declarations, signatures, external, file_index);
 
     checker.walk_nodes(&file.members);
     checker.close_captures();
@@ -576,6 +508,8 @@ struct LocalFunctionEntry<'ast> {
 
 struct Checker<'a, 'ast> {
     resolver: Resolver<'a, 'ast>,
+    /// Bounds recursive const-field binding as well as value evaluation.
+    constant_depth: usize,
     signatures: &'a Signatures,
     scopes: Vec<NamespaceScope<'ast>>,
     type_stack: Vec<SymbolId>,
@@ -684,5 +618,88 @@ fn type_parameter_leaves(ty: &Type) -> usize {
             .map(|element| type_parameter_leaves(&element.element))
             .sum(),
         _ => 0,
+    }
+}
+
+impl<'a, 'ast> Checker<'a, 'ast> {
+    fn for_file(
+        declarations: &'a Declarations<'ast>,
+        signatures: &'a Signatures,
+        external: &'a dyn ExternalTypes,
+        file_index: usize,
+    ) -> Self {
+        let file = &declarations.files[file_index];
+        let mut checker = Checker {
+            resolver: Resolver {
+                declarations,
+                external,
+                file: file.file,
+                out: Signatures::default(),
+            },
+            signatures,
+            constant_depth: 64,
+            scopes: Vec::new(),
+            type_stack: Vec::new(),
+            locals: Vec::new(),
+            this_type: None,
+            static_context: true,
+            return_type: Type::Void,
+            lambda_probe_returns: None,
+            lambda_stack: Vec::new(),
+            current_member: None,
+            captures: HashMap::default(),
+            captured_locals: HashMap::default(),
+            capture_types: HashMap::default(),
+            local_functions: HashMap::default(),
+            local_calls: HashMap::default(),
+            declared_names: HashMap::default(),
+            static_local_functions: HashSet::default(),
+            local_order: 0,
+            local_function_order: HashMap::default(),
+            expression_types: HashMap::default(),
+            numeric_promotions: HashMap::default(),
+            attribute_types: HashMap::default(),
+            targets: HashMap::default(),
+            pattern_inputs: HashMap::default(),
+            enumerations: HashMap::default(),
+            disposals: HashMap::default(),
+            constructor_chains: HashMap::default(),
+            catch_depth: 0,
+            in_async: false,
+            awaits: HashMap::default(),
+            iterator_element: None,
+            yield_seen: false,
+            value_return_seen: false,
+            guarded_depth: 0,
+            catch_depth_for_yield: 0,
+            finally_depth: 0,
+            iterators: HashSet::default(),
+        };
+
+        // rebuild the same file scope signature resolution used
+        checker.scopes.push(NamespaceScope {
+            path: Vec::new(),
+            symbol: Some(declarations.table.root()),
+            usings: Vec::new(),
+        });
+        let mut root_usings = Vec::new();
+        for (_, using) in declarations.global_usings() {
+            if let Some(resolved) = checker.resolve_using(using) {
+                root_usings.push(resolved);
+            }
+        }
+        for using in &file.usings {
+            if using.global.is_none()
+                && let Some(resolved) = checker.resolve_using(using)
+            {
+                root_usings.push(resolved);
+            }
+        }
+        // using-target resolution errors were already reported by the resolve phase;
+        // this rebuild must not duplicate them
+        checker.resolver.out.errors.clear();
+        checker.scopes[0].usings = root_usings;
+
+        checker
     }
 }

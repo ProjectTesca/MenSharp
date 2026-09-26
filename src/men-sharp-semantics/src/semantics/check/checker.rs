@@ -303,10 +303,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
     /// Keep values only for const locals, never for ordinary variables whose
     /// initializer happens to be a literal.
     pub(super) fn integer_constant(&self, expression: &Expression<'ast, 'ast>) -> Option<i128> {
-        self.integer_constant_inner(expression, 64)
+        let ty = self.expression_types.get(&EntityID::from(expression))?;
+        self.system()
+            .numeric_kind(ty)
+            .filter(|kind| kind.is_integral())?;
+        self.constant_value_inner(expression, self.constant_depth)
     }
 
-    fn integer_constant_inner(
+    pub(super) fn constant_value_inner(
         &self,
         expression: &Expression<'ast, 'ast>,
         depth: usize,
@@ -315,11 +319,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         if depth == 0 {
             return None;
         }
-        let Some(ty) = self.expression_types.get(&EntityID::from(expression)) else {
-            return super::exhaustive::integer_literal_value(expression).map(i128::from);
-        };
-        let kind = self.system().numeric_kind(ty)?;
-        if !kind.is_integral() {
+        let ty = self.expression_types.get(&EntityID::from(expression))?;
+        let boolean = *ty == self.corlib("Boolean");
+        let kind = self
+            .system()
+            .numeric_kind(ty)
+            .filter(|kind| kind.is_integral());
+        if kind.is_none() && !boolean {
             return None;
         }
         let value = match expression {
@@ -348,6 +354,8 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                         match member.constant.as_ref()? {
                             crate::ExternalConstant::Int(v) => i128::from(*v),
                             crate::ExternalConstant::UInt(v) => i128::from(*v),
+                            crate::ExternalConstant::Boolean(v) => i128::from(*v),
+                            crate::ExternalConstant::Char(v) => i128::from(*v as u32),
                             _ => return None,
                         }
                     }
@@ -359,7 +367,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
             Expression::Primary(primary) if primary.chain.is_empty() => match &primary.left {
                 PrimaryLeft::Parenthesized { expression, .. } => {
-                    self.integer_constant_inner(expression, depth - 1)?
+                    self.constant_value_inner(expression, depth - 1)?
                 }
                 PrimaryLeft::Identifier { name, .. } => {
                     self.locals
@@ -372,23 +380,30 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     target_type: Ok(target_type),
                     ..
                 } => i128::from(self.sizeof_constant(target_type)?),
-                _ => i128::from(super::exhaustive::integer_literal_value(expression)?),
+                PrimaryLeft::Literal(LiteralExpression::True(_)) => 1,
+                PrimaryLeft::Literal(LiteralExpression::False(_)) => 0,
+                _ => super::exhaustive::wide_integer_literal_value(expression)?,
             },
             Expression::Cast(cast) => {
-                self.integer_constant_inner(cast.value.as_ref().ok()?, depth - 1)?
+                self.constant_value_inner(cast.value.as_ref().ok()?, depth - 1)?
             }
             Expression::Unary(unary) => {
-                let value = self.integer_constant_inner(unary.operand.as_ref().ok()?, depth - 1)?;
+                let value = self.constant_value_inner(unary.operand.as_ref().ok()?, depth - 1)?;
                 match unary.operator.value {
                     UnaryOperator::Plus => value,
                     UnaryOperator::Minus => value.checked_neg()?,
-                    UnaryOperator::BitwiseNot => !value,
+                    UnaryOperator::BitwiseNot => match kind? {
+                        UInt32 => i128::from(!(value as u32)),
+                        UInt64 => i128::from(!(value as u64)),
+                        _ => !value,
+                    },
+                    UnaryOperator::Not => i128::from(value == 0),
                     _ => return None,
                 }
             }
             Expression::Binary(binary) => {
-                let left = self.integer_constant_inner(&binary.left, depth - 1)?;
-                let right = self.integer_constant_inner(binary.right.as_ref().ok()?, depth - 1)?;
+                let left = self.constant_value_inner(&binary.left, depth - 1)?;
+                let right = self.constant_value_inner(binary.right.as_ref().ok()?, depth - 1)?;
                 match binary.operator.value {
                     BinaryOperator::Add => left.checked_add(right)?,
                     BinaryOperator::Subtract => left.checked_sub(right)?,
@@ -398,9 +413,18 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     BinaryOperator::BitwiseAnd => left & right,
                     BinaryOperator::BitwiseOr => left | right,
                     BinaryOperator::BitwiseXor => left ^ right,
+                    BinaryOperator::Equal => i128::from(left == right),
+                    BinaryOperator::NotEqual => i128::from(left != right),
+                    BinaryOperator::LessThan => i128::from(left < right),
+                    BinaryOperator::LessThanEqual => i128::from(left <= right),
+                    BinaryOperator::GreaterThan => i128::from(left > right),
+                    BinaryOperator::GreaterThanEqual => i128::from(left >= right),
+                    BinaryOperator::LogicalAnd => i128::from(left != 0 && right != 0),
+                    BinaryOperator::LogicalOr => i128::from(left != 0 || right != 0),
                     BinaryOperator::LeftShift
                     | BinaryOperator::RightShift
                     | BinaryOperator::UnsignedRightShift => {
+                        let kind = kind?;
                         let bits = if matches!(kind, Int64 | UInt64) {
                             64
                         } else {
@@ -428,9 +452,22 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     _ => return None,
                 }
             }
+            Expression::Conditional(conditional) => {
+                // Both branches must be constant, including the unselected one.
+                let condition = self.constant_value_inner(&conditional.condition, depth - 1)?;
+                let yes =
+                    self.constant_value_inner(conditional.then_value.as_ref().ok()?, depth - 1)?;
+                let no =
+                    self.constant_value_inner(conditional.else_value.as_ref().ok()?, depth - 1)?;
+                if condition != 0 { yes } else { no }
+            }
             _ => return None,
         };
-        integer_fits(kind, value).then_some(value)
+        if boolean {
+            matches!(value, 0 | 1).then_some(value)
+        } else {
+            integer_fits(kind?, value).then_some(value)
+        }
     }
 
     /// The initializer expression of a source `const` field, or `None` for
@@ -452,215 +489,38 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         })
     }
 
-    /// The value of a source `const` field. Its initializer may not have
-    /// been checked yet — it sits below the use, or in another class — so
-    /// an unchecked one is evaluated structurally against the field's
-    /// declared type rather than through the types recorded for it (which
-    /// made the answer depend on declaration order).
+    /// Bind an as-yet unchecked initializer in its own file/type scope.
+    /// Reusing the normal checker preserves aliases, qualified names and
+    /// integer promotion; a structural evaluator used to guess these from
+    /// syntax and made constant conversion depend on declaration order.
     fn source_const_value(&self, field: SymbolId, depth: usize) -> Option<i128> {
+        if depth == 0 {
+            return None;
+        }
         let value = self.const_initializer(field)?;
         if self.expression_types.contains_key(&EntityID::from(value)) {
-            return self.integer_constant_inner(value, depth);
+            return self.constant_value_inner(value, depth);
         }
-        let kind = match self.signatures.members.get(&field) {
-            Some(crate::types::MemberSignature::Field(ty)) => self.system().numeric_kind(ty)?,
-            _ => return None,
-        };
-        let owner = self.resolver.declarations.table.symbol(field).parent;
-        let value = self.untyped_integer_constant(value, owner, depth)?;
-        integer_fits(kind, value).then_some(value)
-    }
-
-    /// An integer constant expression no type was recorded for: literals,
-    /// parentheses, unary and binary operators, casts (their value; C#
-    /// rejects an out-of-range constant cast without `unchecked` anyway),
-    /// and names of `const` fields of `owner` or a type enclosing it.
-    fn untyped_integer_constant(
-        &self,
-        expression: &Expression<'ast, 'ast>,
-        owner: Option<SymbolId>,
-        depth: usize,
-    ) -> Option<i128> {
-        if depth == 0 {
+        let declarations = self.resolver.declarations;
+        let file = declarations.table.symbol(field).declarations.first()?.file;
+        let index = declarations
+            .files
+            .iter()
+            .position(|candidate| candidate.file == file)?;
+        let mut checker =
+            Self::for_file(declarations, self.signatures, self.resolver.external, index);
+        checker.constant_depth = depth - 1;
+        if !checker.bind_constant_nodes(&declarations.files[index].members, field)
+            || !checker.resolver.out.errors.is_empty()
+        {
             return None;
         }
-        match expression {
-            Expression::Primary(primary) if primary.chain.is_empty() => match &primary.left {
-                PrimaryLeft::Parenthesized { expression, .. } => {
-                    self.untyped_integer_constant(expression, owner, depth - 1)
-                }
-                PrimaryLeft::Identifier {
-                    name,
-                    generics: None,
-                    ..
-                } => {
-                    let field = self.const_field_named(owner, name.value)?;
-                    self.source_const_value(field, depth - 1)
-                }
-                PrimaryLeft::Literal(_) => {
-                    super::exhaustive::integer_literal_value(expression).map(i128::from)
-                }
-                PrimaryLeft::Sizeof {
-                    target_type: Ok(target_type),
-                    ..
-                } => self.sizeof_constant(target_type).map(i128::from),
-                _ => None,
-            },
-            Expression::Cast(cast) => {
-                self.untyped_integer_constant(cast.value.as_ref().ok()?, owner, depth - 1)
-            }
-            Expression::Unary(unary) => {
-                let value =
-                    self.untyped_integer_constant(unary.operand.as_ref().ok()?, owner, depth - 1)?;
-                match unary.operator.value {
-                    UnaryOperator::Plus => Some(value),
-                    UnaryOperator::Minus => value.checked_neg(),
-                    UnaryOperator::BitwiseNot => Some(!value),
-                    _ => None,
-                }
-            }
-            Expression::Binary(binary) => {
-                let right_expression = binary.right.as_ref().ok()?;
-                let left = self.untyped_integer_constant(&binary.left, owner, depth - 1)?;
-                let right = self.untyped_integer_constant(right_expression, owner, depth - 1)?;
-                match binary.operator.value {
-                    BinaryOperator::Add => left.checked_add(right),
-                    BinaryOperator::Subtract => left.checked_sub(right),
-                    BinaryOperator::Multiply => left.checked_mul(right),
-                    BinaryOperator::Divide => left.checked_div(right),
-                    BinaryOperator::Modulo => left.checked_rem(right),
-                    BinaryOperator::BitwiseAnd => Some(left & right),
-                    BinaryOperator::BitwiseOr => Some(left | right),
-                    BinaryOperator::BitwiseXor => Some(left ^ right),
-                    operator @ (BinaryOperator::LeftShift
-                    | BinaryOperator::RightShift
-                    | BinaryOperator::UnsignedRightShift) => {
-                        // the left operand's own type sets the width, as in
-                        // C#: `1 << 33` is an int shift by 1, `1L << 33` not
-                        let wide = self.untyped_is_long(&binary.left, owner, depth - 1);
-                        let bits: u32 = if wide { 64 } else { 32 };
-                        let count = (right as u32) & (bits - 1);
-                        Some(match (operator, wide) {
-                            (BinaryOperator::LeftShift, false) => {
-                                i128::from((left as i32).wrapping_shl(count))
-                            }
-                            (BinaryOperator::LeftShift, true) => {
-                                i128::from((left as i64).wrapping_shl(count))
-                            }
-                            (BinaryOperator::UnsignedRightShift, false) => {
-                                i128::from((left as u32) >> count)
-                            }
-                            (BinaryOperator::UnsignedRightShift, true) => {
-                                i128::from((left as u64) >> count)
-                            }
-                            (_, false) => i128::from((left as i32) >> count),
-                            (_, true) => i128::from((left as i64) >> count),
-                        })
-                    }
-                    _ => None,
-                }
-            }
-            _ => None,
-        }
+        checker.constant_value_inner(value, depth - 1)
     }
 
-    /// Is an unchecked integer constant expression a `long`/`ulong` rather
-    /// than an `int`/`uint`? A suffixed or out-of-uint-range literal, or a
-    /// const field declared so; for an operator, either operand.
-    fn untyped_is_long(
-        &self,
-        expression: &Expression<'ast, 'ast>,
-        owner: Option<SymbolId>,
-        depth: usize,
-    ) -> bool {
-        use crate::types::conversions::NumericKind::{Int64, UInt64};
-        if depth == 0 {
-            return false;
-        }
-        match expression {
-            Expression::Primary(primary) if primary.chain.is_empty() => match &primary.left {
-                PrimaryLeft::Parenthesized { expression, .. } => {
-                    self.untyped_is_long(expression, owner, depth - 1)
-                }
-                PrimaryLeft::Literal(LiteralExpression::Integer(text)) => {
-                    let suffixed = text.value.to_ascii_lowercase().contains('l');
-                    suffixed
-                        || super::exhaustive::integer_literal_value(expression)
-                            .is_none_or(|value| u32::try_from(value).is_err())
-                }
-                PrimaryLeft::Identifier { name, .. } => self
-                    .const_field_named(owner, name.value)
-                    .and_then(|field| match self.signatures.members.get(&field) {
-                        Some(crate::types::MemberSignature::Field(ty)) => {
-                            self.system().numeric_kind(ty)
-                        }
-                        _ => None,
-                    })
-                    .is_some_and(|kind| matches!(kind, Int64 | UInt64)),
-                _ => false,
-            },
-            Expression::Unary(unary) => unary
-                .operand
-                .as_ref()
-                .is_ok_and(|operand| self.untyped_is_long(operand, owner, depth - 1)),
-            Expression::Binary(binary) => {
-                let shift = matches!(
-                    binary.operator.value,
-                    BinaryOperator::LeftShift
-                        | BinaryOperator::RightShift
-                        | BinaryOperator::UnsignedRightShift
-                );
-                self.untyped_is_long(&binary.left, owner, depth - 1)
-                    || (!shift
-                        && binary
-                            .right
-                            .as_ref()
-                            .is_ok_and(|right| self.untyped_is_long(right, owner, depth - 1)))
-            }
-            _ => false,
-        }
-    }
-
-    /// The value of `sizeof(T)`: from the type the checker resolved for it,
-    /// or — in an initializer not checked yet — from the keyword spelled.
     fn sizeof_constant(&self, target: &men_sharp_parser::ast::TypeRef<'ast, 'ast>) -> Option<i32> {
-        use men_sharp_parser::ast::{PredefinedType as P, TypeRefBase};
-        if let Some(ty) = self.resolver.out.type_of.get(&EntityID::from(target)) {
-            return self.system().sizeof_value(ty);
-        }
-        let TypeRefBase::Predefined(predefined) = &target.base else {
-            return None;
-        };
-        if !target.suffixes.is_empty() {
-            return None;
-        }
-        Some(match predefined.value {
-            P::Bool | P::Byte | P::Sbyte => 1,
-            P::Char | P::Short | P::Ushort => 2,
-            P::Int | P::Uint | P::Float => 4,
-            P::Long | P::Ulong | P::Double => 8,
-            P::Decimal => 16,
-            _ => return None,
-        })
-    }
-
-    /// A `const` field called `name` on `owner` or a type enclosing it.
-    fn const_field_named(&self, owner: Option<SymbolId>, name: &str) -> Option<SymbolId> {
-        let table = &self.resolver.declarations.table;
-        let mut current = owner;
-        while let Some(ty) = current {
-            let symbol = table.symbol(ty);
-            if let Some(field) = symbol
-                .members_named(name)
-                .iter()
-                .copied()
-                .find(|&member| self.const_initializer(member).is_some())
-            {
-                return Some(field);
-            }
-            current = symbol.parent;
-        }
-        None
+        let ty = self.resolver.out.type_of.get(&EntityID::from(target))?;
+        self.system().sizeof_value(ty)
     }
 
     /// The constant-expression allowance, without evaluating: an integer

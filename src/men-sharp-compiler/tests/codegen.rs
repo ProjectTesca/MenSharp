@@ -16065,3 +16065,154 @@ fn static_field_initializers_are_part_of_their_classs_initialization() {
     };
     assert_eq!(int_of(&emulator, "x"), 11);
 }
+
+#[test]
+fn compound_constants_keep_types_and_declaration_scope() {
+    // The RHS must be evaluated in its declaration's scope, with its real
+    // signedness and width, even before that initializer has been checked.
+    for expression in [
+        "Other.N + 1",
+        "sizeof(System.Int32)",
+        "(int)(0xffffffffu >> 31)",
+        "(int)(0xffffffffffffffffUL >> 63)",
+        "(int)(((long)1 << 32) >> 32)",
+        "(int)(~0xfffffffeu)",
+        "(int)(~0xfffffffffffffffeUL)",
+        "true ? 1 : 2",
+        "Other.Flag && Other.N == 2 ? 1 : 2",
+    ] {
+        for target in ["sbyte", "byte", "short", "ushort", "uint", "ulong"] {
+            for before in [true, false] {
+                let constant = format!("const int K = {expression};");
+                let method = format!("public void Interact() {{ {target} b = 1; b += K; }}");
+                let body = if before {
+                    format!("{constant} {method}")
+                } else {
+                    format!("{method} {constant}")
+                };
+                let source = format!(
+                    "using MenSharp; public class Probe : MenSharpBehaviour {{ {body} }}
+                     public class Other {{ public const int N = 2; public const bool Flag = true; }}"
+                );
+                let Some(messages) = codegen_messages(&source, "Probe") else {
+                    return;
+                };
+                assert!(
+                    messages.is_empty(),
+                    "{target}: {expression}, before={before}: {messages:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn compound_constants_resolve_aliases_in_the_declaring_file() {
+    // The caller has a different alias and a shadowing constant: neither
+    // may change a constant declared in another file or a nested type.
+    let mut sources = vec![
+        SourceCode::new(
+            "caller.cs",
+            r#"
+            using MenSharp;
+            using Number = System.Int64;
+            public class Probe : MenSharpBehaviour {
+                const int N = 1000;
+                public void Interact() { byte b = 0; b += Values.Outer.Inner.K; }
+            }
+        "#,
+        ),
+        SourceCode::new(
+            "values.cs",
+            r#"
+            namespace Values {
+                using Number = System.Int32;
+                public class Outer {
+                    public const int N = 2;
+                    public class Inner { public const int K = Outer.N + sizeof(Number); }
+                }
+            }
+        "#,
+        ),
+    ];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(bodies.errors.is_empty(), "{:#?}", bodies.errors);
+}
+
+#[test]
+fn compound_constants_do_not_admit_nonconstants_or_out_of_range_values() {
+    // A selected branch fitting byte does not make a nonconstant expression
+    // constant. Cycles must also terminate instead of recursively rebinding.
+    for declaration in [
+        "const int K = true ? 256 : 1;",
+        "const int K = false ? 1 : -1;",
+        "const int K = (int)(0xffffffffu >> 23);",
+        "static readonly int K = 1;",
+        "const bool K = true;",
+        "static int X = 1; const int K = true ? 1 : X;",
+        "const int K = L; const int L = K;",
+    ] {
+        let mut sources = vec![SourceCode::new(
+            "test.cs",
+            format!(
+                "using MenSharp; public class Probe : MenSharpBehaviour {{
+                public void Interact() {{ byte b = 0; b += K; }} {declaration}
+            }}"
+            ),
+        )];
+        sources.extend(Compiler::corlib_sources());
+        let Some(dir) = dotnet_shared_dir() else {
+            return;
+        };
+        let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+        let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+        let references = compiler.load_references(&bytes).unwrap();
+        let files = compiler.parse(sources);
+        let declarations = compiler.collect_declarations(&files);
+        let signatures = compiler.resolve_signatures(&declarations, &references);
+        let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+        assert!(
+            bodies.errors.iter().any(|error| matches!(
+                error.kind,
+                men_sharp_semantics::SemanticErrorKind::TypeMismatch { .. }
+                    | men_sharp_semantics::SemanticErrorKind::InvalidOperator { .. }
+            )),
+            "{declaration}: {:#?}",
+            bodies.errors
+        );
+    }
+}
+
+#[test]
+fn compound_constants_use_boolean_locals_without_converting_bool_to_int() {
+    // A const bool may select an integral constant, but the bool itself
+    // must never be accepted as an integral constant conversion.
+    let Some(messages) = codegen_messages(
+        r#"
+        using MenSharp;
+        public class Probe : MenSharpBehaviour {
+            public void Interact() {
+                const bool flag = true;
+                const bool other = !flag;
+                const int step = flag && !other ? 1 : 2;
+                byte b = 0;
+                b += step;
+            }
+        }
+        "#,
+        "Probe",
+    ) else {
+        return;
+    };
+    assert!(messages.is_empty(), "{messages:?}");
+}

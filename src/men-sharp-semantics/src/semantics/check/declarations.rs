@@ -27,7 +27,7 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         }
     }
 
-    fn walk_namespace(&mut self, node: &NamespaceNode<'ast>) {
+    fn enter_namespace(&mut self, node: &NamespaceNode<'ast>) -> usize {
         let pushed = node.name.len();
 
         for segment in node.name {
@@ -65,10 +65,63 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             scope.usings = usings;
         }
 
+        pushed
+    }
+
+    fn walk_namespace(&mut self, node: &NamespaceNode<'ast>) {
+        let pushed = self.enter_namespace(node);
         self.walk_nodes(&node.members);
 
         let keep = self.scopes.len() - pushed;
         self.scopes.truncate(keep);
+    }
+
+    pub(super) fn bind_constant_nodes(
+        &mut self,
+        nodes: &[DeclarationNode<'ast>],
+        field: SymbolId,
+    ) -> bool {
+        for node in nodes {
+            let found = match node {
+                DeclarationNode::Namespace(namespace) => {
+                    let pushed = self.enter_namespace(namespace);
+                    let found = self.bind_constant_nodes(&namespace.members, field);
+                    self.scopes.truncate(self.scopes.len() - pushed);
+                    found
+                }
+                DeclarationNode::Type(node) => self.bind_constant_type(node, field),
+            };
+            if found {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn bind_constant_type(&mut self, node: &TypeNode<'ast>, field: SymbolId) -> bool {
+        let Some(symbol) = self
+            .resolver
+            .declarations
+            .symbol_of(node.syntax.entity_id())
+        else {
+            return false;
+        };
+        self.type_stack.push(symbol);
+        let found = if let Some(member) = node.members.iter().find(|member| {
+            self.resolver
+                .declarations
+                .symbol_of(member.syntax.entity_id())
+                == Some(field)
+        }) {
+            self.check_member(member);
+            true
+        } else {
+            node.nested
+                .iter()
+                .any(|nested| self.bind_constant_type(nested, field))
+        };
+        self.type_stack.pop();
+        found
     }
 
     fn check_type_declaration(&mut self, node: &TypeNode<'ast>) {

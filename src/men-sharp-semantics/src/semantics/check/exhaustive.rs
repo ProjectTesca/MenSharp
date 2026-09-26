@@ -90,8 +90,13 @@ fn bool_literal(expression: &Expression) -> Option<bool> {
 /// allowed to be. Anything else is `None`: the member is then a case of
 /// its own, which is right unless it aliases another.
 pub(super) fn integer_literal_value(expression: &Expression) -> Option<i64> {
+    i64::try_from(wide_integer_literal_value(expression)?).ok()
+}
+
+/// Constant binding also needs unsigned literals above i64::MAX.
+pub(super) fn wide_integer_literal_value(expression: &Expression) -> Option<i128> {
     if let Expression::Unary(unary) = expression {
-        let value = integer_literal_value(unary.operand.as_ref().ok()?)?;
+        let value = wide_integer_literal_value(unary.operand.as_ref().ok()?)?;
         return match unary.operator.value {
             men_sharp_parser::ast::UnaryOperator::Plus => Some(value),
             men_sharp_parser::ast::UnaryOperator::Minus => value.checked_neg(),
@@ -105,7 +110,7 @@ pub(super) fn integer_literal_value(expression: &Expression) -> Option<i64> {
         return None;
     }
     if let PrimaryLeft::Parenthesized { expression, .. } = &primary.left {
-        return integer_literal_value(expression);
+        return wide_integer_literal_value(expression);
     }
     let PrimaryLeft::Literal(LiteralExpression::Integer(text)) = &primary.left else {
         return None;
@@ -116,12 +121,12 @@ pub(super) fn integer_literal_value(expression: &Expression) -> Option<i64> {
         .strip_prefix("0x")
         .or_else(|| digits.strip_prefix("0X"))
     {
-        i64::from_str_radix(hex, 16).ok()
+        i128::from_str_radix(hex, 16).ok()
     } else if let Some(bits) = digits
         .strip_prefix("0b")
         .or_else(|| digits.strip_prefix("0B"))
     {
-        i64::from_str_radix(bits, 2).ok()
+        i128::from_str_radix(bits, 2).ok()
     } else {
         digits.parse().ok()
     }

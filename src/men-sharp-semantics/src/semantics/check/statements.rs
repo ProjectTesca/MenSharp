@@ -365,7 +365,9 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
             let constant = if declaration.const_keyword.is_some() {
                 match &declarator.initializer {
-                    Some(InitializerValue::Expression(value)) => self.integer_constant(value),
+                    Some(InitializerValue::Expression(value)) => {
+                        self.constant_value_inner(value, self.constant_depth)
+                    }
                     _ => None,
                 }
             } else {
