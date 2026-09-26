@@ -72,7 +72,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 ctx.loop_stack.pop();
                 self.program.code.push(Op::Label(continue_label));
                 if let Ok(condition) = &statement.condition
-                    && let Some(value) = self.lower_expression(ctx, condition)
+                    && let Some(value) = self.lower_condition(ctx, condition)
                 {
                     self.program.code.push(Op::Push(value));
                     self.program
@@ -100,7 +100,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let break_label = self.fresh_label("for_break");
                 self.program.code.push(Op::Label(head));
                 if let Some(condition) = &statement.condition
-                    && let Some(value) = self.lower_expression(ctx, condition)
+                    && let Some(value) = self.lower_condition(ctx, condition)
                 {
                     self.program.code.push(Op::Push(value));
                     self.program
@@ -375,9 +375,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
     }
 
+    /// A condition as a `bool`: the expression's own value when it is one,
+    /// otherwise its implicit conversion — `if (target)` on a behaviour or
+    /// any `UnityEngine.Object` is the engine's `op_Implicit` to bool
+    /// (alive and not destroyed), as in Unity C#.
+    fn lower_condition(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        condition: &'ast Expression<'ast, 'ast>,
+    ) -> Option<DataId> {
+        let value = self.lower_expression(ctx, condition)?;
+        let ty = self.type_of(ctx, condition);
+        Some(self.as_boolean(ctx, value, &ty, condition.span()))
+    }
+
+    pub(super) fn as_boolean(
+        &mut self,
+        ctx: &mut Ctx<'ast>,
+        value: DataId,
+        ty: &Type,
+        span: Range<usize>,
+    ) -> DataId {
+        let boolean = self.corlib_type("Boolean");
+        if *ty == boolean || matches!(ty, Type::Error) {
+            return value;
+        }
+        self.convert(ctx, value, ty, &boolean, span)
+    }
+
     fn lower_if(&mut self, ctx: &mut Ctx<'ast>, statement: &'ast IfStatement<'ast, 'ast>) {
         let condition = match &statement.condition {
-            Ok(condition) => self.lower_expression(ctx, condition),
+            Ok(condition) => self.lower_condition(ctx, condition),
             Err(()) => None,
         };
         // a constant condition — `typeof(T) == typeof(int)`, `Reflect
@@ -421,7 +449,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let break_label = self.fresh_label("while_break");
         self.program.code.push(Op::Label(head));
         if let Ok(condition) = &statement.condition
-            && let Some(value) = self.lower_expression(ctx, condition)
+            && let Some(value) = self.lower_condition(ctx, condition)
         {
             self.program.code.push(Op::Push(value));
             self.program
@@ -866,7 +894,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             .code
                             .push(Op::JumpIfFalse(Target::Label(next_label)));
                         if let Some(guard) = guard
-                            && let Some(condition) = self.lower_expression(ctx, guard)
+                            && let Some(condition) = self.lower_condition(ctx, guard)
                         {
                             self.program.code.push(Op::Push(condition));
                             self.program
@@ -940,7 +968,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 self.program.code.push(Op::Push(matched));
                 self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
                 if let Some(guard) = &arm.guard
-                    && let Some(condition) = self.lower_expression(ctx, guard)
+                    && let Some(condition) = self.lower_condition(ctx, guard)
                 {
                     self.program.code.push(Op::Push(condition));
                     self.program.code.push(Op::JumpIfFalse(Target::Label(next)));
@@ -1068,7 +1096,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 let result = self.temp_for(&ty);
                 let else_label = self.fresh_label("cond_else");
                 let end_label = self.fresh_label("cond_end");
-                if let Some(condition) = self.lower_expression(ctx, &conditional.condition) {
+                if let Some(condition) = self.lower_condition(ctx, &conditional.condition) {
                     self.program.code.push(Op::Push(condition));
                     self.program
                         .code
@@ -1689,7 +1717,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         use BinaryOperator::*;
 
         if matches!(binary.operator.value, LogicalAnd | LogicalOr) {
-            let left = self.lower_expression(ctx, &binary.left)?;
+            let left = self.lower_condition(ctx, &binary.left)?;
             // a constant left side decides: `Reflect.IsArray<T>() && ...`
             // is the right side or nothing, so what the right side names
             // only has to exist for the `T` that gets there
@@ -1701,7 +1729,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if decided {
                     return Some(left);
                 }
-                return self.lower_expression(ctx, binary.right.as_ref().ok()?);
+                return self.lower_condition(ctx, binary.right.as_ref().ok()?);
             }
             let result = self.temp("SystemBoolean");
             let short_label = self.fresh_label("logic_short");
@@ -1732,7 +1760,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 }
             }
             if let Ok(right) = &binary.right
-                && let Some(right) = self.lower_expression(ctx, right)
+                && let Some(right) = self.lower_condition(ctx, right)
             {
                 self.copy(right, result);
             }
@@ -2056,6 +2084,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 operator == NotEqual,
                 span,
             );
+        }
+
+        // a behaviour — an UdonBehaviour at run time — against another or
+        // against null: the engine's `==`, which also holds for a destroyed
+        // object, as Unity C# means it (reference identity would not)
+        if matches!(operator, Equal | NotEqual)
+            && (self.is_behaviour_reference(left.1) || self.is_behaviour_reference(right.1))
+        {
+            let out = self.temp("SystemBoolean");
+            self.call_extern(
+                ctx,
+                &format!(
+                    "UnityEngineObject.__{name}__UnityEngineObject_UnityEngineObject__SystemBoolean"
+                ),
+                &[left.0, right.0, out],
+                span,
+            );
+            return Some(out);
         }
 
         // a source enum computes as its storage type: an int against an
@@ -2467,6 +2513,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         };
         match operator {
             UnaryOperator::Not => {
+                // `!target`: the operand's implicit conversion to bool first
+                let operand = self.as_boolean(ctx, operand, operand_type, span.clone());
                 let out = self.temp("SystemBoolean");
                 self.call_extern(
                     ctx,
@@ -3125,6 +3173,37 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         );
     }
 
+    /// An external instance member used without a receiver inside a
+    /// behaviour — `name`, `enabled = false`, `GetInstanceID()`,
+    /// `GetComponent<T>()` — is a member of the UdonBehaviour the program
+    /// runs on: the Unity-side twin derives from MonoBehaviour, and so does
+    /// the corlib's. That UdonBehaviour (the `this` slot Udon fills in)
+    /// is the receiver; anything else is left as it was.
+    pub(super) fn with_engine_receiver(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        is_static: bool,
+        receiver: Option<(DataId, Type)>,
+    ) -> Option<(DataId, Type)> {
+        if is_static || receiver.is_some() || ctx.this_slot.is_some() || self.entry_class.is_none()
+        {
+            return receiver;
+        }
+        let marker = self.marker?;
+        let member = self
+            .declarations
+            .table
+            .symbol(marker)
+            .members_named("udonBehaviour")
+            .first()
+            .copied()?;
+        let ty = match self.signatures.members.get(&member) {
+            Some(MemberSignature::Property(ty)) | Some(MemberSignature::Field(ty)) => ty.clone(),
+            _ => return None,
+        };
+        Some((self.self_behaviour_slot(), ty))
+    }
+
     pub(super) fn member_place(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -3142,14 +3221,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 // resolves the reference against the behaviour that owns the
                 // heap, so there is no way to ask another one
                 if let Some(slot) = self.self_reference_slot(symbol) {
-                    if receiver.is_some() {
-                        self.error(
-                            ctx,
-                            Message::key("codegen.a0_is_only_available_on_the_behaviour")
-                                .arg("a0", self.declarations.table.symbol(symbol).name),
-                            span,
-                        );
-                        return Place::Error;
+                    if let Some((receiver_slot, _)) = receiver {
+                        // another behaviour's: at run time it is the
+                        // UdonBehaviour, a Component the engine's accessor
+                        // answers for — no slot of that program is needed
+                        let name = self.declarations.table.symbol(symbol).name;
+                        let Some(value_type) = self.extern_type_name(&member_type) else {
+                            self.error(
+                                ctx,
+                                Message::key("codegen.a0_is_only_available_on_the_behaviour")
+                                    .arg("a0", name),
+                                span,
+                            );
+                            return Place::Error;
+                        };
+                        let signature = format!("UnityEngineComponent.__get_{name}__{value_type}");
+                        let out = self.temp_for(&member_type);
+                        self.call_extern(ctx, &signature, &[receiver_slot, out], span);
+                        return Place::Slot(out, member_type);
                     }
                     return Place::SelfReference {
                         slot,
@@ -3308,6 +3397,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             MemberOrigin::External {
                 member: external, ..
             } => {
+                let receiver = self.with_engine_receiver(ctx, member.is_static, receiver);
                 // `x.HasValue` / `x.Value` on a `T?`
                 if let Some(place) =
                     self.try_nullable_member(ctx, &receiver, &external.name, span.clone())
@@ -5191,6 +5281,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             MemberOrigin::External { member, owner } => {
                 let member_name = member.name.clone();
+                let receiver = self.with_engine_receiver(ctx, call.is_static, receiver);
                 // `f(1)` / `f.Invoke(1)` on a `Func`/`Action`/...: no extern,
                 // the delegate is the compiler's own
                 if member_name == "Invoke"

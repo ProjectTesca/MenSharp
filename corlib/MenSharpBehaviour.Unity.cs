@@ -2,16 +2,23 @@
 //
 // The same type as MenSharpBehaviour.cs — exactly one of the two files is
 // compiled, chosen by whether UnityEngine is among the references (see
-// Compiler::corlib_sources_for). This one adds the members every Unity
-// component inherits from UnityEngine.Component, so that source written
-// against the Unity-side MenSharpBehaviour (which really does derive from
-// MonoBehaviour) means the same thing to this compiler.
+// Compiler::corlib_sources_for). This one derives from MonoBehaviour, as the
+// Unity-side MenSharpBehaviour really does, so that source written against
+// that twin means the same thing to this compiler: `name`, `enabled`,
+// `isActiveAndEnabled`, `GetInstanceID()`, `GetComponent<T>()`, `==` and
+// `if (target)` are the engine's, on the behaviour itself and on any other
+// behaviour it holds. At run time every behaviour value *is* its
+// UdonBehaviour — a Component — so those members are the engine's externs
+// on that value (the codegen's `with_engine_receiver` supplies the program's
+// own UdonBehaviour when there is no receiver written). What Udon does not
+// expose (`tag`, `hideFlags`) is reported as such.
 //
-// Udon has no `this`: these are not calls but heap slots the SDK assembler
-// initialises with its `this` literal, which the UdonBehaviour resolves to the
-// GameObject it is attached to (and that GameObject's Transform) before the
-// first event runs. Every member declared *directly* on this class is lowered
-// that way, so adding one here is how the set grows.
+// Udon has no `this`: `gameObject`, `transform` and `udonBehaviour` below
+// are not calls but heap slots the SDK assembler initialises with its `this`
+// literal, which the UdonBehaviour resolves to the GameObject it is attached
+// to (and that GameObject's Transform) before the first event runs. Every
+// auto-property declared *directly* on this class is lowered that way; on
+// another behaviour the same names are the Component accessors instead.
 //
 // They are get-only on purpose: the Unity-side twin inherits them from
 // Component, where they are read-only properties, and the same source file is
@@ -19,11 +26,11 @@
 
 namespace MenSharp
 {
-    public class MenSharpBehaviour
+    public class MenSharpBehaviour : UnityEngine.MonoBehaviour
     {
-        public UnityEngine.GameObject gameObject { get; }
+        public new UnityEngine.GameObject gameObject { get; }
 
-        public UnityEngine.Transform transform { get; }
+        public new UnityEngine.Transform transform { get; }
 
         private System.Threading.CancellationTokenSource destroyTokenSource;
 
@@ -133,119 +140,6 @@ namespace MenSharp
             UnityEngine.GameObject clone = Instantiate(original);
             clone.transform.SetParent(parent, false);
             return clone;
-        }
-
-        // Unity lets you write these without a receiver, because they are
-        // inherited from Component. Forwarding keeps the same source valid
-        // here: `T` is monomorphized, so each instantiation reaches the extern
-        // with its own typeof(T).
-        public T GetComponent<T>()
-        {
-            return gameObject.GetComponent<T>();
-        }
-
-        public T GetComponentInChildren<T>()
-        {
-            return gameObject.GetComponentInChildren<T>();
-        }
-
-        public T GetComponentInChildren<T>(bool includeInactive)
-        {
-            return gameObject.GetComponentInChildren<T>(includeInactive);
-        }
-
-        public T GetComponentInParent<T>()
-        {
-            return gameObject.GetComponentInParent<T>();
-        }
-
-        public T GetComponentInParent<T>(bool includeInactive)
-        {
-            return gameObject.GetComponentInParent<T>(includeInactive);
-        }
-
-        public T[] GetComponents<T>()
-        {
-            return gameObject.GetComponents<T>();
-        }
-
-        public T[] GetComponentsInChildren<T>()
-        {
-            return gameObject.GetComponentsInChildren<T>();
-        }
-
-        public T[] GetComponentsInChildren<T>(bool includeInactive)
-        {
-            return gameObject.GetComponentsInChildren<T>(includeInactive);
-        }
-
-        public T[] GetComponentsInParent<T>()
-        {
-            return gameObject.GetComponentsInParent<T>();
-        }
-
-        public T[] GetComponentsInParent<T>(bool includeInactive)
-        {
-            return gameObject.GetComponentsInParent<T>(includeInactive);
-        }
-
-        // The `System.Type` / name forms, for engine types (a program type
-        // has no `System.Type` on Udon: use the generic form for those).
-        // The `List<T>` overloads are left out: M#'s `List<T>` is its own,
-        // not the engine's, so Udon's externs could not fill it.
-        public UnityEngine.Component GetComponent(System.Type type)
-        {
-            return gameObject.GetComponent(type);
-        }
-
-        public UnityEngine.Component GetComponent(string type)
-        {
-            return gameObject.GetComponent(type);
-        }
-
-        public UnityEngine.Component GetComponentInChildren(System.Type type)
-        {
-            return gameObject.GetComponentInChildren(type);
-        }
-
-        public UnityEngine.Component GetComponentInChildren(System.Type type, bool includeInactive)
-        {
-            return gameObject.GetComponentInChildren(type, includeInactive);
-        }
-
-        public UnityEngine.Component GetComponentInParent(System.Type type)
-        {
-            return gameObject.GetComponentInParent(type);
-        }
-
-        public UnityEngine.Component GetComponentInParent(System.Type type, bool includeInactive)
-        {
-            return gameObject.GetComponentInParent(type, includeInactive);
-        }
-
-        public UnityEngine.Component[] GetComponents(System.Type type)
-        {
-            return gameObject.GetComponents(type);
-        }
-
-        public UnityEngine.Component[] GetComponentsInChildren(System.Type type)
-        {
-            return gameObject.GetComponentsInChildren(type);
-        }
-
-        public UnityEngine.Component[] GetComponentsInChildren(System.Type type, bool includeInactive)
-        {
-            return gameObject.GetComponentsInChildren(type, includeInactive);
-        }
-
-        public UnityEngine.Component[] GetComponentsInParent(System.Type type)
-        {
-            return gameObject.GetComponentsInParent(type);
-        }
-
-        public UnityEngine.Component[] GetComponentsInParent(System.Type type, bool includeInactive)
-        {
-            return gameObject.GetComponentsInParent(type, includeInactive);
         }
 
         // Udon has no TryGetComponent extern at all, so this is written out

@@ -123,6 +123,15 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// value is not an object: it has no type id, its members are reached by
     /// name, and a slot holding one is typed as what Udon lets programs
     /// talk through.
+    /// A program reference, or `MenSharpBehaviour` itself: anything whose
+    /// value is an UdonBehaviour at run time.
+    pub(super) fn is_behaviour_reference(&self, ty: &Type) -> bool {
+        if self.is_program_reference(ty) {
+            return true;
+        }
+        matches!(ty, Type::Named { target: TypeTarget::Source(symbol), .. } if Some(*symbol) == self.marker)
+    }
+
     pub(super) fn is_program_reference(&self, ty: &Type) -> bool {
         match ty {
             Type::Named {

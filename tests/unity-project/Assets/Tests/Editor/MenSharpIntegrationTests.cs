@@ -257,6 +257,31 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(true, caller.GetProgramVariable("done"));
         Assert.AreEqual(42, caller.GetProgramVariable("result"));
 
+        // engine members on the behaviour itself and on another (issue: name,
+        // enabled, GetInstanceID, ==, if (target) on MenSharpBehaviours)
+        UdonBehaviour targetUdon = FindUdon("MenSharpRuntimeTarget");
+        caller.RunProgram("EngineMembers");
+        Assert.AreEqual("MenSharpRuntimeCaller", caller.GetProgramVariable("selfName"));
+        Assert.AreEqual("MenSharpRuntimeTarget", caller.GetProgramVariable("targetName"));
+        Assert.AreEqual("MenSharpRuntimeTarget", caller.GetProgramVariable("targetObjectName"));
+        Assert.AreEqual("MenSharpRuntimeTarget", caller.GetProgramVariable("targetTransformName"));
+        StringAssert.Contains("MenSharpRuntimeTarget", (string)caller.GetProgramVariable("targetText"));
+        Assert.AreEqual(true, caller.GetProgramVariable("targetWasEnabled"));
+        Assert.AreEqual(true, caller.GetProgramVariable("targetDisabled"));
+        Assert.AreEqual(true, caller.GetProgramVariable("targetReenabled"));
+        Assert.AreEqual(caller.GetInstanceID(), caller.GetProgramVariable("selfId"));
+        Assert.AreEqual(targetUdon.GetInstanceID(), caller.GetProgramVariable("targetId"));
+        Assert.AreEqual(true, caller.GetProgramVariable("idsDiffer"));
+        Assert.AreEqual(false, caller.GetProgramVariable("sameAsSelf"));
+        Assert.AreEqual(true, caller.GetProgramVariable("sameAsTarget"));
+        Assert.AreEqual(true, caller.GetProgramVariable("nullIsNull"));
+        Assert.AreEqual(true, caller.GetProgramVariable("alive"));
+        Assert.AreEqual(false, caller.GetProgramVariable("notAlive"));
+        Assert.AreEqual(true, caller.GetProgramVariable("deadIsNull"));
+        Assert.AreEqual(true, caller.GetProgramVariable("foundViaComponent"));
+        Assert.AreEqual(true, caller.GetProgramVariable("foundSelfViaComponent"));
+        Assert.AreEqual(true, caller.GetProgramVariable("andAlive"));
+
         // SetProgramVariable("received", int[]) — a generic method that erases
         // to the (string, object) extern; passing an array once failed to compile
         UdonBehaviour arrayTarget = FindUdon("MenSharpRuntimeTarget");

@@ -4541,6 +4541,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         }
         if self.declarations.table.symbol(symbol).kind == SymbolKind::Class
             && !self.is_program_reference(ty)
+            && Some(symbol) != self.marker
             && let Some(base) = self.engine_base_of(symbol)
         {
             let (file, span) = self.declaration_site(symbol);

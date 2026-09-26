@@ -4162,18 +4162,21 @@ fn the_whole_get_component_family_is_callable_on_the_behaviour() {
         program.output.errors
     );
     let text = program.output.program.to_uasm().unwrap();
-    // an engine type goes through the `(System.Type)` externs — the generic
+    // the behaviour is the Component the family is called on (the twin
+    // derives from MonoBehaviour), `gameObject.GetComponents` the GameObject.
+    // An engine type goes through the `(System.Type)` externs — the generic
     // `__T` ones are a table of types the SDK wrapper knows, and halt on the
     // rest (issue: `GetComponent<UdonBehaviour>()` — "the given key was not
     // present") — with an array rebuilt as the `T[]` Udon does have
     for extern_name in [
-        "UnityEngineGameObject.__GetComponentsInChildren__SystemType_SystemBoolean__UnityEngineComponentArray",
-        "UnityEngineGameObject.__GetComponentsInParent__SystemType_SystemBoolean__UnityEngineComponentArray",
+        "UnityEngineComponent.__GetComponentsInChildren__SystemType_SystemBoolean__UnityEngineComponentArray",
+        "UnityEngineComponent.__GetComponentsInParent__SystemType_SystemBoolean__UnityEngineComponentArray",
+        "UnityEngineComponent.__GetComponents__SystemType__UnityEngineComponentArray",
         "UnityEngineGameObject.__GetComponents__SystemType__UnityEngineComponentArray",
-        "UnityEngineGameObject.__GetComponentInChildren__SystemType_SystemBoolean__UnityEngineComponent",
-        "UnityEngineGameObject.__GetComponentInParent__SystemType_SystemBoolean__UnityEngineComponent",
-        "UnityEngineGameObject.__GetComponent__SystemType__UnityEngineComponent",
-        "UnityEngineGameObject.__GetComponent__SystemString__UnityEngineComponent",
+        "UnityEngineComponent.__GetComponentInChildren__SystemType_SystemBoolean__UnityEngineComponent",
+        "UnityEngineComponent.__GetComponentInParent__SystemType_SystemBoolean__UnityEngineComponent",
+        "UnityEngineComponent.__GetComponent__SystemType__UnityEngineComponent",
+        "UnityEngineComponent.__GetComponent__SystemString__UnityEngineComponent",
         "UnityEngineRendererArray.__ctor__SystemInt32__UnityEngineRendererArray",
         "UnityEngineTransformArray.__ctor__SystemInt32__UnityEngineTransformArray",
         "SystemArray.__Copy__SystemArray_SystemArray_SystemInt32__SystemVoid",
@@ -4256,7 +4259,7 @@ fn a_component_the_sdk_table_lacks_is_found_by_type() {
     );
     let text = output.program.to_uasm().unwrap();
     assert!(
-        text.contains("UnityEngineGameObject.__GetComponent__SystemType__UnityEngineComponent"),
+        text.contains("UnityEngineComponent.__GetComponent__SystemType__UnityEngineComponent"),
         "{text}"
     );
     assert!(text.contains("UnityEngineComponent.__GetComponentInParent__SystemType__UnityEngineComponent")
@@ -4291,7 +4294,7 @@ fn a_component_the_sdk_table_lacks_is_found_by_type() {
     let text = output.program.to_uasm().unwrap();
     assert!(
         text.contains(
-            "UnityEngineGameObject.__GetComponents__SystemType__UnityEngineComponentArray"
+            "UnityEngineComponent.__GetComponents__SystemType__UnityEngineComponentArray"
         ),
         "{text}"
     );
@@ -16353,4 +16356,165 @@ fn chained_constants_initialize_in_declaration_order() {
     assert_eq!(int_of(&emulator, "a"), 3);
     assert_eq!(int_of(&emulator, "b"), 6);
     assert_eq!(int_of(&emulator, "c"), 13);
+}
+
+/// Compiles one behaviour against the .NET and UnityEngine references,
+/// answering its codegen errors and its assembly text.
+fn compile_unity_behaviour(source: &str, class_path: &[&str]) -> Option<(Vec<String>, String)> {
+    let (Some(dotnet), Some(unity)) = (dotnet_shared_dir(), unity_managed_dir()) else {
+        eprintln!("skipped: needs both a .NET runtime and a Unity install");
+        return None;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dotnet.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources_for(&references));
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output =
+        compiler.generate_udon(&declarations, &signatures, &bodies, &references, class_path);
+    let errors: Vec<String> = output
+        .errors
+        .iter()
+        .map(|error| error.message.to_string())
+        .collect();
+    let text = output.program.to_uasm().unwrap_or_default();
+    Some((errors, text))
+}
+
+#[test]
+fn engine_members_are_the_engines_on_the_behaviour_and_on_another() {
+    // The twin derives from MonoBehaviour, as the Unity-side one does: what
+    // Component/Behaviour/Object offer is usable on `this` (the program's
+    // own UdonBehaviour, supplied as the receiver) and on any behaviour it
+    // holds (an UdonBehaviour at run time — a Component the engine's
+    // externs take). `==` is the engine's, `if (target)` its op_Implicit.
+    let Some((errors, text)) = compile_unity_behaviour(
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Target : MenSharpBehaviour { public int x; }
+            public class Probe : MenSharpBehaviour
+            {
+                public Target target;
+                public Target other;
+                public string text;
+                public bool flag;
+                public int number;
+                public void Interact()
+                {
+                    text = name;
+                    flag = this.isActiveAndEnabled;
+                    enabled = false;
+                    text = target.name;
+                    target.name = "renamed";
+                    var go = target.gameObject;
+                    var tr = target.transform;
+                    target.enabled = false;
+                    flag = target.isActiveAndEnabled;
+                    var a = target.GetComponent<Renderer>();
+                    var b = target.GetComponents<Renderer>();
+                    var c = target.GetComponentInChildren<Renderer>();
+                    var d = target.GetComponentsInChildren<Renderer>();
+                    var e = target.GetComponentInParent<Renderer>();
+                    var f = target.GetComponentsInParent<Renderer>();
+                    var t = target.GetComponent<Target>();
+                    var me = GetComponent<Probe>();
+                    flag = TryGetComponent<Renderer>(out var renderer) && renderer != null;
+                    number = target.GetInstanceID() + GetInstanceID() + target.GetHashCode();
+                    flag = target.Equals(this);
+                    text = target.ToString();
+                    flag = target == this || target != other || target == null;
+                    if (target) { number++; }
+                    if (!target) { number--; }
+                    flag = target && other;
+                    bool alive = target;
+                }
+            }
+        }
+        "#,
+        &["Game", "Probe"],
+    ) else {
+        return;
+    };
+    assert_eq!(errors, Vec::<String>::new());
+    for extern_name in [
+        "UnityEngineObject.__get_name__SystemString",
+        "UnityEngineObject.__set_name__SystemString__SystemVoid",
+        "UnityEngineBehaviour.__get_isActiveAndEnabled__SystemBoolean",
+        "UnityEngineBehaviour.__set_enabled__SystemBoolean__SystemVoid",
+        "UnityEngineComponent.__get_gameObject__UnityEngineGameObject",
+        "UnityEngineComponent.__get_transform__UnityEngineTransform",
+        "UnityEngineComponent.__GetComponent__SystemType__UnityEngineComponent",
+        "UnityEngineComponent.__GetComponents__SystemType__UnityEngineComponentArray",
+        "UnityEngineComponent.__GetComponentInChildren__SystemType__UnityEngineComponent",
+        "UnityEngineComponent.__GetComponentsInChildren__SystemType__UnityEngineComponentArray",
+        "UnityEngineComponent.__GetComponentInParent__SystemType__UnityEngineComponent",
+        "UnityEngineComponent.__GetComponentsInParent__SystemType__UnityEngineComponentArray",
+        "UnityEngineObject.__GetInstanceID__SystemInt32",
+        "UnityEngineObject.__GetHashCode__SystemInt32",
+        "UnityEngineObject.__Equals__SystemObject__SystemBoolean",
+        "UnityEngineObject.__ToString__SystemString",
+        "UnityEngineObject.__op_Equality__UnityEngineObject_UnityEngineObject__SystemBoolean",
+        "UnityEngineObject.__op_Inequality__UnityEngineObject_UnityEngineObject__SystemBoolean",
+        "UnityEngineObject.__op_Implicit__UnityEngineObject__SystemBoolean",
+    ] {
+        assert!(
+            text.contains(&format!("EXTERN, \"{extern_name}\"")),
+            "missing {extern_name}"
+        );
+    }
+    // `this` is read as the program's own UdonBehaviour slot
+    assert!(text.contains("__this_udonBehaviour"));
+}
+
+#[test]
+fn engine_members_udon_does_not_expose_are_reported() {
+    // `tag`, `hideFlags`: real members of Component/Object that Udon has no
+    // extern for — named as such, never silently dropped
+    for (member, signature) in [
+        ("target.tag", "UnityEngineComponent.__get_tag__SystemString"),
+        (
+            "target.hideFlags.ToString()",
+            "UnityEngineObject.__get_hideFlags__UnityEngineHideFlags",
+        ),
+        ("tag", "UnityEngineComponent.__get_tag__SystemString"),
+    ] {
+        let Some((errors, _)) = compile_unity_behaviour(
+            &format!(
+                r#"
+                using MenSharp;
+                using UnityEngine;
+                namespace Game
+                {{
+                    public class Target : MenSharpBehaviour {{ public int x; }}
+                    public class Probe : MenSharpBehaviour
+                    {{
+                        public Target target;
+                        public string text;
+                        public void Interact() {{ text = {member}; }}
+                    }}
+                }}
+                "#
+            ),
+            &["Game", "Probe"],
+        ) else {
+            return;
+        };
+        assert!(
+            errors
+                .iter()
+                .any(|error| error.contains(signature) && error.contains("not exposed")),
+            "{member}: {errors:?}"
+        );
+    }
 }

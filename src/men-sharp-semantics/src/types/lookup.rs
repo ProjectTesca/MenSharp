@@ -496,11 +496,54 @@ fn hides(nearer: &MemberCandidate, farther: &MemberCandidate) -> bool {
     match (&nearer.signature, &farther.signature) {
         (Some(MemberSignature::Function(a)), Some(MemberSignature::Function(b))) => {
             a.parameters.len() == b.parameters.len()
-                && a.parameters
-                    .iter()
-                    .zip(&b.parameters)
-                    .all(|(x, y)| x.passing == y.passing && x.parameter_type == y.parameter_type)
+                && a.parameters.iter().zip(&b.parameters).all(|(x, y)| {
+                    x.passing == y.passing
+                        && same_parameter_type(&x.parameter_type, &y.parameter_type)
+                })
         }
         _ => false,
+    }
+}
+
+/// Parameter types match for hiding, with each method's own type parameters
+/// compared by their being one rather than by identity (§7.7.1.2 compares
+/// signatures, and `F<T>(T)` is the signature `F<U>(U)` is): the corlib's
+/// `TryGetComponent<T>(out T)` hides `Component.TryGetComponent<T>(out T)`
+/// from the engine, whose `T` is an external method parameter.
+fn same_parameter_type(x: &Type, y: &Type) -> bool {
+    match (x, y) {
+        (
+            Type::TypeParameter(_) | Type::ExternalMethodTypeParameter(_),
+            Type::TypeParameter(_) | Type::ExternalMethodTypeParameter(_),
+        ) => true,
+        (
+            Type::Array {
+                element: a,
+                rank: rank_a,
+            },
+            Type::Array {
+                element: b,
+                rank: rank_b,
+            },
+        ) => rank_a == rank_b && same_parameter_type(a, b),
+        (Type::Nullable(a), Type::Nullable(b)) => same_parameter_type(a, b),
+        (
+            Type::Named {
+                target: target_a,
+                arguments: arguments_a,
+            },
+            Type::Named {
+                target: target_b,
+                arguments: arguments_b,
+            },
+        ) => {
+            target_a == target_b
+                && arguments_a.len() == arguments_b.len()
+                && arguments_a
+                    .iter()
+                    .zip(arguments_b)
+                    .all(|(a, b)| same_parameter_type(a, b))
+        }
+        _ => x == y,
     }
 }

@@ -422,9 +422,14 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             .insert(node, ResourceDisposal { call, check_null });
     }
 
+    /// A condition is a `bool`, or something implicitly convertible to one:
+    /// a `UnityEngine.Object` (a behaviour included) through the engine's
+    /// `op_Implicit`, as `if (target)` means in Unity C#.
     pub(super) fn check_condition(&mut self, condition: &'ast Expression<'ast, 'ast>) {
         let ty = self.check_expression(condition);
-        if !self.system().is_bool(&ty) {
+        let boolean = self.corlib("Boolean");
+        let system = self.system();
+        if !system.is_bool(&ty) && !system.is_implicitly_convertible(&ty, &boolean) {
             let kind = SemanticErrorKind::ConditionNotBoolean {
                 found: self.describe(&ty),
             };

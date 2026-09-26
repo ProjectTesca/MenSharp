@@ -38,6 +38,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     self.user_defined_unary(operator, &operand, &span, node)
                 {
                     result
+                } else if system.is_implicitly_convertible(&operand, &self.corlib("Boolean")) {
+                    // `!target`: through the operand's implicit conversion
+                    // to bool (`UnityEngine.Object`'s), then the bool's `!`
+                    self.corlib("Boolean")
                 } else {
                     let kind = SemanticErrorKind::InvalidOperator {
                         left: self.describe(&operand),
@@ -188,8 +192,13 @@ impl<'a, 'ast> Checker<'a, 'ast> {
 
         match operator {
             LogicalAnd | LogicalOr => {
-                if system.is_bool(&left) && system.is_bool(&right) {
-                    return self.corlib("Boolean");
+                // bools, or what converts to one implicitly (`target && x`)
+                let boolean = self.corlib("Boolean");
+                if (system.is_bool(&left) || system.is_implicitly_convertible(&left, &boolean))
+                    && (system.is_bool(&right)
+                        || system.is_implicitly_convertible(&right, &boolean))
+                {
+                    return boolean;
                 }
             }
             // `a & b`, `a | b`, `a ^ b` on bools (§12.13.4): both sides
