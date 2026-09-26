@@ -391,6 +391,10 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("ChainedConstants");
         Assert.AreEqual((byte)29, smoke.GetProgramVariable("chainedConstant"));
 
+        // a nested type's constant reading its enclosing type's constant by bare name
+        smoke.RunProgram("NestedConstants");
+        Assert.AreEqual(7, smoke.GetProgramVariable("nestedConstant"));
+
         // a generic class's static constructor runs once per closed type
         smoke.RunProgram("GenericStaticConstructors");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));

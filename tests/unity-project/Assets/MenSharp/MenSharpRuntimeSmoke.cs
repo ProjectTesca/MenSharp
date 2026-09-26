@@ -417,6 +417,13 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
     }
 
     public byte chainedConstant;
+    public int nestedConstant;
+
+    public void NestedConstants()
+    {
+        // a nested type reads its enclosing type's statics by bare name
+        nestedConstant = SmokeNestedOuter.Inner.K + SmokeNestedOuter.Inner.Four();
+    }
 
     public void ChainedConstants()
     {
@@ -1087,4 +1094,16 @@ public class SmokeSecond
 public static class SmokeInitReader
 {
     public static int Value = SmokeSecond.Value + 1;
+}
+
+public class SmokeNestedOuter
+{
+    public const int N = 2;
+    public static int Twice(int x) { return x * 2; }
+
+    public class Inner
+    {
+        public const int K = N + 1;
+        public static int Four() { return Twice(N); }
+    }
 }

@@ -16112,7 +16112,8 @@ fn compound_constants_keep_types_and_declaration_scope() {
 #[test]
 fn compound_constants_resolve_aliases_in_the_declaring_file() {
     // The caller has a different alias and a shadowing constant: neither
-    // may change a constant declared in another file or a nested type.
+    // may change a constant declared in another file or a nested type —
+    // whose bare `N` is the enclosing type's, even bound from elsewhere.
     let mut sources = vec![
         SourceCode::new(
             "caller.cs",
@@ -16132,7 +16133,7 @@ fn compound_constants_resolve_aliases_in_the_declaring_file() {
                 using Number = System.Int32;
                 public class Outer {
                     public const int N = 2;
-                    public class Inner { public const int K = Outer.N + sizeof(Number); }
+                    public class Inner { public const int K = N + sizeof(Number); }
                 }
             }
         "#,
@@ -16517,4 +16518,98 @@ fn engine_members_udon_does_not_expose_are_reported() {
             "{member}: {errors:?}"
         );
     }
+}
+
+#[test]
+fn a_nested_type_sees_its_enclosing_types_static_members() {
+    // §12.8.4: a simple name is looked up in each enclosing type after the
+    // immediately enclosing one — `N` inside `Outer.Inner` is `Outer.N`
+    // (issue: "this name does not exist" on `public const int K = N + 1;`).
+    // Statics, constants and methods of every enclosing level, a generic
+    // outer's statics with its own `T`, and a constant that narrows
+    let Some(emulator) = run_behaviour(
+        r#"
+        using MenSharp;
+        public class Outer
+        {
+            public const int N = 2;
+            public static int Twice(int x) { return x * 2; }
+            public static string Tag = "outer";
+            public class Inner
+            {
+                public const int K = N + 1;
+                public static int Four() { return Twice(N); }
+                public static string Label() { return Tag; }
+                public class Deep { public const int D = K + N; }
+            }
+        }
+        public class Box<T>
+        {
+            public static int Count = 5;
+            public class Peek { public static int Read() { return Count + 1; } }
+        }
+        public class Probe : MenSharpBehaviour
+        {
+            public int result; public int four; public int deep; public string label;
+            public int peeked;
+            public void Interact()
+            {
+                result = Outer.Inner.K;
+                four = Outer.Inner.Four();
+                deep = Outer.Inner.Deep.D;
+                label = Outer.Inner.Label();
+                peeked = Box<int>.Peek.Read();
+            }
+        }
+        "#,
+        "Probe",
+        "_interact",
+    ) else {
+        return;
+    };
+    assert_eq!(int_of(&emulator, "result"), 3);
+    assert_eq!(int_of(&emulator, "four"), 4);
+    assert_eq!(int_of(&emulator, "deep"), 5);
+    assert_eq!(string_of(&emulator, "label"), "outer");
+    assert_eq!(int_of(&emulator, "peeked"), 6);
+}
+
+#[test]
+fn an_enclosing_types_instance_member_needs_an_instance() {
+    // an outer instance field or method has no instance from inside a
+    // nested type (CS0120): reported, never read from nowhere
+    let mut sources = vec![SourceCode::new(
+        "test.cs",
+        r#"
+        using MenSharp;
+        public class Outer
+        {
+            public int instanceField;
+            public class Inner
+            {
+                public static int Bad() { return instanceField; }
+            }
+        }
+        public class Probe : MenSharpBehaviour { public int r; public void Interact() { r = Outer.Inner.Bad(); } }
+        "#,
+    )];
+    sources.extend(Compiler::corlib_sources());
+    let Some(dir) = dotnet_shared_dir() else {
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![std::fs::read(dir.join("System.Private.CoreLib.dll")).unwrap()];
+    let references = compiler.load_references(&bytes).unwrap();
+    let files = compiler.parse(sources);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert!(
+        bodies.errors.iter().any(|error| matches!(
+            error.kind,
+            men_sharp_semantics::SemanticErrorKind::InstanceMemberInStaticContext
+        )),
+        "{:#?}",
+        bodies.errors
+    );
 }

@@ -701,6 +701,32 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     }
                 }
 
+                // then the members of each enclosing type, nearest first
+                // (§12.8.4): `N` inside `Outer.Inner` is `Outer.N`. Reached
+                // as through the type's name — a static, a constant, a
+                // nested type; an instance member has no instance here and
+                // is reported as such
+                for outer in self.enclosing_types() {
+                    let candidates = self.system().members_named(&outer, name.value);
+                    if candidates.is_empty() {
+                        continue;
+                    }
+                    if let Some(meaning) = self.member_meaning(
+                        candidates,
+                        AccessContext {
+                            receiver: Some(outer.clone()),
+                            via_type: true,
+                            implicit_this: false,
+                        },
+                        explicit_arguments.clone(),
+                        name.value,
+                        span,
+                        Some(EntityID::from(left)),
+                    ) {
+                        return meaning;
+                    }
+                }
+
                 // otherwise a type or namespace name
                 let arity = explicit_arguments.len() as u32;
                 match self.lookup_name(name.value, arity, span) {

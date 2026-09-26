@@ -257,7 +257,27 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             .rev()
             .copied()
             .find(|&id| self.resolver.declarations.table.symbol(id).kind.is_type())?;
+        Some(self.instantiated_type(symbol))
+    }
 
+    /// The types enclosing the innermost one, nearest first, each with its
+    /// own generic parameters applied. A simple name is looked up in each
+    /// enclosing type's members after the immediately enclosing type's
+    /// (§12.8.4): `N` inside `Outer.Inner` is `Outer.N`.
+    pub(super) fn enclosing_types(&self) -> Vec<Type> {
+        self.type_stack
+            .iter()
+            .rev()
+            .copied()
+            .filter(|&id| self.resolver.declarations.table.symbol(id).kind.is_type())
+            .skip(1)
+            .map(|symbol| self.instantiated_type(symbol))
+            .collect()
+    }
+
+    /// A source type with its own (and its enclosing types') generic
+    /// parameters as its arguments — how the type names itself.
+    fn instantiated_type(&self, symbol: SymbolId) -> Type {
         let mut arguments = Vec::new();
         let mut chain = Vec::new();
         let mut current = Some(symbol);
@@ -274,10 +294,10 @@ impl<'a, 'ast> Checker<'a, 'ast> {
             }
         }
 
-        Some(Type::Named {
+        Type::Named {
             target: TypeTarget::Source(symbol),
             arguments,
-        })
+        }
     }
 
     pub(super) fn require_convertible(
