@@ -16636,8 +16636,9 @@ const NETWORK_CALLABLE_BASE: &str = r#"
 #[test]
 fn a_network_callables_rate_is_any_integer_constant_under_any_spelling() {
     // issue: only a literal rate was read — a `const`, `3 + 4` or `0x7`
-    // silently fell back to the default; and `[NC]` through a using alias
-    // was not recognised at all, so the event lost its metadata
+    // silently fell back to the default (the named form
+    // `maxEventsPerSecond: 7` too); and `[NC]` through a using alias was
+    // not recognised at all, so the event lost its metadata
     let Some(program) = compile_behaviour(
         vec![
             SourceCode::new("base.cs", NETWORK_CALLABLE_BASE),
@@ -16660,6 +16661,8 @@ fn a_network_callables_rate_is_any_integer_constant_under_any_spelling() {
                         [NetworkCallableAttribute(Rate)] public void Suffixed(int x) { }
                         [NC] public void Aliased(int x) { }
                         [NC(Rate)] public void AliasedRate(int x) { }
+                        [NetworkCallable(maxEventsPerSecond: 7)] public void Colon(int x) { }
+                        [NC(maxEventsPerSecond: Rate)] public void AliasedColon(int x) { }
                     }
                 }
                 "#,
@@ -16684,6 +16687,8 @@ fn a_network_callables_rate_is_any_integer_constant_under_any_spelling() {
         "Qualified",
         "Suffixed",
         "AliasedRate",
+        "Colon",
+        "AliasedColon",
     ] {
         assert!(
             meta.contains(&format!(

@@ -192,8 +192,12 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                     .map(|list| list.arguments)
                     .unwrap_or(&[])
                 {
-                    // `MaxEventsPerSecond = value` sets the attribute's
+                    // `maxEventsPerSecond: 7` names the constructor's
+                    // parameter, `MaxEventsPerSecond = 7` would set a
                     // property; the one positional argument is the rate too
+                    let names_the_parameter = argument.name.as_ref().is_some_and(|name| {
+                        matches!(name.value, "MaxEventsPerSecond" | "maxEventsPerSecond")
+                    });
                     let (expression, named) = match &argument.value {
                         ArgumentValue::Expression(Expression::Assignment(assignment)) => {
                             let target = match &assignment.target {
@@ -212,7 +216,9 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                                 _ => continue,
                             }
                         }
-                        ArgumentValue::Expression(expression) => (Some(expression), false),
+                        ArgumentValue::Expression(expression) => {
+                            (Some(expression), names_the_parameter)
+                        }
                         _ => (None, false),
                     };
                     if !named && argument.name.is_some() {

@@ -667,6 +667,7 @@ public class MenSharpIntegrationTests
             rates[callable.@event] = callable.maxEventsPerSecond;
         }
         Assert.AreEqual(7, rates["Rated"]);
+        Assert.AreEqual(7, rates["Named"]);
         Assert.AreEqual(7, rates["Aliased"]);
         Assert.AreEqual(0, rates["AliasedDefault"]);
         Assert.AreEqual(5, rates["Aim"]);

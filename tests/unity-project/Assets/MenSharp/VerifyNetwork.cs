@@ -39,12 +39,16 @@ public class VerifyNetwork : MenSharpBehaviour
         Debug.Log($"[verify-net] Aim ran: at={at}, times={times}");
     }
 
-    // rates from constants and through an alias: the metadata the
-    // integration test reads back from the program asset carries 7 for each
+    // rates from constants, by parameter name, and through an alias: the
+    // metadata the integration test reads back from the program asset
+    // carries 7 for each
     private const int Rate = 7;
 
     [NetworkCallable(Rate)]
     public void Rated(int value) { }
+
+    [NetworkCallable(maxEventsPerSecond: Rate)]
+    public void Named(int value) { }
 
     [NC(0x7)]
     public void Aliased(int value) { }
