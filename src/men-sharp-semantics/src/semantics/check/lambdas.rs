@@ -111,6 +111,33 @@ impl<'a, 'ast> Checker<'a, 'ast> {
         lambda.parameters.names()
     }
 
+    /// The parameter types a lambda writes out — `(int id, PointerEvent e) =>
+    /// ...` — resolved; None when any parameter leaves its type to inference
+    /// (C# allows no mixture). Resolving may report an unknown type: that
+    /// is rolled back here, and reported once when the lambda is checked for
+    /// real.
+    pub(super) fn explicit_lambda_parameter_types(
+        &mut self,
+        lambda: &'ast LambdaExpression<'ast, 'ast>,
+    ) -> Option<Vec<Type>> {
+        let LambdaParameters::List(list) = &lambda.parameters else {
+            return None;
+        };
+        let error_mark = self.resolver.out.errors.len();
+        let types = list
+            .parameters
+            .iter()
+            .map(|parameter| {
+                parameter
+                    .parameter_type
+                    .as_ref()
+                    .map(|written| self.resolve_type(written))
+            })
+            .collect::<Option<Vec<Type>>>();
+        self.resolver.out.errors.truncate(error_mark);
+        types
+    }
+
     pub(super) fn lambda_shape_matches(
         lambda: &'ast LambdaExpression<'ast, 'ast>,
         delegate: &FunctionSignature,

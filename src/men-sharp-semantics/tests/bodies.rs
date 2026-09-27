@@ -180,6 +180,55 @@ pub fn generic_methods_infer_or_ask_for_annotations() {
     ));
 }
 
+/// §12.6.3.7: the parameter types a lambda writes out are exact bounds on
+/// the delegate's — `DropTarget((int id, Event e) => ...)` fixes `TPayload`
+/// with no argument of that type anywhere else.
+#[test]
+pub fn explicit_lambda_parameter_types_infer_method_type_arguments() {
+    checked!(
+        check,
+        r#"
+        public delegate void Handler<TPayload>(TPayload payload, Event e);
+        public delegate T Mapper<T>(T value);
+        public class Event { public int index; }
+        public class Box
+        {
+            public Box DropTarget<TPayload>(Handler<TPayload> onDrop, Handler<TPayload> onEnter = null)
+            {
+                return this;
+            }
+            public T Pick<T>(Mapper<T> f) { return default(T); }
+        }
+        public class Uses
+        {
+            int moved;
+            void Run(Box box)
+            {
+                box.DropTarget((int id, Event e) => moved = id + e.index);
+                string s = box.Pick((string x) => x + "!");
+                int wrong = box.Pick((string x) => x);
+                box.DropTarget((id, e) => moved = id);
+            }
+        }
+        "#,
+    );
+
+    let kinds = error_kinds(&check);
+    assert_eq!(kinds.len(), 2, "{kinds:?}");
+    assert_eq!(
+        *kinds[0],
+        SemanticErrorKind::TypeMismatch {
+            expected: "int".to_string(),
+            found: "string".to_string(),
+        }
+    );
+    // nothing names TPayload when the lambda leaves its parameters untyped
+    assert!(matches!(
+        kinds[1],
+        SemanticErrorKind::CannotInferTypeArguments
+    ));
+}
+
 #[test]
 pub fn enums_statics_and_value_flow() {
     checked!(

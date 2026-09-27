@@ -448,6 +448,16 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         recursiveOut = sink[0] * 1000 + sink[1] * 100 + sink[2] * 10 + sink[3] + top * 10000;
     }
 
+    public int typedLambdaPayload;
+
+    // the lambda's written parameter types fix `TPayload` — no `<int>` on
+    // the call (the shape MenUI's `.DropTarget(...)` chain has)
+    public void TypedLambdaInference()
+    {
+        var box = new SmokeDropBox().DropTarget((int id, SmokePointerEvent e) => typedLambdaPayload = id * 10 + e.index);
+        box.Drop(4, new SmokePointerEvent { index = 2 });
+    }
+
     public void NestedConstants()
     {
         // a nested type reads its enclosing type's statics by bare name
@@ -1134,5 +1144,24 @@ public class SmokeNestedOuter
     {
         public const int K = N + 1;
         public static int Four() { return Twice(N); }
+    }
+}
+
+public class SmokePointerEvent { public int index; }
+
+public class SmokeDropBox
+{
+    public System.Action<object, SmokePointerEvent> onDrop;
+    public void Drop(object payload, SmokePointerEvent e) { onDrop(payload, e); }
+}
+
+public static class SmokeDragAndDrop
+{
+    public static SmokeDropBox DropTarget<TPayload>(this SmokeDropBox self,
+        System.Action<TPayload, SmokePointerEvent> onDrop,
+        System.Action<TPayload, SmokePointerEvent> onEnter = null)
+    {
+        self.onDrop = (payload, e) => onDrop((TPayload)payload, e);
+        return self;
     }
 }

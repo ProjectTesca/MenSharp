@@ -16958,3 +16958,42 @@ fn deconstruct_parts_survive_recursion() {
     let emulator = run_behaviour(source, "T", "_interact").unwrap();
     assert_eq!(int_of(&emulator, "r"), 60);
 }
+
+/// `DropTarget((int id, PointerEvent e) => ...)`: the lambda's written
+/// parameter types fix the method's `TPayload` (§12.6.3.7), so the call
+/// needs no `<int>` — the shape MenUI's drag-and-drop chain has.
+#[test]
+fn explicitly_typed_lambda_parameters_fix_the_type_arguments() {
+    let source = r#"
+        using System;
+        using MenSharp;
+        public class PointerEvent { public int index; }
+        public class Box
+        {
+            public Action<object, PointerEvent> onDrop;
+            public void Drop(object payload, PointerEvent e) { onDrop(payload, e); }
+        }
+        public static class DragAndDrop
+        {
+            public static Box DropTarget<TPayload>(this Box self, Action<TPayload, PointerEvent> onDrop,
+                Action<TPayload, PointerEvent> onEnter = null)
+            {
+                self.onDrop = (payload, e) => onDrop((TPayload)payload, e);
+                return self;
+            }
+        }
+        public class T : MenSharpBehaviour {
+            public int moved;
+            public string named;
+            public void Interact() {
+                var box = new Box().DropTarget((int id, PointerEvent e) => moved = id * 10 + e.index);
+                box.Drop(4, new PointerEvent { index = 2 });
+                var other = new Box().DropTarget((string id, PointerEvent e) => named = id + e.index);
+                other.Drop("card", new PointerEvent { index = 7 });
+            }
+        }
+    "#;
+    let emulator = run_behaviour(source, "T", "_interact").unwrap();
+    assert_eq!(int_of(&emulator, "moved"), 42);
+    assert_eq!(string_of(&emulator, "named"), "card7");
+}

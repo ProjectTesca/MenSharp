@@ -407,6 +407,10 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("RecursiveOutArguments");
         Assert.AreEqual(123, smoke.GetProgramVariable("recursiveOut"));
 
+        // a lambda's written parameter types fix the method's type argument
+        smoke.RunProgram("TypedLambdaInference");
+        Assert.AreEqual(42, smoke.GetProgramVariable("typedLambdaPayload"));
+
         // a generic class's static constructor runs once per closed type
         smoke.RunProgram("GenericStaticConstructors");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));

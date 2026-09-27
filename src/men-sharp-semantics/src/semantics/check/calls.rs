@@ -584,13 +584,37 @@ impl<'a, 'ast> Checker<'a, 'ast> {
                     engine.preset(*key, ty.clone());
                 }
             } else {
-                // phase 1: ordinary arguments contribute bounds
+                // phase 1: ordinary arguments contribute bounds, and so do
+                // the parameter types a lambda writes out (§12.6.3.7 explicit
+                // parameter type inference): `DropTarget((int id, Event e) =>
+                // ...)` against `Action<TPayload, Event>` fixes `TPayload`
+                // from the lambda alone
                 for &(argument_index, parameter_index) in &pairs {
                     let argument = &arguments[argument_index];
                     let parameter = &working.parameters[parameter_index];
-                    if let ArgumentShape::Value(ty) = &argument.shape {
-                        let system = self.system();
-                        engine.lower_bound(&system, &parameter.parameter_type, ty);
+                    match &argument.shape {
+                        ArgumentShape::Value(ty) => {
+                            let system = self.system();
+                            engine.lower_bound(&system, &parameter.parameter_type, ty);
+                        }
+                        ArgumentShape::Lambda(lambda) => {
+                            let Some(written) = self.explicit_lambda_parameter_types(lambda) else {
+                                continue;
+                            };
+                            let Some(delegate) = self.delegate_signature(&parameter.parameter_type)
+                            else {
+                                continue;
+                            };
+                            if delegate.parameters.len() != written.len() {
+                                continue;
+                            }
+                            let system = self.system();
+                            for (delegate_parameter, written) in
+                                delegate.parameters.iter().zip(&written)
+                            {
+                                engine.exact(&system, &delegate_parameter.parameter_type, written);
+                            }
+                        }
                     }
                 }
                 {
