@@ -47,17 +47,20 @@ public static class MenSharpImporter
         string blobPath = Path.ChangeExtension(uasmPath, ".uprog");
         byte[] blob = File.Exists(blobPath) ? File.ReadAllBytes(blobPath) : null;
 
+        string signature = ProgramSignature(assembly, metaJson, blob);
+
         var programAsset = AssetDatabase.LoadAssetAtPath<MenSharpProgramAsset>(assetPath);
         LoadMilliseconds += watch.ElapsedMilliseconds;
         watch.Restart();
         bool created = programAsset == null;
         var assemblyField = typeof(UdonAssemblyProgramAsset).GetField(
             "udonAssembly", BindingFlags.Instance | BindingFlags.NonPublic | BindingFlags.Public);
+        // up to date means the *stored* program was built from exactly
+        // these inputs by this package — not that the text matches
         if (!created
             && !force
-            && programAsset.SerializedProgramAsset != null
-            && programAsset.metaJson == metaJson
-            && (string)assemblyField.GetValue(programAsset) == assembly)
+            && programAsset.builtFrom == signature
+            && programAsset.SerializedProgramAsset != null)
         {
             unchanged = true;
             return programAsset;
@@ -83,10 +86,52 @@ public static class MenSharpImporter
         programAsset.RefreshProgram();
         RefreshMilliseconds += watch.ElapsedMilliseconds;
         watch.Restart();
+        // the record of what was stored — only when something was: the SDK
+        // refuses to store while playing (MenSharpCompiler defers a compile
+        // until play mode ends, but a caller of its own may get here), and
+        // a program that failed to assemble is not stored either. Left
+        // empty, the next compile builds this one again
+        bool stored = !Application.isPlaying && programAsset.HasBuiltProgram;
+        programAsset.builtFrom = stored ? signature : null;
         EditorUtility.SetDirty(programAsset);
         DirtyMilliseconds += watch.ElapsedMilliseconds;
         return programAsset;
     }
+
+    /// The inputs a stored program is a function of, hashed: the assembly
+    /// text, the sidecar, the binary program, and the editor package that
+    /// builds and patches the program (its assembly's module id, which
+    /// changes with every build of the package — so updating MenSharp, or
+    /// the SDK it links against, rebuilds every program once, without a
+    /// "Rebuild All Programs").
+    public static string ProgramSignature(string assembly, string metaJson, byte[] blob)
+    {
+        using (var sha = SHA1.Create())
+        {
+            void Feed(byte[] bytes)
+            {
+                sha.TransformBlock(bytes, 0, bytes.Length, null, 0);
+            }
+            Feed(Encoding.UTF8.GetBytes(assembly ?? ""));
+            Feed(new byte[] { 0 });
+            Feed(Encoding.UTF8.GetBytes(metaJson ?? ""));
+            Feed(new byte[] { 0 });
+            Feed(blob ?? new byte[0]);
+            Feed(new byte[] { 0 });
+            Feed(Encoding.UTF8.GetBytes(BuilderId));
+            sha.TransformFinalBlock(new byte[0], 0, 0);
+            var text = new StringBuilder(40);
+            foreach (byte value in sha.Hash)
+            {
+                text.Append(value.ToString("x2"));
+            }
+            return text.ToString();
+        }
+    }
+
+    /// Identifies this build of the editor package.
+    public static string BuilderId =>
+        typeof(MenSharpImporter).Assembly.ManifestModule.ModuleVersionId.ToString("N");
 
     /// The GUID a class's program asset gets when it is first created: a
     /// function of the class path alone, so that the same class compiles

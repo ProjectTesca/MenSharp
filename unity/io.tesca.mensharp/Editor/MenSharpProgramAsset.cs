@@ -39,6 +39,22 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
     [SerializeField]
     public byte[] programBlob;
 
+    /// What the serialized program — the one that runs — was last built
+    /// from: the assembly text, the sidecar, the binary program and the
+    /// editor package that built it (MenSharpImporter.ProgramSignature).
+    /// Empty until a build has actually stored a program: the SDK's
+    /// RefreshProgram silently does nothing while the editor is playing,
+    /// and a failed assembly stores nothing either. The importer compares
+    /// this, not the assembly text, to decide that an asset is up to date —
+    /// a text that matched while the stored program lagged behind was how
+    /// a program stayed stale until "Rebuild All Programs".
+    [SerializeField]
+    public string builtFrom;
+
+    /// Whether the last RefreshProgram produced a program (which the SDK
+    /// then stored).
+    public bool HasBuiltProgram => program != null;
+
     /// Where a compile's program-asset time goes, accumulated across the
     /// programs of one compile (MenSharpCompiler resets and reports them).
     public static long AssembleMilliseconds;

@@ -38,8 +38,9 @@ public static class MenSharpCompiler
     }
 
     /// Compile All, but every program asset is re-assembled and rewritten,
-    /// changed or not — for after an SDK update, or a program asset that
-    /// looks wrong.
+    /// changed or not — for a program asset that looks wrong. (An updated
+    /// package or SDK rebuilds every program by itself: the build record
+    /// each asset keeps names the package that built it.)
     [MenuItem("MenSharp/Rebuild All Programs")]
     public static void RebuildAll()
     {
@@ -58,6 +59,18 @@ public static class MenSharpCompiler
 
     private static void Compile(bool force, bool onlyIfChanged)
     {
+        // the SDK stores no program while the editor plays (its
+        // RefreshProgram returns at once): a compile now would rewrite the
+        // assembly text and leave the stored program — the one that runs —
+        // behind, and with the source signature remembered nothing would
+        // build it later. Saving a script during play mode is what made a
+        // program stay stale until "Rebuild All Programs". The compile
+        // waits for edit mode instead
+        if (EditorApplication.isPlayingOrWillChangePlaymode)
+        {
+            DeferUntilEditMode(force, onlyIfChanged);
+            return;
+        }
         // a dotfile marker from an earlier version becomes an asset first,
         // so this compile's package exports carry it
         MenSharpMarker.MigrateLegacyMarkers(true);
@@ -205,6 +218,43 @@ public static class MenSharpCompiler
             + $"heap init {MenSharpProgramAsset.MetaMilliseconds}ms, store "
             + $"{MenSharpImporter.RefreshMilliseconds - MenSharpProgramAsset.AssembleMilliseconds - MenSharpProgramAsset.MetaMilliseconds}ms, "
             + $"save {saveMilliseconds}ms).");
+    }
+
+    private static bool deferredForce;
+    private static bool deferredOnlyIfChanged;
+    private static bool deferredCompilePending;
+
+    private static void DeferUntilEditMode(bool force, bool onlyIfChanged)
+    {
+        deferredForce |= force;
+        deferredOnlyIfChanged = deferredCompilePending ? deferredOnlyIfChanged && onlyIfChanged : onlyIfChanged;
+        if (!onlyIfChanged)
+        {
+            Debug.Log("MenSharp: the editor is playing; the programs are compiled when play mode ends.");
+        }
+        if (deferredCompilePending)
+        {
+            return;
+        }
+        deferredCompilePending = true;
+        // a domain reload on the way out of play mode drops this handler
+        // together with the flags — and runs the on-load check, which sees
+        // the unremembered signature and compiles all the same
+        EditorApplication.playModeStateChanged += CompileWhenBackInEditMode;
+    }
+
+    private static void CompileWhenBackInEditMode(PlayModeStateChange change)
+    {
+        if (change != PlayModeStateChange.EnteredEditMode)
+        {
+            return;
+        }
+        EditorApplication.playModeStateChanged -= CompileWhenBackInEditMode;
+        deferredCompilePending = false;
+        bool force = deferredForce;
+        bool onlyIfChanged = deferredOnlyIfChanged;
+        deferredForce = false;
+        EditorApplication.delayCall += () => Compile(force, onlyIfChanged);
     }
 
     /// Every source path with its last-write time, plus the compiler's — the

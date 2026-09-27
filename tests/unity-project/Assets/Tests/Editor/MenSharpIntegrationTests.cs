@@ -690,6 +690,46 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(0, rates["Hit"]);
     }
 
+    /// A program asset counts as up to date only while its stored program
+    /// was built from the current inputs by this package: a build record
+    /// that is missing or different — a store the SDK skipped during play
+    /// mode, an updated package — rebuilds it, whatever the assembly text
+    /// says.
+    [Test]
+    public void ProgramsAreRebuiltUnlessTheirBuildRecordMatches()
+    {
+        MenSharpCompiler.CompileAll();
+        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+        MenSharpProgramAsset program = MenSharpSources.FindProgram("MenSharpRuntimeSmoke");
+        Assert.IsNotNull(program, "MenSharpRuntimeSmoke program asset");
+        string assetPath = AssetDatabase.GetAssetPath(program);
+        string uasmPath = System.IO.Path.Combine("Library", "MenSharp", "MenSharpRuntimeSmoke.uasm");
+        string metaPath = System.IO.Path.Combine("Library", "MenSharp", "MenSharpRuntimeSmoke.meta.json");
+        Assert.IsTrue(System.IO.File.Exists(uasmPath), uasmPath);
+        string blobPath = System.IO.Path.ChangeExtension(uasmPath, ".uprog");
+        byte[] blob = System.IO.File.Exists(blobPath) ? System.IO.File.ReadAllBytes(blobPath) : null;
+        string expected = MenSharpImporter.ProgramSignature(
+            System.IO.File.ReadAllText(uasmPath), System.IO.File.ReadAllText(metaPath), blob);
+        Assert.AreEqual(expected, program.builtFrom, "a compile records what it stored");
+
+        MenSharpImporter.CreateOrUpdate(uasmPath, metaPath, assetPath, false, out bool unchanged);
+        Assert.IsTrue(unchanged, "the same inputs, already stored: left alone");
+
+        // the text still matches, only the record says the stored program
+        // came from something else — that is a rebuild
+        program.builtFrom = "built by an older package";
+        MenSharpImporter.CreateOrUpdate(uasmPath, metaPath, assetPath, false, out unchanged);
+        Assert.IsFalse(unchanged, "a stale build record rebuilds the program");
+        Assert.AreEqual(expected, program.builtFrom);
+        Assert.IsTrue(program.HasBuiltProgram);
+
+        // an asset the package has never built (an older package's) too
+        program.builtFrom = null;
+        MenSharpImporter.CreateOrUpdate(uasmPath, metaPath, assetPath, false, out unchanged);
+        Assert.IsFalse(unchanged, "no build record rebuilds the program");
+        Assert.AreEqual(expected, program.builtFrom);
+    }
+
     /// The declared variable types the inspector asks for before every
     /// play-mode repaint come from one symbol table per build of the
     /// program, not from a fresh RetrieveProgram (a whole-heap
