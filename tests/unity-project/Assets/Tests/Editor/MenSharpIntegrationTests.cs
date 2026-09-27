@@ -11,6 +11,7 @@ using UnityEditor.SceneManagement;
 using UnityEngine;
 using UnityEngine.TestTools;
 using VRC.Udon;
+using VRC.Udon.Common.Interfaces;
 
 public class MenSharpIntegrationTests
 {
@@ -678,6 +679,29 @@ public class MenSharpIntegrationTests
         Assert.AreEqual(0, rates["AliasedDefault"]);
         Assert.AreEqual(5, rates["Aim"]);
         Assert.AreEqual(0, rates["Hit"]);
+    }
+
+    /// The declared variable types the inspector asks for before every
+    /// play-mode repaint come from one symbol table per build of the
+    /// program, not from a fresh RetrieveProgram (a whole-heap
+    /// deserialization) each time; a rebuild drops the cached table.
+    [Test]
+    public void DeclaredSymbolsAreReadOncePerBuild()
+    {
+        MenSharpCompiler.CompileAll();
+        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+        MenSharpProgramAsset program = MenSharpSources.FindProgram("MenSharpRuntimeSmoke");
+        Assert.IsNotNull(program, "MenSharpRuntimeSmoke program asset");
+        IUdonSymbolTable first = program.DeclaredSymbols();
+        Assert.IsNotNull(first);
+        Assert.AreEqual(typeof(int), first.GetSymbolType("indexOfObject"));
+        Assert.IsFalse(first.HasAddressForSymbol("noSuchVariable"));
+        Assert.AreSame(first, program.DeclaredSymbols(), "the table is kept between lookups");
+        program.RefreshProgram();
+        IUdonSymbolTable rebuilt = program.DeclaredSymbols();
+        Assert.IsNotNull(rebuilt);
+        Assert.AreNotSame(first, rebuilt, "a rebuild reads the symbols afresh");
+        Assert.AreEqual(typeof(int), rebuilt.GetSymbolType("indexOfObject"));
     }
 }
 #endif

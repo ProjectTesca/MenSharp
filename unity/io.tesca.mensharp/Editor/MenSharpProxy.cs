@@ -321,14 +321,17 @@ public static class MenSharpProxy
     }
 
     /// The type the compiled program declared a public variable with, from
-    /// its symbol table (retrieved on first use); null when there is no
-    /// program to ask or the program has no such variable.
+    /// its symbol table; null when there is no program to ask or the program
+    /// has no such variable. The table comes from the program asset's cache
+    /// (one deserialization per build, see DeclaredSymbols) — this runs
+    /// before every play-mode repaint, and retrieving the program each time
+    /// deserialized its whole heap.
     private static Type DeclaredVariableType(UdonBehaviour udon, string name, ref IUdonSymbolTable symbols)
     {
         if (symbols == null)
         {
             var program = udon.programSource as MenSharpProgramAsset;
-            symbols = program?.SerializedProgramAsset?.RetrieveProgram()?.SymbolTable;
+            symbols = program != null ? program.DeclaredSymbols() : null;
             if (symbols == null)
             {
                 return null;

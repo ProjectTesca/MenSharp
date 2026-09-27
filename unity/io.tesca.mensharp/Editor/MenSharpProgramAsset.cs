@@ -76,8 +76,36 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         return layoutsByName.TryGetValue(typeName, out MenSharpLayout found) ? found : null;
     }
 
+    /// The compiled program's symbol table, deserialized once and kept until
+    /// the program is rebuilt. Null until first asked for.
+    [NonSerialized]
+    private IUdonSymbolTable declaredSymbols;
+
+    /// The symbol table of the program this asset carries — which public
+    /// variables exist and the types they were declared with — or null when
+    /// there is no program yet.
+    ///
+    /// Cached on purpose: the SDK's RetrieveProgram copies the byte code and
+    /// deserializes the whole heap on every call, its serialization cache
+    /// included, and the play-mode inspector asks for the declared types
+    /// before every repaint. Asking through RetrieveProgram each time dragged
+    /// the editor to a few frames per second while a large program was
+    /// selected. The symbol table never changes between two builds of the
+    /// program, so it is read once per build (and once per domain reload,
+    /// which drops the field).
+    public IUdonSymbolTable DeclaredSymbols()
+    {
+        if (declaredSymbols == null)
+        {
+            declaredSymbols = program?.SymbolTable ?? SerializedProgramAsset?.RetrieveProgram()?.SymbolTable;
+        }
+        return declaredSymbols;
+    }
+
     protected override void RefreshProgramImpl()
     {
+        // a rebuild changes the symbols: the next lookup reads them afresh
+        declaredSymbols = null;
         var watch = System.Diagnostics.Stopwatch.StartNew();
         if (!BuildDirectly())
         {
