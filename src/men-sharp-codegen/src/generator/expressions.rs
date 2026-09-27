@@ -4779,15 +4779,16 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // `ref`/`out` slots standing in for a field, element or property: the
         // extern writes the slot, and afterwards the slot is written home
         let mut write_backs: Vec<(Place, DataId)> = Vec::new();
-        // for calls into source: `ref`/`out` arguments stood in for by a named
-        // temporary (an element, a property), and where each goes home after
-        let mut source_by_ref: Vec<(DataId, Place)> = Vec::new();
+        // for calls into source: `ref`/`out` arguments stood in for by a
+        // value cell (a frame local, a property), and where each goes home
+        // after
+        let mut source_by_ref: Vec<ByRefWriteBack> = Vec::new();
         // for calls into *another* behaviour: Udon only raises an event by
         // name, with the arguments written to the callee's variables first
         // and `ref`/`out` ones read back after — values, not references
         // (argument index, where the value read back goes)
         let mut remote_by_ref: Vec<(usize, Place)> = Vec::new();
-        let mut ref_scratches: Vec<(DataId, DataId)> = Vec::new();
+        let mut ref_cells: Vec<(DataId, DataId)> = Vec::new();
         let cross_program = receiver
             .as_ref()
             .is_some_and(|(_, receiver_type)| self.is_program_reference(receiver_type));
@@ -4856,7 +4857,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                             argument,
                             modifier,
                             &parameter_type,
-                            &mut ref_scratches,
+                            &mut ref_cells,
                         ) {
                             Some((cell, write_back)) => {
                                 ordered[slot] = Some(cell);
@@ -5165,7 +5166,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         receiver: Option<(DataId, Type)>,
         mut values: Vec<DataId>,
         write_backs: Vec<(Place, DataId)>,
-        source_by_ref: Vec<(DataId, Place)>,
+        source_by_ref: Vec<ByRefWriteBack>,
         remote_by_ref: Vec<(usize, Place)>,
         span: Range<usize>,
         non_virtual: bool,
@@ -5214,8 +5215,14 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 if let Some(piece) =
                     self.try_reflect_intrinsic(ctx, call, symbol, &values, span.clone())
                 {
-                    for (temporary, place) in source_by_ref {
-                        self.write_place(ctx, place, temporary, span.clone());
+                    for write_back in source_by_ref {
+                        self.read_value_cell(
+                            ctx,
+                            write_back.cell,
+                            write_back.temporary,
+                            span.clone(),
+                        );
+                        self.write_place(ctx, write_back.place, write_back.temporary, span.clone());
                     }
                     return piece;
                 }
@@ -5681,19 +5688,20 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// A `ref`/`out` argument to a source method, as the reference cell the
     /// callee aliases the variable through (see `Place::ByName`): a variable
     /// with a heap symbol of its own is named directly, another behaviour's
-    /// public variable likewise, a reference parameter is passed on as is —
-    /// and anything else (an element, a property, a captured local) is stood
-    /// in for by a named temporary, returned with the place it goes home to.
+    /// public variable likewise, a reference parameter is passed on as is,
+    /// an element is named through its array — and anything else (a frame
+    /// local, a property) is stood in for by a value cell, returned with the
+    /// place it goes home to.
     fn source_by_ref_argument(
         &mut self,
         ctx: &mut Ctx<'ast>,
         argument: &'ast Argument<'ast, 'ast>,
         modifier: ArgumentModifier,
         parameter_type: &Type,
-        // (referent slot, its scratch) for the call so far: two arguments
-        // naming one variable share one scratch, and so one referent
-        scratches: &mut Vec<(DataId, DataId)>,
-    ) -> Option<(DataId, Option<(DataId, Place)>)> {
+        // (referent slot, its cell) for the call so far: two arguments naming
+        // one variable share one cell, and so one referent
+        cells: &mut Vec<(DataId, DataId)>,
+    ) -> Option<(DataId, Option<ByRefWriteBack>)> {
         let span = argument.span.clone();
         let discard = self.discard_argument_slot(ctx, argument, parameter_type);
         let place = match &argument.value {
@@ -5724,31 +5732,24 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             Place::Error => None,
             // a slot of this function's own frame (a local, a parameter): a
             // recursive call's frame restore would rewind what the callee
-            // wrote into it, so it is stood in for by a scratch outside every
-            // frame — one per variable, so `F(ref x, ref x)` still aliases —
-            // copied home after the call. A field or static, being no
-            // function's, is named directly
+            // wrote into it, so it is stood in for by a value cell — one per
+            // variable, so `F(ref x, ref x)` still aliases — read home after
+            // the call. A field or static, being no function's, is named
+            // directly
             Place::Slot(slot, ty) if self.is_frame_local(ctx, slot) => {
-                let (scratch, fresh) =
-                    match scratches.iter().find(|(referent, _)| *referent == slot) {
-                        Some(&(_, scratch)) => (scratch, false),
-                        None => {
-                            let udon_type = self.program.data[slot.0].udon_type.clone();
-                            let scratch = self.scratch_slot(&udon_type);
-                            scratches.push((slot, scratch));
-                            (scratch, true)
-                        }
-                    };
-                if fresh {
-                    // the callee may read before writing (and an unwritten
-                    // value slot would be null): the current value goes first
-                    self.copy(slot, scratch);
+                if let Some(&(_, cell)) = cells.iter().find(|(referent, _)| *referent == slot) {
+                    return Some((cell, None));
                 }
-                let name = self.program.data[scratch.0].name.clone();
-                let name = self.string_constant(&name);
-                let target = self.self_behaviour_slot();
-                let cell = self.reference_cell(ctx, target, name, span);
-                Some((cell, fresh.then_some((scratch, Place::Slot(slot, ty)))))
+                let cell = self.value_cell(ctx, Some(slot), span);
+                cells.push((slot, cell));
+                Some((
+                    cell,
+                    Some(ByRefWriteBack {
+                        cell,
+                        temporary: slot,
+                        place: Place::Slot(slot, ty),
+                    }),
+                ))
             }
             Place::Slot(slot, _) => {
                 let name = self.program.data[slot.0].name.clone();
@@ -5780,17 +5781,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             }
             other => {
                 let temporary = self.temp_for(parameter_type);
-                if modifier == ArgumentModifier::Ref {
+                let initial = if modifier == ArgumentModifier::Ref {
                     // the callee may read before writing: the current value
                     // has to be there first
                     let (value, _) = self.read_place(ctx, other.clone(), span.clone())?;
-                    self.copy(value, temporary);
-                }
-                let name = self.program.data[temporary.0].name.clone();
-                let name = self.string_constant(&name);
-                let target = self.self_behaviour_slot();
-                let cell = self.reference_cell(ctx, target, name, span);
-                Some((cell, Some((temporary, other))))
+                    Some(value)
+                } else {
+                    None
+                };
+                let cell = self.value_cell(ctx, initial, span);
+                Some((
+                    cell,
+                    Some(ByRefWriteBack {
+                        cell,
+                        temporary,
+                        place: other,
+                    }),
+                ))
             }
         }
     }

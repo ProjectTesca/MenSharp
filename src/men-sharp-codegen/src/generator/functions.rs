@@ -904,10 +904,11 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         key: &FunctionKey,
         this: Option<DataId>,
         arguments: &[DataId],
-        // `ref`/`out` arguments with no heap symbol of their own (an array
-        // element, a property): the callee wrote the named temporary the
-        // caller stood in for it, which is written home after the call
-        write_backs: &[(DataId, Place)],
+        // `ref`/`out` arguments with no heap symbol of their own the callee
+        // could be given (a frame local, a property): the callee wrote the
+        // value cell the caller stood in for it, which is read home after
+        // the call
+        write_backs: &[ByRefWriteBack],
         span: Range<usize>,
     ) -> Option<DataId> {
         self.ensure_function(key);
@@ -991,10 +992,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         self.program.code.push(Op::RestoreFrame(marker));
 
         // a `ref`/`out` argument that had to be stood in for: the callee
-        // wrote the caller's temporary by name; it goes home now. (A variable
-        // with a symbol of its own was written directly — nothing to copy.)
-        for (temporary, place) in write_backs {
-            self.write_place(ctx, place.clone(), *temporary, span.clone());
+        // wrote the value cell; it goes home now — after the frame restore,
+        // which is what a slot written by name would have been rewound by.
+        // (A variable with a symbol of its own was written directly —
+        // nothing to copy.)
+        for write_back in write_backs {
+            self.read_value_cell(ctx, write_back.cell, write_back.temporary, span.clone());
+            // a frame local is read straight into its slot
+            if matches!(write_back.place, Place::Slot(slot, _) if slot == write_back.temporary) {
+                self.effects.writes += 1;
+                continue;
+            }
+            self.write_place(
+                ctx,
+                write_back.place.clone(),
+                write_back.temporary,
+                span.clone(),
+            );
         }
 
         // the callee may have returned early with an exception pending: it

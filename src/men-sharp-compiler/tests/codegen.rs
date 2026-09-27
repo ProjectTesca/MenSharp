@@ -16853,3 +16853,108 @@ fn a_generic_externs_parameters_are_spelled_by_its_type_parameter() {
         "{errors:?}"
     );
 }
+
+/// A `ref`/`out` argument that is a local of the caller's frame was stood
+/// in for by one scratch slot per call site, outside every frame: shared by
+/// every activation, so a method reading its own `out` parameter after
+/// recursing through that site saw the innermost activation's value. Each
+/// call now gets a value cell of its own.
+#[test]
+fn out_arguments_survive_recursion_through_the_same_call_site() {
+    let source = r#"
+        using MenSharp;
+        public class T : MenSharpBehaviour {
+            public int r;
+            public int r2;
+            public int r3;
+            public int r4;
+            public int r5;
+            int Probe(int depth, out int result)
+            {
+                result = depth;
+                if (depth < 3) { Probe(depth + 1, out int ignored); }
+                return 0;
+            }
+            int ProbeLocal(int depth, out int result)
+            {
+                int mine = depth;
+                if (depth < 3) { ProbeLocal(depth + 1, out int ignored); }
+                result = mine;
+                return 0;
+            }
+            void Fill(int depth, int[] sink, out int result)
+            {
+                result = depth;
+                if (depth < 3) { Fill(depth + 1, sink, out int ignored); }
+                sink[depth] = result;
+            }
+            void Twice(int depth, ref int a)
+            {
+                a *= 2;
+                if (depth < 2) { int local = depth; Twice(depth + 1, ref local); a += local; }
+            }
+            // the caller's `out` argument is its own parameter, and two
+            // arguments name one variable
+            void Pair(int depth, int[] sink, out int result, int mine)
+            {
+                result = depth;
+                if (depth < 3) { Pair(depth + 1, sink, out mine, mine); Both(ref mine, ref mine); }
+                sink[depth] = result * 10 + (depth < 3 ? mine : 0);
+            }
+            void Both(ref int a, ref int b) { a += 1; b *= 2; }
+            public void Interact() {
+                Probe(0, out int a); r = a;
+                ProbeLocal(0, out int b); r2 = b;
+                int[] sink = new int[4];
+                Fill(0, sink, out int c);
+                r3 = sink[0] * 1000 + sink[1] * 100 + sink[2] * 10 + sink[3];
+                int x = 1;
+                Twice(0, ref x);           // 2 + (0*2 + (1*2)) = 2 + 2 = 4
+                r4 = x;
+                int[] sink2 = new int[4];
+                Pair(0, sink2, out int d, 0);
+                // depth 3: 30; depth 2: mine = (3+1)*2 = 8 -> 28; depth 1:
+                // (2+1)*2 = 6 -> 16; depth 0: (1+1)*2 = 4 -> 4
+                r5 = sink2[0] * 1000000 + sink2[1] * 10000 + sink2[2] * 100 + sink2[3];
+            }
+        }
+    "#;
+    let emulator = run_behaviour(source, "T", "_interact").unwrap();
+    assert_eq!(int_of(&emulator, "r"), 0);
+    assert_eq!(int_of(&emulator, "r2"), 0);
+    assert_eq!(int_of(&emulator, "r3"), 123);
+    assert_eq!(int_of(&emulator, "r4"), 4);
+    assert_eq!(int_of(&emulator, "r5"), 4_16_28_30);
+}
+
+/// `Deconstruct` hands its `out` parts over the same way; a recursive
+/// deconstruction keeps each activation's parts apart.
+#[test]
+fn deconstruct_parts_survive_recursion() {
+    let source = r#"
+        using MenSharp;
+        public class Node {
+            public int value;
+            public Node next;
+            public void Deconstruct(out int v, out Node n) { v = value; n = next; }
+        }
+        public class T : MenSharpBehaviour {
+            public int r;
+            int Sum(Node node)
+            {
+                if (node == null) return 0;
+                var (v, n) = node;
+                int rest = Sum(n);
+                return v * 10 + rest;   // v must still be this node's value
+            }
+            public void Interact() {
+                var c = new Node { value = 3 };
+                var b = new Node { value = 2, next = c };
+                var a = new Node { value = 1, next = b };
+                r = Sum(a);             // 1*10 + (2*10 + (3*10 + 0)) = 60
+            }
+        }
+    "#;
+    let emulator = run_behaviour(source, "T", "_interact").unwrap();
+    assert_eq!(int_of(&emulator, "r"), 60);
+}

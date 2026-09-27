@@ -1102,7 +1102,7 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         call: &ResolvedCall,
         receiver: Option<(DataId, Type)>,
         values: Vec<DataId>,
-        source_by_ref: Vec<(DataId, Place)>,
+        source_by_ref: Vec<ByRefWriteBack>,
         span: Range<usize>,
     ) -> Piece {
         let Some((delegate, delegate_type)) = receiver else {

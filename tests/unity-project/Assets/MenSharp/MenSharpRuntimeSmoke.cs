@@ -429,6 +429,25 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         indexOfObject = System.Array.IndexOf(objects, gameObject);
     }
 
+    public int recursiveOut;
+
+    // an `out` argument that is a local of the caller's frame, through a
+    // call site the callee reaches again: each activation keeps its own
+    // (one shared scratch slot handed the innermost value to every level)
+    void FillDepths(int depth, int[] sink, out int result)
+    {
+        result = depth;
+        if (depth < 3) { FillDepths(depth + 1, sink, out int ignored); }
+        sink[depth] = result;
+    }
+
+    public void RecursiveOutArguments()
+    {
+        int[] sink = new int[4];
+        FillDepths(0, sink, out int top);
+        recursiveOut = sink[0] * 1000 + sink[1] * 100 + sink[2] * 10 + sink[3] + top * 10000;
+    }
+
     public void NestedConstants()
     {
         // a nested type reads its enclosing type's statics by bare name

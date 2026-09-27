@@ -402,6 +402,11 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("GenericExternsReference");
         Assert.AreEqual(1, smoke.GetProgramVariable("indexOfObject"));
 
+        // an `out` argument of the caller's frame through a recursive call site
+        // is per activation, not one scratch slot shared by every level
+        smoke.RunProgram("RecursiveOutArguments");
+        Assert.AreEqual(123, smoke.GetProgramVariable("recursiveOut"));
+
         // a generic class's static constructor runs once per closed type
         smoke.RunProgram("GenericStaticConstructors");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));

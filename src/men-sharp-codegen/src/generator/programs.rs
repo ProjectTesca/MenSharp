@@ -853,6 +853,58 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         cell
     }
 
+    /// A reference cell that is its own storage — `[cell, value, 1]`: an
+    /// element cell naming index 1 of the cell itself. It stands in for a
+    /// `ref`/`out` argument the callee cannot be given a heap symbol's name
+    /// for: a slot of the caller's frame (a local, a parameter), a
+    /// property, a `Deconstruct` part.
+    ///
+    /// Why not a named scratch slot: a slot outside every frame is shared
+    /// by every activation of the call site, so a recursive call through
+    /// the same site handed the callee's own `out` parameter and the cell
+    /// of its recursive call one slot — the callee read its parameter back
+    /// after recursing and saw the innermost value. A slot inside the frame
+    /// is rewound by the frame restore after the call, before the value
+    /// can be copied home. A fresh allocation per call is per activation:
+    /// the temp holding it is saved and restored with the frame, and the
+    /// cell itself lives on the VM's heap until the call is over.
+    pub(super) fn value_cell(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        initial: Option<DataId>,
+        span: Range<usize>,
+    ) -> DataId {
+        let cell = self.empty_reference_cell(ctx, span.clone());
+        let zero = self.int_constant(0);
+        let one = self.int_constant(1);
+        let two = self.int_constant(2);
+        self.set_element(ctx, cell, zero, cell, span.clone());
+        // the callee may read before writing (`ref`): the current value goes
+        // in first; an `out` starts null, as an unassigned slot would
+        if let Some(initial) = initial {
+            self.set_element(ctx, cell, one, initial, span.clone());
+        }
+        self.set_element(ctx, cell, two, one, span);
+        cell
+    }
+
+    /// Reads a value cell's value into `into`, a slot of the value's type.
+    pub(super) fn read_value_cell(
+        &mut self,
+        ctx: &Ctx<'ast>,
+        cell: DataId,
+        into: DataId,
+        span: Range<usize>,
+    ) {
+        let one = self.int_constant(1);
+        self.call_extern(
+            ctx,
+            "SystemObjectArray.__Get__SystemInt32__SystemObject",
+            &[cell, one, into],
+            span,
+        );
+    }
+
     fn empty_reference_cell(&mut self, ctx: &Ctx<'ast>, span: Range<usize>) -> DataId {
         let three = self.int_constant(3);
         let cell = self.temp("SystemObjectArray");

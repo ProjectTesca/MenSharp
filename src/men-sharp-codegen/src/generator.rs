@@ -773,6 +773,16 @@ struct Disposal {
     check_null: bool,
 }
 
+/// A `ref`/`out` argument to a source method that was stood in for by a
+/// value cell (see `value_cell`): after the call, the cell's value goes
+/// home to `place` through `temporary`, a slot of the place's type.
+#[derive(Clone)]
+struct ByRefWriteBack {
+    cell: DataId,
+    temporary: DataId,
+    place: Place,
+}
+
 /// An assignable location.
 #[derive(Clone)]
 enum Place {

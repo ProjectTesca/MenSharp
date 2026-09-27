@@ -718,25 +718,23 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         let receiver = Some((value, self.substitute(ty, &ctx.key.bindings)));
         let (this, key) =
             self.source_call_target(ctx, &call, symbol, &receiver, false, span.clone())?;
-        // one temp per `out` parameter, handed over as a reference cell
-        // naming it (see `Place::ByName`): `Deconstruct` writes the temps
-        // themselves, by name
-        // the temps are frame slots a recursive `Deconstruct` would rewind,
-        // so each is stood in for by a scratch outside every frame, copied
-        // home after
+        // one temp per `out` parameter, each stood in for by a value cell
+        // (see `value_cell`: the temps are frame slots a recursive
+        // `Deconstruct` would rewind) that `Deconstruct` writes and the
+        // call reads home after
         let mut parts: Vec<(DataId, Type)> = Vec::with_capacity(wanted);
         let mut values: Vec<DataId> = Vec::with_capacity(wanted);
-        let mut write_backs: Vec<(DataId, Place)> = Vec::with_capacity(wanted);
-        let target = self.self_behaviour_slot();
+        let mut write_backs: Vec<ByRefWriteBack> = Vec::with_capacity(wanted);
         for parameter in &call.signature.parameters {
             let part = self.substitute(&parameter.parameter_type, &ctx.key.bindings);
             let slot = self.temp_for(&part);
-            let udon_type = self.program.data[slot.0].udon_type.clone();
-            let scratch = self.scratch_slot(&udon_type);
-            let name = self.program.data[scratch.0].name.clone();
-            let name = self.string_constant(&name);
-            values.push(self.reference_cell(ctx, target, name, span.clone()));
-            write_backs.push((scratch, Place::Slot(slot, part.clone())));
+            let cell = self.value_cell(ctx, None, span.clone());
+            values.push(cell);
+            write_backs.push(ByRefWriteBack {
+                cell,
+                temporary: slot,
+                place: Place::Slot(slot, part.clone()),
+            });
             parts.push((slot, part));
         }
         // `Deconstruct` returns void, so there is no result to take

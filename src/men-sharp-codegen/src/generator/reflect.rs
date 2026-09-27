@@ -352,27 +352,25 @@ impl<'a, 'ast> Generator<'a, 'ast> {
                 bindings,
             };
             // `visitor.Visit(info, ref field)`: the field's current value
-            // stands in, handed over as a reference cell naming it, and goes
-            // back into the field after (see `Place::ByName`)
+            // stands in, handed over in a value cell (see `value_cell`),
+            // and goes back into the field after
             let place = Place::Field {
                 object: target,
                 index,
                 ty: field.ty.clone(),
             };
-            let udon_type = self.program.data[current.0].udon_type.clone();
-            let scratch = self.scratch_slot(&udon_type);
-            self.copy(current, scratch);
-            let name = self.program.data[scratch.0].name.clone();
-            let name = self.string_constant(&name);
-            let target_behaviour = self.self_behaviour_slot();
-            let cell = self.reference_cell(ctx, target_behaviour, name, span.clone());
+            let cell = self.value_cell(ctx, Some(current), span.clone());
             self.field_visits.insert(key.clone());
             self.call_function(
                 ctx,
                 &key,
                 Some(visitor),
                 &[info, cell],
-                &[(scratch, place)],
+                &[ByRefWriteBack {
+                    cell,
+                    temporary: current,
+                    place,
+                }],
                 span.clone(),
             );
         }
