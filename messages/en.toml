@@ -178,6 +178,7 @@ property_name_has_no_setter_the_callback = "`{property_name}` has no setter — 
 property_name_must_have_the_same_type = "`{property_name}` must have the same type as the field: its setter receives the value that was written"
 two_fields_point_their_fieldchangecallback_at_property = "two fields point their `[FieldChangeCallback]` at `{property_name}`; a change could not say which field it was"
 signature_is_not_exposed_by_udon = "`{signature}` is not exposed by Udon"
+generic_extern_reads_a_t_array_as_object = "`{signature}` is implemented on Udon with `T = UnityEngine.Object`: the SDK wrapper reads the `T[]` as `UnityEngine.Object[]`, so a `{element}[]` halts the VM at run time. Only an array of engine objects (GameObject, Transform, a component, a behaviour) can go through it; for anything else use a non-generic overload (`SetPixels32`, `Array.IndexOf(Array, object)`)"
 name_is_used_from_mensharp_code_but = "`{name}` is used from MenSharp code, but MenSharp cannot compile it: {reason}"
 name_derives_from_base_an_engine_class = "`{name}` derives from `{base}`, an engine class: Udon can neither create nor hold such an object, so the class cannot be used from a program (an UdonSharp behaviour can — through a reference to it)"
 name_hides_the_name_declared_in_owner = "`{name}` hides the `{name}` declared in `{owner}`: a behaviour's public variables share one namespace on Udon, so the name must be unique across the class hierarchy"

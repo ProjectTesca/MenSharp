@@ -418,6 +418,16 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
 
     public byte chainedConstant;
     public int nestedConstant;
+    public int indexOfObject;
+
+    // a generic engine method whose T sits in a parameter: the SDK wrapper
+    // is written with T = UnityEngine.Object, so only an array of engine
+    // objects can go through (anything else is a compile error)
+    public void GenericExternsReference()
+    {
+        GameObject[] objects = { null, gameObject };
+        indexOfObject = System.Array.IndexOf(objects, gameObject);
+    }
 
     public void NestedConstants()
     {

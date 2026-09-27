@@ -1959,6 +1959,8 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     /// (`UdonBehaviour.SetProgramVariable<T>(string, T)` → the whitelisted
     /// `(string, object)` extern), and passing a type value — or worse, a
     /// type the VM cannot name like `int[]` — is wrong for those.
+    /// The extern for an external call: its full signature, and whether the
+    /// generic method's type argument travels as a value.
     pub(super) fn external_signature(
         &mut self,
         ctx: &Ctx,
@@ -2037,20 +2039,89 @@ impl<'a, 'ast> Generator<'a, 'ast> {
         // the return is spelled by the method's own type parameter: `T` for
         // `GetComponent<T>`, `TArray` for `GetComponents<T>` (which returns
         // `T[]`)
-        let generic_return = match &member.signature {
-            MemberSignature::Function(original) => match &original.return_type {
+        // — and a parameter typed by it too: `SetPixelData<T>(T[] data, …)`
+        // is `__SetPixelData__TArray_SystemInt32_SystemInt32__SystemVoid`,
+        // `Array.IndexOf<T>(T[], T)` is `__IndexOf__TArray_T__SystemInt32`.
+        // Everything else keeps its instantiated spelling
+        let generic_part = |original: &Type, instantiated: &str| -> String {
+            match original {
+                Type::ExternalMethodTypeParameter(_) => "T".into(),
                 Type::Array { element, rank: 1 }
                     if matches!(**element, Type::ExternalMethodTypeParameter(_)) =>
                 {
-                    "TArray"
+                    "TArray".into()
                 }
-                _ => "T",
-            },
-            _ => "T",
+                _ => instantiated.to_string(),
+            }
         };
-        let generic_suffix = format!("__{name}{middle}__{generic_return}");
+        let (generic_parts, generic_return) = match &member.signature {
+            MemberSignature::Function(original) if original.parameters.len() == parts.len() => {
+                let generic_parts: Vec<String> = original
+                    .parameters
+                    .iter()
+                    .zip(&parts)
+                    .map(|(parameter, part)| generic_part(&parameter.parameter_type, part))
+                    .collect();
+                (
+                    generic_parts,
+                    generic_part(&original.return_type, &return_part),
+                )
+            }
+            _ => (parts.clone(), "T".to_string()),
+        };
+        let generic_middle = if generic_parts.is_empty() {
+            String::new()
+        } else {
+            format!("__{}", generic_parts.join("_"))
+        };
+        let generic_suffix = format!("__{name}{generic_middle}__{generic_return}");
         if let Some(full) = self.real_extern(&declaring, receiver.as_ref(), &generic_suffix) {
-            return Some((full, true));
+            // the SDK's wrapper for a `TArray` parameter is written with
+            // `T = UnityEngine.Object`: it reads the slot as
+            // `UnityEngine.Object[]` and calls the method so
+            // (`SetPixelData<Object>(heap.GetHeapVariable<Object[]>(…))`,
+            // decompiled from VRC.Udon.Wrapper under `using UnityEngine`).
+            // A `float[]`, an `int[]`, even a `string[]` is no such array,
+            // and the VM halts. Refused here, where it can be said why
+            if let MemberSignature::Function(original) = &member.signature {
+                for parameter in &original.parameters {
+                    let Type::Array { element, rank: 1 } = &parameter.parameter_type else {
+                        continue;
+                    };
+                    let Type::ExternalMethodTypeParameter(index) = **element else {
+                        continue;
+                    };
+                    let Some(argument) = call.type_arguments.get(index as usize) else {
+                        continue;
+                    };
+                    let argument = self.substitute(argument, &ctx.key.bindings);
+                    let engine_object = self.is_behaviour_reference(&argument)
+                        || self
+                            .external_chain(&argument)
+                            .iter()
+                            .any(|name| name == "UnityEngineObject");
+                    if !engine_object {
+                        let element = self.display_type(&argument);
+                        self.error(
+                            ctx,
+                            Message::key("codegen.generic_extern_reads_a_t_array_as_object")
+                                .arg("signature", &full)
+                                .arg("element", element),
+                            span.clone(),
+                        );
+                        return None;
+                    }
+                }
+            }
+            let has_receiver = !call.is_static && !name.starts_with(".ctor");
+            let passes = self.type_argument_travels(
+                &full,
+                has_receiver,
+                parts.len(),
+                signature.return_type != Type::Void,
+                call.type_arguments.len(),
+            );
+            return Some((full, passes));
         }
         // otherwise the method may be C# sugar over a non-generic `object`
         // extern: erase its type parameters to `object` and use that, without
@@ -2068,6 +2139,26 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             std::slice::from_ref(&generic_suffix),
         )?;
         Some((format!("{owner}.{generic_suffix}"), true))
+    }
+
+    /// Does the VM's extern take the generic method's type argument as a
+    /// `System.Type` value? `GetComponent__T` does (receiver, type, result);
+    /// `SetPixelData__TArray_…` and `IndexOf__TArray_T__…` do not — their
+    /// wrapper reads `T` off the array it is handed. The node's parameter
+    /// count tells the two apart.
+    fn type_argument_travels(
+        &self,
+        signature: &str,
+        has_receiver: bool,
+        parameters: usize,
+        returns: bool,
+        type_arguments: usize,
+    ) -> bool {
+        let Some(node) = self.nodes.extern_node(signature) else {
+            return true;
+        };
+        let without = usize::from(has_receiver) + parameters + usize::from(returns);
+        node.parameters.len() == without + type_arguments
     }
 
     /// The full extern signature for `suffix`, but only when the VM really

@@ -177,6 +177,7 @@ property_name_has_no_setter_the_callback = "`{property_name}` にセッターが
 property_name_must_have_the_same_type = "`{property_name}` の型はフィールドと同じである必要があります: セッターは書き込まれた値を受け取ります"
 two_fields_point_their_fieldchangecallback_at_property = "2 つのフィールドが `[FieldChangeCallback]` で `{property_name}` を指しています; 変更時にどちらのフィールドか判別できません"
 signature_is_not_exposed_by_udon = "`{signature}` は Udon に公開されていません"
+generic_extern_reads_a_t_array_as_object = "`{signature}` は Udon では `T = UnityEngine.Object` として実装されています: SDK のラッパーは `T[]` を `UnityEngine.Object[]` として読むため、`{element}[]` は実行時に VM を停止させます。通せるのはエンジンオブジェクト（GameObject、Transform、コンポーネント、ビヘイビア）の配列だけです。それ以外は非ジェネリックなオーバーロード（`SetPixels32`、`Array.IndexOf(Array, object)`）を使ってください"
 name_is_used_from_mensharp_code_but = "`{name}` は MenSharp のコードから使われていますが、MenSharp ではコンパイルできません: {reason}"
 name_derives_from_base_an_engine_class = "`{name}` はエンジンのクラス `{base}` を継承しています: Udon はそのようなオブジェクトを生成も保持もできないので、このクラスはプログラムから使えません（UdonSharp のビヘイビアなら参照経由で使えます）"
 name_hides_the_name_declared_in_owner = "`{name}` は `{owner}` で宣言された `{name}` を隠しています: Udon ではビヘイビアの public 変数は 1 つの名前空間を共有するため、クラス階層全体で名前を一意にする必要があります"

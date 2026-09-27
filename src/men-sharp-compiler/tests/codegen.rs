@@ -16757,3 +16757,99 @@ fn a_network_callable_refuses_overloads_and_a_rate_that_is_no_constant() {
     let meta = program.output.program.to_meta_json().unwrap();
     assert!(!meta.contains(r#""event": "Hit""#), "{meta}");
 }
+
+#[test]
+fn a_generic_externs_parameters_are_spelled_by_its_type_parameter() {
+    // `SetPixelData<T>(T[] data, int, int)` was looked up as
+    // `__SetPixelData__SystemSingleArray_…__T` — the instantiated parameter
+    // and a `T` return the method does not have — and reported as not
+    // exposed. Udon spells a parameter typed by the method's type parameter
+    // `T` / `TArray`, and the return by its real type; such an extern takes
+    // no `System.Type` value (its node's parameter count says so)
+    let Some((errors, text)) = compile_unity_behaviour(
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Finder : MenSharpBehaviour
+            {
+                public int found;
+                public void Interact()
+                {
+                    Transform[] items = { transform, transform };
+                    found = System.Array.IndexOf(items, transform);
+                }
+            }
+        }
+        "#,
+        &["Game", "Finder"],
+    ) else {
+        return;
+    };
+    assert_eq!(errors, Vec::<String>::new());
+    assert!(
+        text.contains("EXTERN, \"SystemArray.__IndexOf__TArray_T__SystemInt32\""),
+        "{text}"
+    );
+
+    // the wrapper is written with `T = UnityEngine.Object` (decompiled from
+    // VRC.Udon.Wrapper: `SetPixelData<Object>(heap.GetHeapVariable<Object[]>(…))`
+    // under `using UnityEngine`): any other element type halts the VM, so
+    // it is refused at compile time, naming the extern it would have been
+    let Some((errors, _)) = compile_unity_behaviour(
+        r#"
+        using MenSharp;
+        using UnityEngine;
+        namespace Game
+        {
+            public class Pixels : MenSharpBehaviour
+            {
+                public Texture2D texture;
+                public int found;
+                public void Interact()
+                {
+                    float[] data = { 0.5f, 0.25f, 1f, 0f };
+                    texture.SetPixelData(data, 0, 0);
+                    int[] numbers = { 1, 2, 3 };
+                    found = System.Array.IndexOf(numbers, 3);
+                    string[] names = { "a", "b" };
+                    found += System.Array.IndexOf(names, "b");
+                }
+            }
+        }
+        "#,
+        &["Game", "Pixels"],
+    ) else {
+        return;
+    };
+    for (signature, element) in [
+        (
+            "UnityEngineTexture2D.__SetPixelData__TArray_SystemInt32_SystemInt32__SystemVoid",
+            "System.Single",
+        ),
+        (
+            "SystemArray.__IndexOf__TArray_T__SystemInt32",
+            "System.Int32",
+        ),
+        (
+            "SystemArray.__IndexOf__TArray_T__SystemInt32",
+            "System.String",
+        ),
+    ] {
+        assert!(
+            errors.iter().any(|error| {
+                error.contains(signature)
+                    && error.contains(&format!("`{element}[]`"))
+                    && error.contains("UnityEngine.Object[]")
+            }),
+            "{signature} / {element}: {errors:?}"
+        );
+    }
+    assert!(
+        !errors
+            .iter()
+            .any(|error| error.contains("SystemSingleArray")),
+        "{errors:?}"
+    );
+}

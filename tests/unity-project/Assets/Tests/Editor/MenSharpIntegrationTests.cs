@@ -395,6 +395,12 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("NestedConstants");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedConstant"));
 
+        // a generic engine extern with T in a parameter position: the SDK wrapper is
+        // written with T = UnityEngine.Object, so an array of engine objects goes through
+        // (any other element type is refused at compile time)
+        smoke.RunProgram("GenericExternsReference");
+        Assert.AreEqual(1, smoke.GetProgramVariable("indexOfObject"));
+
         // a generic class's static constructor runs once per closed type
         smoke.RunProgram("GenericStaticConstructors");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));
