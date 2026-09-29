@@ -52,6 +52,41 @@ namespace MenSharp
         {
         }
 
+        public object GetProgramVariable(string name)
+        {
+            return null;
+        }
+
+        public void SetProgramVariable(string name, object value)
+        {
+        }
+
+        public void SendCustomEventDelayedSeconds(
+            string eventName,
+            float delaySeconds,
+            VRC.Udon.Common.Enums.EventTiming eventTiming = VRC.Udon.Common.Enums.EventTiming.Update)
+        {
+        }
+
+        public void SendCustomEventDelayedFrames(
+            string eventName,
+            int delayFrames,
+            VRC.Udon.Common.Enums.EventTiming eventTiming = VRC.Udon.Common.Enums.EventTiming.Update)
+        {
+        }
+
+        public bool DisableInteractive
+        {
+            get { return false; }
+            set { }
+        }
+
+        public string InteractionText
+        {
+            get { return null; }
+            set { }
+        }
+
         public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName)
         {
         }
