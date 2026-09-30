@@ -73,6 +73,45 @@ namespace MenSharp
         {
             udonBehaviour.SendCustomEvent(eventName);
         }
+
+        public object GetProgramVariable(string name)
+        {
+            return udonBehaviour.GetProgramVariable(name);
+        }
+
+        public void SetProgramVariable(string name, object value)
+        {
+            udonBehaviour.SetProgramVariable(name, value);
+        }
+
+        public void SendCustomEventDelayedSeconds(
+            string eventName,
+            float delaySeconds,
+            VRC.Udon.Common.Enums.EventTiming eventTiming = VRC.Udon.Common.Enums.EventTiming.Update)
+        {
+            udonBehaviour.SendCustomEventDelayedSeconds(eventName, delaySeconds, eventTiming);
+        }
+
+        public void SendCustomEventDelayedFrames(
+            string eventName,
+            int delayFrames,
+            VRC.Udon.Common.Enums.EventTiming eventTiming = VRC.Udon.Common.Enums.EventTiming.Update)
+        {
+            udonBehaviour.SendCustomEventDelayedFrames(eventName, delayFrames, eventTiming);
+        }
+
+        public bool DisableInteractive
+        {
+            get { return udonBehaviour.DisableInteractive; }
+            set { udonBehaviour.DisableInteractive = value; }
+        }
+
+        public string InteractionText
+        {
+            get { return udonBehaviour.InteractionText; }
+            set { udonBehaviour.InteractionText = value; }
+        }
+
         public void SendCustomNetworkEvent(VRC.Udon.Common.Interfaces.NetworkEventTarget target, string eventName)
         {
             udonBehaviour.SendCustomNetworkEvent(target, eventName);
