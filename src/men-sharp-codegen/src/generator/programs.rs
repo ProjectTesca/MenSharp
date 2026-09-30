@@ -700,6 +700,29 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             );
             return Place::Error;
         }
+        // a property declared on `MenSharpBehaviour` itself that is Udon's
+        // own on every UdonBehaviour — `door.DisableInteractive`,
+        // `door.InteractionText`: on the behaviour itself its body runs
+        // through the program's own UdonBehaviour, on another one it is the
+        // same extern on that program's receiver (as a method of the base
+        // class is, see `try_marker_member_call`). The other program has no
+        // accessor event for it to raise
+        if member.kind == SymbolKind::Property
+            && self.marker.is_some()
+            && entry.parent == self.marker
+            && let Some(type_name) = self.extern_type_name(&ty)
+        {
+            let getter = format!("{BEHAVIOUR_EXTERN_TYPE}.__get_{name}__{type_name}");
+            let setter = format!("{BEHAVIOUR_EXTERN_TYPE}.__set_{name}__{type_name}__SystemVoid");
+            if self.nodes.has_signature(&getter) || self.nodes.has_signature(&setter) {
+                return Place::ExternalProperty {
+                    receiver: Some(receiver),
+                    owner: BEHAVIOUR_EXTERN_TYPE.into(),
+                    name,
+                    ty,
+                };
+            }
+        }
         let by_name = match member.kind {
             SymbolKind::Field | SymbolKind::Event => true,
             SymbolKind::Property => !foreign && self.is_auto_property(symbol),

@@ -448,6 +448,37 @@ public class MenSharpRuntimeSmoke : MenSharpBehaviour
         recursiveOut = sink[0] * 1000 + sink[1] * 100 + sink[2] * 10 + sink[3] + top * 10000;
     }
 
+    public int compatVariable;
+    public string compatText;
+    public bool compatDisabled;
+    public string compatRemoteText;
+    public bool compatRemoteDisabled;
+    public int compatRemoteVariable;
+
+    // the UdonSharp-compatible members of the base class: on the behaviour
+    // itself, and on a behaviour reference — which reaches the receiver's
+    // externs, not accessor events (the reference is this same program,
+    // so the other-behaviour path runs on the real VM without a second one)
+    public void UdonSharpCompatibleMembers()
+    {
+        SetProgramVariable(nameof(compatVariable), 5);
+        compatVariable = (int)GetProgramVariable(nameof(compatVariable)) + 1;
+        InteractionText = "Open";
+        compatText = InteractionText;
+        DisableInteractive = true;
+        compatDisabled = DisableInteractive;
+        DisableInteractive = false;
+
+        MenSharpRuntimeSmoke other = this;
+        other.InteractionText = "Knock";
+        compatRemoteText = other.InteractionText;
+        other.DisableInteractive = true;
+        compatRemoteDisabled = other.DisableInteractive;
+        other.DisableInteractive = false;
+        other.SetProgramVariable(nameof(compatRemoteVariable), 8);
+        compatRemoteVariable = (int)other.GetProgramVariable(nameof(compatRemoteVariable)) + 1;
+    }
+
     public int typedLambdaPayload;
 
     // the lambda's written parameter types fix `TPayload` — no `<int>` on

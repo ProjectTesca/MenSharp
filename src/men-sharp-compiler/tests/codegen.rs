@@ -15517,6 +15517,20 @@ fn vrc_udon_common_dll() -> Option<std::path::PathBuf> {
     None
 }
 
+/// The SDK's `VRC.Udon.dll` — what `UdonBehaviour` lives in — as a VRChat
+/// project on this machine compiled it (it ships as source). None: the
+/// test is skipped.
+fn vrc_udon_dll() -> Option<std::path::PathBuf> {
+    let projects = std::path::Path::new(&std::env::var("HOME").ok()?).join("ALCOM/Projects");
+    for project in std::fs::read_dir(projects).ok()?.flatten() {
+        let dll = project.path().join("Library/ScriptAssemblies/VRC.Udon.dll");
+        if dll.exists() {
+            return Some(dll);
+        }
+    }
+    None
+}
+
 #[test]
 fn a_behaviour_is_an_object_and_an_event_receiver() {
     // `Debug.Log("meow", this)`, `IUdonEventReceiver r = this`: at run time
@@ -16996,4 +17010,121 @@ fn explicitly_typed_lambda_parameters_fix_the_type_arguments() {
     let emulator = run_behaviour(source, "T", "_interact").unwrap();
     assert_eq!(int_of(&emulator, "moved"), 42);
     assert_eq!(string_of(&emulator, "named"), "card7");
+}
+
+/// The UdonSharp-compatible members of the base class (#10) reach the other
+/// program's UdonBehaviour directly: a method through its extern, and a
+/// property too — `door.InteractionText` has no accessor event on the other
+/// program to raise, it is `IUdonEventReceiver`'s property on that
+/// receiver. On the behaviour itself they run through its own
+/// UdonBehaviour, the optional `EventTiming` defaulting to `Update`.
+#[test]
+fn udon_members_of_the_base_class_reach_another_behaviours_receiver() {
+    let (Some(dotnet), Some(unity), Some(udon), Some(behaviour)) = (
+        dotnet_shared_dir(),
+        unity_managed_dir(),
+        vrc_udon_common_dll(),
+        vrc_udon_dll(),
+    ) else {
+        eprintln!("skipped: no .NET runtime, Unity or compiled VRChat SDK on this machine");
+        return;
+    };
+    let compiler = Compiler::new(CompilerSettings::default()).unwrap();
+    let bytes = vec![
+        std::fs::read(dotnet.join("System.Private.CoreLib.dll")).unwrap(),
+        std::fs::read(unity.join("UnityEngine/UnityEngine.CoreModule.dll")).unwrap(),
+        std::fs::read(udon).unwrap(),
+        std::fs::read(behaviour).unwrap(),
+    ];
+    let references = compiler.load_references(&bytes).unwrap();
+    let source = r#"
+        using MenSharp;
+        using VRC.Udon.Common.Enums;
+        namespace Game
+        {
+            public class Door : MenSharpBehaviour
+            {
+                public int count;
+                public void Open() { count++; }
+            }
+            public class Probe : MenSharpBehaviour
+            {
+                public Door door;
+                public object read;
+                public bool flag;
+                public string text;
+                public void Tick() { }
+                public void Interact()
+                {
+                    SetProgramVariable("text", "self");
+                    read = GetProgramVariable("text");
+                    SendCustomEventDelayedSeconds(nameof(Tick), 1.5f);
+                    SendCustomEventDelayedFrames(nameof(Tick), 2, EventTiming.LateUpdate);
+                    DisableInteractive = true;
+                    InteractionText = "Open";
+                }
+                public void Other()
+                {
+                    door.SetProgramVariable("count", 7);
+                    read = door.GetProgramVariable("count");
+                    door.SendCustomEventDelayedFrames(nameof(Door.Open), 1);
+                    door.DisableInteractive = true;
+                    flag = door.DisableInteractive;
+                    door.InteractionText = "Knock";
+                    text = door.InteractionText;
+                }
+            }
+        }
+    "#;
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources_for(&references));
+    let files = compiler.parse(sources);
+    assert_no_syntax_errors(&files);
+    let declarations = compiler.collect_declarations(&files);
+    let signatures = compiler.resolve_signatures(&declarations, &references);
+    let bodies = compiler.check_bodies(&declarations, &signatures, &references);
+    assert_eq!(bodies.errors, vec![], "type errors");
+    let output = compiler.generate_udon(
+        &declarations,
+        &signatures,
+        &bodies,
+        &references,
+        &["Game", "Probe"],
+    );
+    let errors: Vec<String> = output
+        .errors
+        .iter()
+        .map(|e| e.message.to_string())
+        .collect();
+    assert!(errors.is_empty(), "{errors:#?}");
+    let text = output.program.to_uasm().unwrap();
+    const RECEIVER: &str = "VRCUdonCommonInterfacesIUdonEventReceiver";
+    for signature in [
+        "__get_DisableInteractive__SystemBoolean",
+        "__set_DisableInteractive__SystemBoolean__SystemVoid",
+        "__get_InteractionText__SystemString",
+        "__set_InteractionText__SystemString__SystemVoid",
+        "__GetProgramVariable__SystemString__SystemObject",
+        "__SetProgramVariable__SystemString_SystemObject__SystemVoid",
+        "__SendCustomEventDelayedSeconds__SystemString_SystemSingle_VRCUdonCommonEnumsEventTiming__SystemVoid",
+        "__SendCustomEventDelayedFrames__SystemString_SystemInt32_VRCUdonCommonEnumsEventTiming__SystemVoid",
+    ] {
+        assert!(
+            text.contains(&format!("{RECEIVER}.{signature}")),
+            "{signature}\n{text}"
+        );
+    }
+    // no accessor event is raised on the other program for them
+    assert!(!text.contains("get_InteractionText\""), "{text}");
+    assert!(!text.contains("__get_DisableInteractive\""), "{text}");
+    // the optional timing is Update (0), the written one LateUpdate (1)
+    let meta = output.program.to_meta_json().unwrap();
+    assert!(
+        meta.contains("VRC.Udon.Common.Enums.EventTiming#0"),
+        "{meta}"
+    );
+    assert!(
+        meta.contains("VRC.Udon.Common.Enums.EventTiming#1"),
+        "{meta}"
+    );
 }

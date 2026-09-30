@@ -411,6 +411,17 @@ public class MenSharpIntegrationTests
         smoke.RunProgram("TypedLambdaInference");
         Assert.AreEqual(42, smoke.GetProgramVariable("typedLambdaPayload"));
 
+        // the UdonSharp-compatible members, on itself and on a behaviour reference
+        smoke.RunProgram("UdonSharpCompatibleMembers");
+        Assert.AreEqual(6, smoke.GetProgramVariable("compatVariable"));
+        Assert.AreEqual("Open", smoke.GetProgramVariable("compatText"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("compatDisabled"));
+        Assert.AreEqual("Knock", smoke.GetProgramVariable("compatRemoteText"));
+        Assert.AreEqual(true, smoke.GetProgramVariable("compatRemoteDisabled"));
+        Assert.AreEqual(9, smoke.GetProgramVariable("compatRemoteVariable"));
+        Assert.AreEqual("Knock", smoke.InteractionText);
+        Assert.IsFalse(smoke.DisableInteractive);
+
         // a generic class's static constructor runs once per closed type
         smoke.RunProgram("GenericStaticConstructors");
         Assert.AreEqual(7, smoke.GetProgramVariable("nestedGenericValue"));

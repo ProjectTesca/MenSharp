@@ -87,7 +87,7 @@ namespace MenSharp
         public void SendCustomEventDelayedSeconds(
             string eventName,
             float delaySeconds,
-            VRC.Udon.Common.Enums.EventTiming eventTiming = VRC.Udon.Common.Enums.EventTiming.Update)
+            VRC.Udon.Common.Enums.EventTiming eventTiming = default)
         {
             udonBehaviour.SendCustomEventDelayedSeconds(eventName, delaySeconds, eventTiming);
         }
@@ -95,7 +95,7 @@ namespace MenSharp
         public void SendCustomEventDelayedFrames(
             string eventName,
             int delayFrames,
-            VRC.Udon.Common.Enums.EventTiming eventTiming = VRC.Udon.Common.Enums.EventTiming.Update)
+            VRC.Udon.Common.Enums.EventTiming eventTiming = default)
         {
             udonBehaviour.SendCustomEventDelayedFrames(eventName, delayFrames, eventTiming);
         }
