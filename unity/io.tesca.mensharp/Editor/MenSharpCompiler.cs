@@ -492,11 +492,12 @@ public static class MenSharpCompiler
         Debug.LogError(text.ToString());
     }
 
-    /// One console entry per diagnostic. The compiler's short format is a
-    /// `file(line,column): error: message` line the console can jump from,
-    /// followed by the source excerpt and hints indented — those lines
-    /// belong to the entry above them, shown when it is expanded.
-    private static void LogDiagnostics(string stderr)
+    /// One console entry per diagnostic: the message and the source line it
+    /// is about, then the full text, the excerpt and hints indented — those
+    /// lines belong to the entry above them, shown when it is expanded. The
+    /// entry carries the `-->` position, so a double-click opens the source
+    /// (see MenSharpConsole).
+    public static void LogDiagnostics(string stderr)
     {
         var entry = new System.Text.StringBuilder();
         void Flush()
@@ -506,7 +507,7 @@ public static class MenSharpCompiler
             {
                 // a blank line at the end keeps the stack trace the console
                 // appends from running into the diagnostic
-                Debug.LogError($"[MenSharp] {text}\n");
+                MenSharpConsole.Diagnostic($"[MenSharp] {text}\n");
             }
             entry.Clear();
         }

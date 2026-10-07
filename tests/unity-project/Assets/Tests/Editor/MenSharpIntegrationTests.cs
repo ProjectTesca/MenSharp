@@ -763,5 +763,54 @@ public class MenSharpIntegrationTests
         Assert.AreNotSame(first, rebuilt, "a rebuild reads the symbols afresh");
         Assert.AreEqual(typeof(int), rebuilt.GetSymbolType("indexOfObject"));
     }
+
+    /// The inspector reads a program's source, entry points and sync mode on
+    /// every GUI event. The sidecar of a large program is megabytes of JSON
+    /// (MenUI's: 6 MB), and parsing it per question made selecting such a
+    /// behaviour drag the whole editor; it is parsed once per stored JSON.
+    [Test]
+    public void TheMetaIsParsedOncePerStoredJson()
+    {
+        MenSharpCompiler.CompileAll();
+        AssetDatabase.Refresh(ImportAssetOptions.ForceSynchronousImport);
+        MenSharpProgramAsset program = MenSharpSources.FindProgram("MenSharpRuntimeSmoke");
+        Assert.IsNotNull(program, "MenSharpRuntimeSmoke program asset");
+        FieldInfo parses = typeof(MenSharpProgramAsset).GetField(
+            "SummaryParses", BindingFlags.Static | BindingFlags.NonPublic);
+        Assert.IsNotNull(parses, "MenSharpProgramAsset.SummaryParses");
+        string stored = program.metaJson;
+        try
+        {
+            // a fresh string: whatever an earlier test left cached is stale
+            program.metaJson = new string(stored.ToCharArray());
+            int before = (int)parses.GetValue(null);
+            string source = null;
+            string[] entryPoints = null;
+            for (int repaint = 0; repaint < 100; repaint++)
+            {
+                source = program.SourcePath;
+                entryPoints = program.EntryPoints;
+                _ = program.SyncMode;
+                _ = program.LayoutOf("System.Collections.Generic.List`1<System.Int32>");
+            }
+            Assert.AreEqual(before + 1, (int)parses.GetValue(null), "one parse for 100 repaints");
+            StringAssert.EndsWith("MenSharpRuntimeSmoke.cs", source);
+            CollectionAssert.Contains(entryPoints, "_start");
+            Assert.IsNotNull(
+                program.LayoutOf("System.Collections.Generic.List`1<System.Int32>"),
+                "the List<int> layout of `numbers`");
+
+            // a recompile stores a new JSON, and the answers follow it
+            program.metaJson = "{\"source\":\"Assets/Elsewhere.cs\",\"syncMode\":\"manual\"}";
+            Assert.AreEqual("Assets/Elsewhere.cs", program.SourcePath);
+            Assert.AreEqual("manual", program.SyncMode);
+            CollectionAssert.IsEmpty(program.EntryPoints);
+            Assert.AreEqual(before + 2, (int)parses.GetValue(null));
+        }
+        finally
+        {
+            program.metaJson = stored;
+        }
+    }
 }
 #endif

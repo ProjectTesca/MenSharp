@@ -153,6 +153,8 @@ impl<'a> Reporter<'a> {
                 // a blank line sets the full text apart from the summary
                 out.push_str(&self.detail(""));
                 out.push_str(&self.detail(&format!("{heading} {message}")));
+                // the first `-->` line is where the package's console entry
+                // opens on a double-click (MenSharpConsole.TryLocate)
                 out.push_str(&self.detail(&format!(
                     "  --> {}:{line}:{column}",
                     self.file_name(diagnostic.file)

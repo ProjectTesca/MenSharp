@@ -60,34 +60,60 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
     public static long AssembleMilliseconds;
     public static long MetaMilliseconds;
 
-    // the parsed meta, kept while the JSON it came from is the one stored
-    [NonSerialized] private string layoutsFrom;
+    // the small part of the meta the editor reads all the time, kept while
+    // the JSON it came from is the one stored (a reimport or a recompile
+    // stores a new string)
+    [NonSerialized] private string summaryFrom;
+    [NonSerialized] private MenSharpMetaSummary summary;
     [NonSerialized] private Dictionary<string, MenSharpLayout> layoutsByName;
+
+    /// How many times the summary has been parsed, for the test that keeps
+    /// it from happening once per repaint.
+    internal static int SummaryParses;
+
+    /// The meta's header fields — source, entry points, sync mode, layouts —
+    /// parsed once per stored JSON. The inspector asks for them on every
+    /// GUI event, and the sidecar of a large program runs to megabytes
+    /// (its source marks are most of it): parsing it per question made
+    /// selecting such a behaviour drag the editor down, in edit mode and
+    /// play mode alike. MenSharpMetaSummary declares only these fields, so
+    /// JsonUtility skips the marks instead of building them.
+    private MenSharpMetaSummary Summary()
+    {
+        if (string.IsNullOrEmpty(metaJson))
+        {
+            return null;
+        }
+        if (!ReferenceEquals(summaryFrom, metaJson))
+        {
+            SummaryParses++;
+            MenSharpMetaSummary parsed = null;
+            try
+            {
+                parsed = JsonUtility.FromJson<MenSharpMetaSummary>(metaJson);
+            }
+            catch (Exception)
+            {
+            }
+            var layouts = new Dictionary<string, MenSharpLayout>(StringComparer.Ordinal);
+            foreach (MenSharpLayout layout in parsed?.layouts ?? Array.Empty<MenSharpLayout>())
+            {
+                layouts[layout.name] = layout;
+            }
+            summary = parsed;
+            layoutsByName = layouts;
+            summaryFrom = metaJson;
+        }
+        return summary;
+    }
 
     /// The layout of a type the program uses, by the compiler's spelling of
     /// it (see MenSharpLayout.name), or null.
     public MenSharpLayout LayoutOf(string typeName)
     {
-        if (string.IsNullOrEmpty(metaJson) || string.IsNullOrEmpty(typeName))
+        if (string.IsNullOrEmpty(typeName) || Summary() == null)
         {
             return null;
-        }
-        if (layoutsByName == null || !ReferenceEquals(layoutsFrom, metaJson))
-        {
-            layoutsByName = new Dictionary<string, MenSharpLayout>(StringComparer.Ordinal);
-            MenSharpMeta meta = null;
-            try
-            {
-                meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
-            }
-            catch (Exception)
-            {
-            }
-            foreach (MenSharpLayout layout in meta?.layouts ?? Array.Empty<MenSharpLayout>())
-            {
-                layoutsByName[layout.name] = layout;
-            }
-            layoutsFrom = metaJson;
         }
         return layoutsByName.TryGetValue(typeName, out MenSharpLayout found) ? found : null;
     }
@@ -391,40 +417,21 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
     {
         get
         {
-            if (string.IsNullOrEmpty(metaJson))
-            {
-                return null;
-            }
-            var meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
-            return string.IsNullOrEmpty(meta?.source) ? null : meta.source;
+            string source = Summary()?.source;
+            return string.IsNullOrEmpty(source) ? null : source;
         }
     }
 
     /// The events this program exports (`_start`, `_interact`, ...).
-    public string[] EntryPoints
-    {
-        get
-        {
-            if (string.IsNullOrEmpty(metaJson))
-            {
-                return Array.Empty<string>();
-            }
-            var meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
-            return meta?.entryPoints ?? Array.Empty<string>();
-        }
-    }
+    public string[] EntryPoints => Summary()?.entryPoints ?? Array.Empty<string>();
 
     /// The behaviour-wide sync mode the source asked for, or null.
     public string SyncMode
     {
         get
         {
-            if (string.IsNullOrEmpty(metaJson))
-            {
-                return null;
-            }
-            var meta = JsonUtility.FromJson<MenSharpMeta>(metaJson);
-            return string.IsNullOrEmpty(meta?.syncMode) ? null : meta.syncMode;
+            string mode = Summary()?.syncMode;
+            return string.IsNullOrEmpty(mode) ? null : mode;
         }
     }
 
@@ -693,6 +700,17 @@ public class MenSharpProgramAsset : UdonAssemblyProgramAsset
         Debug.LogWarning($"MenSharp: no type named {fullName} is loaded");
         return null;
     }
+}
+
+/// The fields of MenSharpMeta the editor reads outside a build — what
+/// MenSharpProgramAsset keeps parsed. Same JSON, fewer fields.
+[Serializable]
+public class MenSharpMetaSummary
+{
+    public string[] entryPoints;
+    public string source;
+    public string syncMode;
+    public MenSharpLayout[] layouts;
 }
 
 [Serializable]

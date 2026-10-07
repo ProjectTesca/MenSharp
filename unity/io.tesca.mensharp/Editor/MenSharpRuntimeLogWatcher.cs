@@ -106,12 +106,19 @@ public static class MenSharpRuntimeLogWatcher
         string where = mark.kind == "function" || string.IsNullOrEmpty(mark.file)
             ? $"in compiler-generated code of {mark.function} (before its first statement)"
             : $"called from {mark.function} at {mark.file}:{mark.line}:{mark.column}";
-        Debug.LogError(
-            $"MenSharp: the Udon VM halted inside {inside}, {where}"
+        string report = $"MenSharp: the Udon VM halted inside {inside}, {where}"
             + (string.IsNullOrEmpty(message) ? "" : $"\n{message}")
             + "\nThe exception came from the engine call itself, which try/catch cannot reach on Udon — "
-            + "check the call's inputs (null references, ranges) before making it.",
-            asset);
+            + "check the call's inputs (null references, ranges) before making it.";
+        if (mark.kind == "function" || string.IsNullOrEmpty(mark.file))
+        {
+            Debug.LogError(report, asset);
+        }
+        else
+        {
+            // a double-click opens the call that threw
+            MenSharpConsole.ErrorAt(report, mark.file, mark.line, mark.column, asset);
+        }
     }
 
     /// The text between "Exception Message:" and the dashed separator.
