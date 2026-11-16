@@ -1,0 +1,314 @@
+/* Tesca help center (Figma). Light only — the logo is black line art. */
+
+@import url("https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&display=swap");
+
+:root,
+[data-md-color-scheme="slate"] {
+  --tesca-ink: #0f0f0f;
+  --tesca-muted: #727272;
+  --tesca-line: #444444;
+  --tesca-paper: #ffffff;
+  --tesca-accent: #ae9c79;
+  --tesca-accent-dark: #74664e;
+  --tesca-menu-line: #B6A47F;
+  --tesca-tab: #B6A47F;
+
+  --md-text-font: "Noto Sans JP";
+  --md-text-font-family: "Noto Sans JP", sans-serif;
+  --md-primary-fg-color: var(--tesca-accent);
+  --md-primary-fg-color--light: #E5D4B1;
+  --md-primary-fg-color--dark: var(--tesca-accent-dark);
+  --md-primary-bg-color: #fff;
+  --md-primary-bg-color--light: #ffffffb3;
+  --md-accent-fg-color: var(--tesca-accent);
+  --md-accent-fg-color--transparent: #e5d4b132;
+  --md-accent-bg-color: #fff;
+  --md-typeset-a-color: var(--tesca-accent);
+  --md-typeset-color: var(--tesca-ink);
+  --md-default-fg-color: var(--tesca-ink);
+  --md-default-fg-color--light: var(--tesca-muted);
+  --md-default-fg-color--lighter: #7272728c;
+  --md-default-fg-color--lightest: #0f0f0f14;
+  --md-default-bg-color: var(--tesca-paper);
+  --md-default-bg-color--light: #ffffffeb;
+  --md-default-bg-color--lighter: #fffffff2;
+  --md-default-bg-color--lightest: #fff;
+  --md-footer-fg-color: var(--tesca-muted);
+  --md-footer-bg-color: var(--tesca-paper);
+  color-scheme: light;
+}
+
+body {
+  background-color: var(--tesca-paper);
+  color: var(--tesca-ink);
+}
+
+.md-header {
+  color: var(--tesca-ink);
+  background-color: #fff;
+  box-shadow: 0 1px 0 #0f0f0f14;
+}
+
+.md-header__topic,
+.md-header__title,
+.md-header__button {
+  color: var(--tesca-ink);
+}
+
+.md-search__input {
+  color: var(--tesca-ink);
+  background-color: #fff;
+}
+
+.md-search__input::placeholder {
+  color: var(--tesca-muted);
+}
+
+.md-tabs {
+  background-color: #fff;
+  color: var(--tesca-ink);
+}
+
+.md-tabs__link {
+  color: var(--tesca-ink);
+}
+
+.md-tabs__item--active {
+  border-bottom-color: var(--tesca-tab);
+}
+
+.md-tabs__link--active,
+.md-tabs__item--active .md-tabs__link {
+  color: var(--tesca-ink);
+}
+
+.md-top:hover,
+.md-top:focus {
+  color: var(--tesca-ink);
+  background-color: #e5d4b1;
+}
+
+.md-nav--secondary .md-nav__link,
+.md-nav--secondary .md-nav__link code {
+  color: var(--tesca-ink);
+}
+
+.md-sidebar--secondary .md-nav__link[href]:hover,
+.md-sidebar--secondary .md-nav__link[href]:focus,
+.md-nav--secondary .md-nav__link:hover,
+.md-nav--secondary .md-nav__link:focus,
+.md-nav--secondary .md-nav__link--active,
+.md-nav__list > .md-nav__item--active .md-nav--secondary .md-nav__link:hover,
+.md-nav__list > .md-nav__item--active .md-nav--secondary .md-nav__link--active {
+  color: var(--tesca-ink);
+  background-color: #b6a47f1f;
+}
+
+.md-nav__title {
+  color: var(--tesca-ink);
+}
+
+.md-typeset h1,
+.md-typeset h2,
+.md-typeset h3,
+.md-typeset h4,
+.md-typeset h5,
+.md-typeset h6 {
+  color: var(--tesca-ink);
+  font-weight: 500;
+}
+
+.md-typeset a {
+  color: var(--tesca-accent);
+  text-decoration-thickness: 1px;
+  text-underline-offset: 0.15em;
+}
+
+.md-typeset a:hover,
+.md-typeset a:focus {
+  color: var(--tesca-accent-dark);
+}
+
+.md-typeset .md-button,
+.md-typeset .md-button--primary {
+  color: var(--tesca-ink);
+  background-color: var(--tesca-menu-line);
+  border-color: var(--tesca-menu-line);
+  border-radius: 5px;
+}
+
+.md-typeset .md-button:hover,
+.md-typeset .md-button:focus,
+.md-typeset .md-button--primary:hover,
+.md-typeset .md-button--primary:focus {
+  color: var(--tesca-ink);
+  background-color: #d9c49a;
+  border-color: #d9c49a;
+}
+
+.md-typeset .grid.cards {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 320px), 1fr));
+}
+
+.md-typeset .grid.cards > ul > li,
+.md-typeset .grid.cards > ol > li,
+.md-typeset .grid > .card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: flex-start;
+  justify-content: center;
+  min-height: 140px;
+  padding: 30px 25px;
+  color: var(--tesca-ink);
+  background-color: #fff;
+  border: 1px solid var(--tesca-line);
+  border-radius: 8px;
+  box-shadow: none;
+  position: relative;
+  transition: background-color 0.2s ease;
+}
+
+.md-typeset .grid.cards > ul > li > p:first-child > a::after,
+.md-typeset .grid.cards > ol > li > p:first-child > a::after,
+.md-typeset .grid > .card > p:first-child > a::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+}
+
+.md-typeset .grid.cards > ul > li > *,
+.md-typeset .grid.cards > ol > li > *,
+.md-typeset .grid > .card > * {
+  margin: 0;
+}
+
+.md-typeset .grid.cards > ul > li > hr,
+.md-typeset .grid.cards > ol > li > hr,
+.md-typeset .grid > .card > hr {
+  display: none;
+}
+
+.md-typeset .grid.cards > ul > li > p:first-child,
+.md-typeset .grid.cards > ol > li > p:first-child,
+.md-typeset .grid > .card > p:first-child {
+  font-size: 18px;
+  font-weight: 500;
+  line-height: normal;
+  letter-spacing: normal;
+}
+
+.md-typeset .grid.cards > ul > li > p:first-child strong,
+.md-typeset .grid.cards > ol > li > p:first-child strong,
+.md-typeset .grid > .card > p:first-child strong {
+  font-weight: 500;
+}
+
+.md-typeset .grid.cards > ul > li > p:last-child,
+.md-typeset .grid.cards > ol > li > p:last-child,
+.md-typeset .grid > .card > p:last-child {
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  letter-spacing: 0.24px;
+}
+
+.md-typeset .grid.cards > ul > li a,
+.md-typeset .grid.cards > ol > li a,
+.md-typeset .grid > .card a {
+  color: var(--tesca-ink);
+  text-decoration: none;
+}
+
+.md-typeset .grid.cards > ul > li a:hover,
+.md-typeset .grid.cards > ul > li a:focus,
+.md-typeset .grid.cards > ol > li a:hover,
+.md-typeset .grid.cards > ol > li a:focus,
+.md-typeset .grid > .card a:hover,
+.md-typeset .grid > .card a:focus {
+  color: var(--tesca-ink);
+}
+
+.md-typeset .grid.cards > ul > li:hover,
+.md-typeset .grid.cards > ul > li:focus-within,
+.md-typeset .grid.cards > ol > li:hover,
+.md-typeset .grid.cards > ol > li:focus-within,
+.md-typeset .grid > .card:hover,
+.md-typeset .grid > .card:focus-within {
+  background-color: #E5D4B1;
+  border-color: var(--tesca-line);
+  box-shadow: none;
+}
+
+.md-typeset details.question {
+  margin: 0.6rem 0;
+  padding: 0 1.25rem;
+  color: var(--tesca-ink);
+  background-color: #fff;
+  border: 1px solid rgb(15 15 15 / 20%);
+  border-radius: 8px;
+  box-shadow: none;
+}
+
+.md-typeset details.question[open] {
+  background-color: #f8f8f8;
+  border-color: transparent;
+}
+
+.md-typeset details.question > summary {
+  padding-left: 0;
+  margin-top: 0.7rem;
+  margin-bottom: 0.7rem;
+  font-weight: 400;
+  color: var(--tesca-ink);
+}
+
+.md-typeset details.question[open] > summary {
+  padding-bottom: 0.7rem;
+  margin-bottom: 0.8rem;
+  border-bottom: 1px solid rgb(15 15 15 / 20%);
+}
+
+.md-typeset details.question > summary:before {
+  content: none;
+}
+
+.md-typeset details.question > summary:after {
+  transform: rotate(90deg);
+}
+
+.md-typeset details.question[open] > summary:after {
+  transform: rotate(-90deg);
+}
+
+.md-typeset details > summary:after,
+.md-typeset .admonition > .admonition-title:after,
+.md-typeset .note > summary:after,
+.md-typeset .abstract > summary:after,
+.md-typeset .info > summary:after,
+.md-typeset .tip > summary:after,
+.md-typeset .success > summary:after,
+.md-typeset .question > summary:after,
+.md-typeset .warning > summary:after,
+.md-typeset .failure > summary:after,
+.md-typeset .danger > summary:after,
+.md-typeset .bug > summary:after,
+.md-typeset .example > summary:after,
+.md-typeset .quote > summary:after {
+  color: var(--tesca-ink);
+}
+
+.md-footer {
+  color: var(--tesca-muted);
+  background-color: #fff;
+  border-top: 1px solid #0f0f0f14;
+}
+
+.md-footer-meta {
+  background-color: #fff;
+}
+
+.md-copyright,
+.md-footer-meta .md-social {
+  color: var(--tesca-muted);
+}
