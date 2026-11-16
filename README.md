@@ -61,7 +61,7 @@ public class Test : MenSharpBehaviour
 
 ## Documentation
 
-[./docs/doc.md](docs/doc.md)
+[docs/index.md](docs/index.md)
 
 ## How fast is it?
 
