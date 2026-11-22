@@ -1,0 +1,137 @@
+[project]
+site_url = "https://www.example.com/"
+site_name = "MenSharp Docs"
+site_description = "C# を Udon Assembly へコンパイルする MenSharp のドキュメントです。"
+# site_author = "Your name"
+
+copyright = "Copyright &copy; 2026 Project Tesca"
+
+repo_url = "https://github.com/ProjectTesca/MenSharp/"
+repo_name = "ProjectTesca/Mensharp"
+# edit_uri = "edit/main/docs/"
+
+nav = [
+  { "トップページ" = "index.md" },
+  { "はじめる" = [
+    { "インストール" = "getting-started/installation.md" },
+    { "使い方" = "getting-started/usage.md" },
+    { "配布" = "getting-started/distribution.md" },
+  ] },
+  { "標準ライブラリ" = [
+    "stdlib/index.md",
+    { "HTTP" = "stdlib/http.md" },
+    { "JSON" = "stdlib/json.md" },
+    { "Result と Option" = "stdlib/result.md" },
+    { "静的リフレクション" = "stdlib/reflection.md" },
+  ] },
+  { "言語機能" = [
+    "language/index.md",
+    { "async / await" = "language/async.md" },
+    { "コレクションと LINQ" = "language/collections.md" },
+    { "Behaviour と例外" = "language/behaviours.md" },
+  ] },
+  { "Q&A" = "faq.md" },
+]
+
+extra_css = ["stylesheets/extra.css"]
+# extra_javascript = ["javascripts/extra.js"]
+
+[project.extra]
+generator = false
+
+[[project.extra.social]]
+icon = "fontawesome/brands/discord"
+link = "https://discord.gg/uA5gGmFpRe"
+name = "Discord"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/x-twitter"
+link = "https://x.com/project_tesca"
+name = "Discord"
+
+[project.theme]
+# variant = "classic"
+# custom_dir = "overrides"
+favicon = "assets/logo.png"
+language = "ja"
+features = [
+  "announce.dismiss",
+  # "content.action.edit",
+  # "content.action.view",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
+  # "header.autohide",
+  # "navigation.expand",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  # "navigation.instant.progress",
+  "navigation.path",
+  # "navigation.prune",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.tabs.sticky",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "toc.follow",
+  # "toc.integrate",
+]
+logo = "assets/logo.png"
+
+# [project.theme.icon]
+# logo = "lucide/smile"
+
+[project.theme.font]
+text = "Noto Sans JP"
+code = "JetBrains Mono"
+
+# ロゴが黒線のためライトモードのみ
+[[project.theme.palette]]
+scheme = "default"
+primary = "custom"
+accent = "custom"
+
+# [[project.extra.social]]
+# icon = "fontawesome/brands/github"
+# link = "https://github.com/user/repo"
+
+# [[project.extra.social]]
+# icon = "fontawesome/brands/mastodon"
+# link = "https://fosstodon.org/@user"
+
+[project.markdown_extensions]
+abbr = {}
+admonition = {}
+attr_list = {}
+def_list = {}
+footnotes = {}
+md_in_html = {}
+toc.permalink = true
+pymdownx.arithmatex.generic = true
+pymdownx.betterem = {}
+pymdownx.caret = {}
+pymdownx.details = {}
+pymdownx.emoji.emoji_generator = "zensical.extensions.emoji.to_svg"
+pymdownx.emoji.emoji_index = "zensical.extensions.emoji.twemoji"
+pymdownx.highlight.anchor_linenums = true
+pymdownx.highlight.line_spans = "__span"
+pymdownx.highlight.pygments_lang_class = true
+pymdownx.inlinehilite = {}
+pymdownx.keys = {}
+pymdownx.magiclink = {}
+pymdownx.mark = {}
+pymdownx.smartsymbols = {}
+# pymdownx.snippets.base_path = "includes"
+pymdownx.superfences.custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+pymdownx.tabbed.alternate_style = true
+pymdownx.tabbed.combine_header_slug = true
+pymdownx.tasklist.custom_checkbox = true
+pymdownx.tilde = {}
