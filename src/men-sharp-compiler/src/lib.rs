@@ -416,6 +416,10 @@ impl Compiler {
                 "corlib/Comparers.cs",
                 include_str!("../../../corlib/Comparers.cs"),
             ),
+            SourceCode::new(
+                "corlib/Sorting.cs",
+                include_str!("../../../corlib/Sorting.cs"),
+            ),
             SourceCode::new("corlib/Linq.cs", include_str!("../../../corlib/Linq.cs")),
             SourceCode::new(
                 "corlib/Reflection.cs",

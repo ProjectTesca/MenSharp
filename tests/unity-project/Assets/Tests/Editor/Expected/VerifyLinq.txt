@@ -6,3 +6,4 @@
 [verify-linq] 6 comparable: max 2.1 min 1.9 sorted 1.9,2.0,2.1 list 1.9,2.0,2.1 nulls null,1.0,3.0 empty True
 [verify-linq] 7 lazy: built;s1;w1;s2;w2;got20;closed; again 20 aggregate 28 72 6
 [verify-linq] 8 strings: hello has 2 l, reversed c,b,a chars a,b,c,d zip a5,b3 error Sequence contains no elements
+[verify-linq] 9 engine sort: ints ok strings agree True floats NaN,NaN,-1,0,-0,0 ties ok ok ok ok comparison ok

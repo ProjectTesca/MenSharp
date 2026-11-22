@@ -1,7 +1,8 @@
 // MenSharp mini-corlib: how a `T` is ordered and compared for equality —
 // what .NET does through `Comparer<T>.Default` and
 // `EqualityComparer<T>.Default`, and what LINQ's `OrderBy`, `Min`, `Max`,
-// `Distinct`, `Contains`, `GroupBy` and `List<T>.Sort()` are built on.
+// `Distinct`, `Contains`, `GroupBy` and `List<T>.Sort()` are built on (the
+// sorts themselves are in Sorting.cs).
 //
 // Udon has no `IComparable` extern: each type that orders itself exposes
 // its own `CompareTo` (`SystemInt32.__CompareTo__SystemInt32__SystemInt32`,
@@ -33,6 +34,24 @@ namespace MenSharp.Internal
         public static int Compare<T>(T a, T b)
         {
             return 0;
+        }
+
+        /// Whether the engine's own `Array.Sort` orders `T` exactly as
+        /// `Compare<T>` does: a number, a string, a char, a source enum,
+        /// ... — never a class implementing `IComparable<T>`, whose
+        /// `CompareTo` runs in Udon. A constant per `T`, lowered by the
+        /// compiler.
+        public static bool Native<T>()
+        {
+            return false;
+        }
+
+        /// Whether two `T`s that `Compare<T>` calls equal are the same value
+        /// (an integer, a char, ...), so the order a sort leaves ties in
+        /// cannot be seen. False for a float (0 and -0), a string, ...
+        public static bool TiesIdentical<T>()
+        {
+            return false;
         }
 
         /// `EqualityComparer<T>.Default.Equals(a, b)`: the value's own

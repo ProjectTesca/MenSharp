@@ -1094,6 +1094,8 @@ namespace System.Linq
 
         public static TSource[] ToArray<TSource>(this IEnumerable<TSource> source)
         {
+            TSource[] held = Held(source);
+            if (held != null) { return held; }
             List<TSource> list = new List<TSource>();
             foreach (TSource item in source) { list.Add(item); }
             return list.ToArray();
@@ -1101,9 +1103,23 @@ namespace System.Linq
 
         public static List<TSource> ToList<TSource>(this IEnumerable<TSource> source)
         {
+            TSource[] held = Held(source);
+            if (held != null) { return List<TSource>.__Adopt(held); }
             List<TSource> list = new List<TSource>();
             foreach (TSource item in source) { list.Add(item); }
             return list;
+        }
+
+        // A fresh array of the elements of a sequence that holds them all
+        // already — an array, a list, a sorted sequence — taken in a few
+        // externs; null for any other, which is walked. Udon pays for every
+        // `MoveNext`, so this is most of what `OrderBy(...).ToList()` costs.
+        private static TSource[] Held<TSource>(IEnumerable<TSource> source)
+        {
+            if (source is OrderedEnumerable<TSource> ordered) { return ordered.__Sorted(); }
+            if (source is ArrayEnumerable<TSource> array) { return array.__Copy(); }
+            if (source is List<TSource> list) { return list.ToArray(); }
+            return null;
         }
 
         public static HashSet<TSource> ToHashSet<TSource>(this IEnumerable<TSource> source)
@@ -1156,11 +1172,11 @@ namespace System.Linq
 
 namespace MenSharp.Internal
 {
-    /// One key of an `OrderBy`/`ThenBy` chain: computes the keys of the
-    /// elements once and orders positions by them.
+    /// One key of an `OrderBy`/`ThenBy` chain.
     public abstract class SortLevel<TElement>
     {
-        public abstract Comparison<int> Prepare(TElement[] items);
+        /// The keys of `items`, computed once, by position.
+        public abstract SortKeys Prepare(TElement[] items);
     }
 
     public sealed class KeyLevel<TElement, TKey> : SortLevel<TElement>
@@ -1176,27 +1192,79 @@ namespace MenSharp.Internal
             this.descending = descending;
         }
 
-        public override Comparison<int> Prepare(TElement[] items)
+        public override SortKeys Prepare(TElement[] items)
         {
             TKey[] keys = new TKey[items.Length];
             for (int i = 0; i < items.Length; i++)
             {
                 keys[i] = keySelector(items[i]);
             }
-            if (comparer == null)
+            return new Keys<TKey>(keys, comparer, descending);
+        }
+    }
+
+    /// The keys of one level for the elements being sorted, which orders
+    /// their positions.
+    public abstract class SortKeys : IComparer<int>
+    {
+        /// Whether `SortNative` can order by these keys.
+        public abstract bool Native();
+
+        /// `order` reordered stably by these keys, with the engine's sort.
+        public abstract int[] SortNative(int[] order);
+
+        public abstract int Compare(int x, int y);
+    }
+
+    public sealed class Keys<TKey> : SortKeys
+    {
+        private readonly TKey[] keys;
+        private readonly IComparer<TKey> comparer;
+        private readonly bool descending;
+
+        public Keys(TKey[] keys, IComparer<TKey> comparer, bool descending)
+        {
+            this.keys = keys;
+            this.comparer = comparer;
+            this.descending = descending;
+        }
+
+        public override bool Native()
+        {
+            return (comparer == null || comparer is DefaultComparer<TKey>) && Comparers.Native<TKey>();
+        }
+
+        public override int[] SortNative(int[] order)
+        {
+            return Sorting.Order(keys, order, descending);
+        }
+
+        public override int Compare(int x, int y)
+        {
+            int a = descending ? y : x;
+            int b = descending ? x : y;
+            return comparer == null ? Comparers.Compare(keys[a], keys[b]) : comparer.Compare(keys[a], keys[b]);
+        }
+    }
+
+    /// Positions ordered by every level in turn.
+    public sealed class LevelsOrder : IComparer<int>
+    {
+        private readonly SortKeys[] levels;
+
+        public LevelsOrder(SortKeys[] levels)
+        {
+            this.levels = levels;
+        }
+
+        public int Compare(int x, int y)
+        {
+            for (int level = 0; level < levels.Length; level++)
             {
-                if (descending)
-                {
-                    return (i, j) => Comparers.Compare(keys[j], keys[i]);
-                }
-                return (i, j) => Comparers.Compare(keys[i], keys[j]);
+                int result = levels[level].Compare(x, y);
+                if (result != 0) { return result; }
             }
-            IComparer<TKey> order = comparer;
-            if (descending)
-            {
-                return (i, j) => order.Compare(keys[j], keys[i]);
-            }
-            return (i, j) => order.Compare(keys[i], keys[j]);
+            return 0;
         }
     }
 
@@ -1232,55 +1300,45 @@ namespace MenSharp.Internal
 
         public System.Collections.Generic.IEnumerator<TElement> GetEnumerator()
         {
-            return new ArrayEnumerator<TElement>(Sorted());
+            return new ArrayEnumerator<TElement>(__Sorted());
         }
 
-        private TElement[] Sorted()
+        /// The elements, sorted, in a fresh array.
+        internal TElement[] __Sorted()
         {
             TElement[] items = System.Linq.Enumerable.ToArray(source);
             int count = items.Length;
-            Comparison<int>[] compare = new Comparison<int>[levels.Length];
+            SortKeys[] keys = new SortKeys[levels.Length];
+            bool native = true;
             for (int level = 0; level < levels.Length; level++)
             {
-                compare[level] = levels[level].Prepare(items);
+                keys[level] = levels[level].Prepare(items);
+                if (!keys[level].Native()) { native = false; }
             }
 
-            // a bottom-up merge sort of the positions: stable, and without
-            // the recursion .NET's quicksort would need
-            int[] order = new int[count];
-            for (int i = 0; i < count; i++) { order[i] = i; }
-            int[] scratch = new int[count];
-            for (int width = 1; width < count; width *= 2)
+            // null: 0, 1, 2, ... until the first native pass reorders it
+            int[] order = null;
+            if (native)
             {
-                for (int low = 0; low < count; low += 2 * width)
+                // the least significant key first: each pass is stable, so
+                // among the elements it ties it keeps the passes before it
+                for (int level = keys.Length - 1; level >= 0; level--)
                 {
-                    int middle = low + width;
-                    if (middle > count) { middle = count; }
-                    int high = low + 2 * width;
-                    if (high > count) { high = count; }
-                    int left = low;
-                    int right = middle;
-                    int output = low;
-                    while (left < middle && right < high)
-                    {
-                        if (CompareAt(compare, order[left], order[right]) <= 0)
-                        {
-                            scratch[output] = order[left];
-                            left++;
-                        }
-                        else
-                        {
-                            scratch[output] = order[right];
-                            right++;
-                        }
-                        output++;
-                    }
-                    while (left < middle) { scratch[output] = order[left]; left++; output++; }
-                    while (right < high) { scratch[output] = order[right]; right++; output++; }
+                    order = keys[level].SortNative(order);
                 }
-                int[] swap = order;
-                order = scratch;
-                scratch = swap;
+            }
+            else
+            {
+                order = new int[count];
+                for (int i = 0; i < count; i++) { order[i] = i; }
+                if (keys.Length == 1)
+                {
+                    Sorting.Sort(order, 0, count, keys[0]);
+                }
+                else
+                {
+                    Sorting.Sort(order, 0, count, new LevelsOrder(keys));
+                }
             }
 
             TElement[] sorted = new TElement[count];
@@ -1289,16 +1347,6 @@ namespace MenSharp.Internal
                 sorted[i] = items[order[i]];
             }
             return sorted;
-        }
-
-        private static int CompareAt(Comparison<int>[] compare, int a, int b)
-        {
-            for (int level = 0; level < compare.Length; level++)
-            {
-                int result = compare[level](a, b);
-                if (result != 0) { return result; }
-            }
-            return 0;
         }
     }
 

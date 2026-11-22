@@ -11,6 +11,7 @@
 //   [verify-linq] 6 comparable: max 2.1 min 1.9 sorted 1.9,2.0,2.1 list 1.9,2.0,2.1 nulls null,1.0,3.0 empty True
 //   [verify-linq] 7 lazy: built;s1;w1;s2;w2;got20;closed; again 20 aggregate 28 72 6
 //   [verify-linq] 8 strings: hello has 2 l, reversed c,b,a chars a,b,c,d zip a5,b3 error Sequence contains no elements
+//   [verify-linq] 9 engine sort: ints ok strings agree True floats NaN,NaN,-1,0,-0,0 ties ok ok ok ok comparison ok
 
 using System;
 using System.Collections.Generic;
@@ -41,7 +42,81 @@ public class VerifyLinq : MenSharpBehaviour
         public override string ToString() { return Major + "." + Minor; }
     }
 
+    public class Entry
+    {
+        public int Key;
+        public int Second;
+        public int Index;
+        public Entry(int key, int second, int index) { Key = key; Second = second; Index = index; }
+    }
+
+    public class Backwards : IComparer<int>
+    {
+        public int Compare(int x, int y) { return y.CompareTo(x); }
+    }
+
     private string trace = "";
+    private int seed = 7;
+
+    private int Next(int range)
+    {
+        seed = (seed * 75 + 74) % 65537;
+        return seed % range;
+    }
+
+    // ordered by Key (1 ascending, -1 descending), then Second (0: not a
+    // key), then — the ties a stable sort keeps — the original index
+    private string Stable(IEnumerable<Entry> sequence, int byKey, int bySecond)
+    {
+        List<Entry> list = sequence.ToList();
+        if (list.Count != 300) { return "count " + list.Count; }
+        for (int i = 1; i < list.Count; i++)
+        {
+            int order = (list[i - 1].Key - list[i].Key) * byKey;
+            if (order == 0) { order = (list[i - 1].Second - list[i].Second) * bySecond; }
+            if (order == 0) { order = list[i - 1].Index - list[i].Index; }
+            if (order > 0) { return "unordered at " + i; }
+        }
+        return "ok";
+    }
+
+    // numbers and strings go to the engine's own Array.Sort whole: its order
+    // must be CompareTo's, and the ties it may swap must come back in order
+    private void EngineSort()
+    {
+        List<int> ints = new List<int>();
+        for (int i = 0; i < 300; i++) { ints.Add(Next(1000)); }
+        ints.Sort();
+        string sortedInts = "ok";
+        for (int i = 1; i < ints.Count; i++)
+        {
+            if (ints[i - 1] > ints[i]) { sortedInts = "unordered at " + i; }
+        }
+
+        string[] words = { "b", "B", "a", "A", "_x", "x-y", "xy", "\u00e9", "e", "e\u0301", "10", "9", null, "Zeta", "zeta" };
+        List<string> byEngine = new List<string>(words);
+        byEngine.Sort();
+        List<string> byCompareTo = new List<string>(words);
+        byCompareTo.Sort((x, y) => x == null ? (y == null ? 0 : -1) : x.CompareTo(y));
+        bool agree = byEngine.SequenceEqual(byCompareTo);
+
+        float zero = ints.Count - 300;
+        List<float> floats = new List<float> { 0f, float.NaN, -zero, -1f, 0f, float.NaN };
+        floats.Sort();
+        string shownFloats = "";
+        foreach (float value in floats) { shownFloats += (value == 0f && 1f / value < 0f ? "-0" : value.ToString()) + ","; }
+
+        List<Entry> entries = new List<Entry>();
+        for (int i = 0; i < 300; i++) { entries.Add(new Entry(Next(4), Next(3), i)); }
+        string ties = Stable(entries.OrderBy(e => e.Key), 1, 0) + " "
+            + Stable(entries.OrderByDescending(e => e.Key).ThenBy(e => e.Second), -1, 1) + " "
+            + Stable(entries.OrderBy(e => e.Key, new Backwards()).ThenBy(e => e.Second), -1, 1) + " "
+            + Stable(entries.OrderBy(e => e.Key, Comparer<int>.Default), 1, 0);
+        List<Entry> copy = new List<Entry>(entries);
+        copy.Sort((x, y) => x.Key.CompareTo(y.Key));
+
+        Debug.Log($"[verify-linq] 9 engine sort: ints {sortedInts} strings agree {agree} floats {shownFloats.TrimEnd(',')} ties {ties} comparison {Stable(copy, 1, 0)}");
+    }
 
     private string Join<T>(IEnumerable<T> items)
     {
@@ -113,5 +188,6 @@ public class VerifyLinq : MenSharpBehaviour
             error = e.Message;
         }
         Debug.Log($"[verify-linq] 8 strings: hello has {"hello".Count(c => c == 'l')} l, reversed {Join("abc".Reverse())} chars {Join(new string[] { "ab", "cd" }.SelectMany(s => s.ToCharArray()))} zip {Join(numbers.Zip(new string[] { "a", "b" }, (n, s) => s + n))} error {error}");
+        EngineSort();
     }
 }

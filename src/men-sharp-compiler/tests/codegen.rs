@@ -12448,6 +12448,132 @@ fn linq_orders_stably_by_keys_and_by_the_type_itself() {
 }
 
 #[test]
+fn sorts_use_the_engines_sort_where_they_can_and_stay_stable() {
+    let source = r#"
+        using System;
+        using System.Collections.Generic;
+        using System.Linq;
+        namespace Game
+        {
+            // no ordering of its own: only a comparison can sort it
+            public class Entry
+            {
+                public int A;
+                public int B;
+                public int Index;
+                public Entry(int a, int b, int index) { A = a; B = b; Index = index; }
+            }
+
+            public class Descending : IComparer<int>
+            {
+                public int Compare(int x, int y) { return y.CompareTo(x); }
+            }
+
+            public class Program
+            {
+                public static string Log = "";
+                public static float Zero = 0f;
+                static int seed = 7;
+
+                static string Show(List<int> items)
+                {
+                    string text = "";
+                    foreach (int item in items) { text += item + ","; }
+                    return text;
+                }
+
+                static int Next(int range)
+                {
+                    seed = (seed * 75 + 74) % 65537;
+                    return seed % range;
+                }
+
+                // ordered by A (ascending: 1, descending: -1, ignored: 0),
+                // then B, then — the ties a stable sort keeps — the index
+                static string Check(IEnumerable<Entry> sequence, int byA, int byB)
+                {
+                    List<Entry> list = sequence.ToList();
+                    if (list.Count != 120) { return "count " + list.Count; }
+                    for (int i = 1; i < list.Count; i++)
+                    {
+                        int order = (list[i - 1].A - list[i].A) * byA;
+                        if (order == 0) { order = (list[i - 1].B - list[i].B) * byB; }
+                        if (order == 0) { order = list[i - 1].Index - list[i].Index; }
+                        if (order > 0) { return "unordered at " + i; }
+                    }
+                    return "ok";
+                }
+
+                public static void Main()
+                {
+                    List<int> numbers = new List<int>();
+                    for (int i = 0; i < 200; i++) { numbers.Add(Next(1000)); }
+                    numbers.Sort();
+                    string sorted = "ok";
+                    for (int i = 1; i < numbers.Count; i++)
+                    {
+                        if (numbers[i - 1] > numbers[i]) { sorted = "unordered at " + i; }
+                    }
+                    List<int> part = new List<int> { 5, 4, 3, 2, 1, 0 };
+                    part.Sort(1, 4, null);
+                    List<int> down = new List<int> { 2, 9, 4 };
+                    down.Sort(new Descending());
+                    Log += sorted + " " + Show(part) + " " + Show(down) + ";";
+
+                    // 0 and -0 tie, and the engine may swap them: Sort() keeps
+                    // them in the order they came
+                    float negative = -Zero;
+                    List<float> zeros = new List<float> { 0f, 2f, negative, -1f, 0f, negative };
+                    zeros.Sort();
+                    foreach (float zero in zeros) { Log += (zero == 0f && 1f / zero < 0f ? "-0" : zero.ToString()) + ","; }
+                    Log += ";";
+
+                    List<Entry> entries = new List<Entry>();
+                    for (int i = 0; i < 120; i++) { entries.Add(new Entry(Next(5), Next(3), i)); }
+                    Log += Check(entries.OrderBy(e => e.A), 1, 0) + " "
+                        + Check(entries.OrderByDescending(e => e.A).ThenBy(e => e.B), -1, 1) + " "
+                        + Check(entries.OrderBy(e => e.A, new Descending()).ThenBy(e => e.B), -1, 1) + " "
+                        + Check(entries.OrderBy(e => e.A, new Descending()), -1, 0) + ";";
+
+                    List<Entry> copy = new List<Entry>(entries);
+                    copy.Sort((x, y) => x.A.CompareTo(y.A));
+                    Log += Check(copy, 1, 0) + " ";
+                    copy = new List<Entry>(entries);
+                    copy.Sort((x, y) => x.B.CompareTo(y.B));
+                    Log += Check(copy, 0, 1) + ";";
+
+                    // what ToList/ToArray copy whole is still a copy
+                    List<int> original = new List<int> { 1, 2 };
+                    List<int> listed = original.ToList();
+                    listed[0] = 9;
+                    int[] array = new int[] { 3, 4 };
+                    List<int> adopted = array.ToList();
+                    adopted[0] = 9;
+                    adopted.Add(5);
+                    int[] again = original.ToArray();
+                    again[1] = 9;
+                    Log += original[0] + "," + original[1] + "," + array[0] + "," + adopted.Count + "," + Show(new int[] { 2, 1 }.OrderBy(x => x).ToList()) + ";";
+                }
+            }
+        }
+    "#;
+    let mut sources = vec![SourceCode::new("test.cs", source)];
+    sources.extend(Compiler::corlib_sources());
+    let (program, result) = run_sources_result(sources, "Main").unwrap();
+    let emulator = result.unwrap_or_else(|error| panic!("emulator error: {error:?}\n{program}"));
+    assert_eq!(
+        string_of(&emulator, "Log"),
+        "ok 5,1,2,3,4,0, 9,4,2,;-1,0,-0,0,-0,2,;ok ok ok ok;ok ok;1,2,3,3,1,2,;"
+    );
+    // the numbers went to the engine whole; the entries, with no ordering
+    // it knows, were compared in Udon
+    assert!(
+        program.contains("SystemArray.__Sort__SystemArray_SystemInt32_SystemInt32__SystemVoid")
+    );
+    assert!(program.contains("SystemArray.__Sort__SystemArray_SystemArray__SystemVoid"));
+}
+
+#[test]
 fn linq_is_deferred_and_closes_the_source_early() {
     let source = r#"
         using System;

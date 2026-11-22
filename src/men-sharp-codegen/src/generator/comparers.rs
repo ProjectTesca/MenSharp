@@ -11,6 +11,12 @@
 //! type when neither — sorting something that has no ordering is caught
 //! when the program is built, not when the world is running. `null`
 //! orders before everything, as in .NET.
+//!
+//! `Comparers.Native<T>()` and `Comparers.TiesIdentical<T>()` answer, as
+//! constants, whether the engine's own `Array.Sort` orders `T` exactly as
+//! `Compare<T>` does, and whether two `T`s it calls equal are the same
+//! value — what lets the corlib's sorts hand a whole array to that one
+//! extern instead of comparing element by element in Udon.
 
 use super::*;
 use men_sharp_semantics::{FunctionSignature, ParameterPassing, ParameterSignature};
@@ -19,7 +25,9 @@ const COMPARERS_PATH: [&str; 3] = ["MenSharp", "Internal", "Comparers"];
 const COMPARABLE_PATH: [&str; 2] = ["System", "IComparable"];
 
 impl<'a, 'ast> Generator<'a, 'ast> {
-    /// `Comparers.Compare(a, b)` lowered in place; `None` for any other call.
+    /// `Comparers.Compare(a, b)`, `Comparers.Native<T>()` and
+    /// `Comparers.TiesIdentical<T>()` lowered in place; `None` for any
+    /// other call.
     pub(super) fn try_comparers_intrinsic(
         &mut self,
         ctx: &mut Ctx<'ast>,
@@ -30,14 +38,50 @@ impl<'a, 'ast> Generator<'a, 'ast> {
     ) -> Option<Piece> {
         let entry = self.declarations.table.symbol(symbol);
         let parent = entry.parent?;
-        if entry.name != "Compare" || self.display_path(parent) != COMPARERS_PATH.join(".") {
+        let intrinsic = match entry.name {
+            "Compare" => Intrinsic::Compare,
+            "Native" => Intrinsic::Native,
+            "TiesIdentical" => Intrinsic::TiesIdentical,
+            _ => return None,
+        };
+        if self.display_path(parent) != COMPARERS_PATH.join(".") {
             return None;
         }
         let element = self.substitute(call.type_arguments.first()?, &ctx.key.bindings);
-        let a = *values.first()?;
-        let b = *values.get(1)?;
-        let result = self.compare_values(ctx, a, b, &element, span);
-        Some(Piece::Value(result, self.corlib_type("Int32")))
+        let answer = match intrinsic {
+            Intrinsic::Compare => {
+                let a = *values.first()?;
+                let b = *values.get(1)?;
+                let result = self.compare_values(ctx, a, b, &element, span);
+                return Some(Piece::Value(result, self.corlib_type("Int32")));
+            }
+            Intrinsic::Native => self.native_order(&element).is_some(),
+            Intrinsic::TiesIdentical => self.native_order(&element) == Some(NativeOrder::Identical),
+        };
+        let constant = self.bool_constant(answer);
+        Some(Piece::Value(constant, self.corlib_type("Boolean")))
+    }
+
+    /// How the engine's `Array.Sort` (`Comparer.Default` over the boxed
+    /// values) orders `element`, when that is exactly the order
+    /// `compare_non_null` lowers to: the BCL types whose `CompareTo` extern
+    /// it calls, and a source enum, which is its storage integer on the
+    /// heap. `None` for everything else — a source `IComparable<T>` runs in
+    /// Udon, where the engine cannot call it.
+    fn native_order(&self, element: &Type) -> Option<NativeOrder> {
+        if self.source_enum(element).is_some() {
+            return Some(NativeOrder::Identical);
+        }
+        match self.extern_type_name(element)?.as_str() {
+            "SystemSByte" | "SystemByte" | "SystemInt16" | "SystemUInt16" | "SystemInt32"
+            | "SystemUInt32" | "SystemInt64" | "SystemUInt64" | "SystemChar" | "SystemBoolean"
+            | "SystemTimeSpan" => Some(NativeOrder::Identical),
+            // 0f and -0f, 1.0m and 1.00m, strings equal under the culture's
+            // collation, the same instant in two `DateTimeKind`s
+            "SystemSingle" | "SystemDouble" | "SystemDecimal" | "SystemString"
+            | "SystemDateTime" => Some(NativeOrder::Distinguishable),
+            _ => None,
+        }
     }
 
     /// `Comparer<T>.Default.Compare(a, b)` into a fresh Int32 slot.
@@ -193,4 +237,21 @@ impl<'a, 'ast> Generator<'a, 'ast> {
             params_expansion: None,
         })
     }
+}
+
+#[derive(Clone, Copy)]
+enum Intrinsic {
+    Compare,
+    Native,
+    TiesIdentical,
+}
+
+/// See [`Generator::native_order`].
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NativeOrder {
+    /// Values the engine calls equal are the same value: an integer, a char, ...
+    Identical,
+    /// Values it calls equal can still be told apart, so a stable sort
+    /// must put ties back in their order.
+    Distinguishable,
 }

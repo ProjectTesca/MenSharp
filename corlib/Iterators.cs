@@ -47,6 +47,16 @@ namespace MenSharp.Internal
         {
             return new ArrayEnumerator<T>(items);
         }
+
+        /// A copy of the elements, in one extern: what `ToArray` and
+        /// `ToList` take instead of walking the sequence.
+        internal T[] __Copy()
+        {
+            if (items == null) { return new T[0]; }
+            T[] copy = new T[items.Length];
+            System.Array.Copy(items, copy, items.Length);
+            return copy;
+        }
     }
 
     public sealed class ArrayEnumerator<T> : System.Collections.Generic.IEnumerator<T>

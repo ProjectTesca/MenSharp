@@ -1865,6 +1865,39 @@ impl Emulator {
                 }
                 Ok(())
             }
+            "SystemArray.__Sort__SystemArray__SystemVoid" => {
+                let args = self.pop_arguments(1)?;
+                let keys = self.heap[args[0]].as_array()?;
+                let length = keys.borrow().len();
+                sort_arrays(&keys, None, 0, length)
+            }
+            "SystemArray.__Sort__SystemArray_SystemInt32_SystemInt32__SystemVoid" => {
+                let args = self.pop_arguments(3)?;
+                let keys = self.heap[args[0]].as_array()?;
+                let index = self.heap[args[1]].as_i32()?;
+                let length = self.heap[args[2]].as_i32()?;
+                sort_arrays(&keys, None, index.max(0) as usize, length.max(0) as usize)
+            }
+            "SystemArray.__Sort__SystemArray_SystemArray__SystemVoid" => {
+                let args = self.pop_arguments(2)?;
+                let keys = self.heap[args[0]].as_array()?;
+                let items = self.heap[args[1]].as_array()?;
+                let length = keys.borrow().len();
+                sort_arrays(&keys, Some(&items), 0, length)
+            }
+            "SystemArray.__Sort__SystemArray_SystemArray_SystemInt32_SystemInt32__SystemVoid" => {
+                let args = self.pop_arguments(4)?;
+                let keys = self.heap[args[0]].as_array()?;
+                let items = self.heap[args[1]].as_array()?;
+                let index = self.heap[args[2]].as_i32()?;
+                let length = self.heap[args[3]].as_i32()?;
+                sort_arrays(
+                    &keys,
+                    Some(&items),
+                    index.max(0) as usize,
+                    length.max(0) as usize,
+                )
+            }
             "SystemArray.__IndexOf__SystemArray_SystemObject__SystemInt32" => {
                 let args = self.pop_arguments(3)?;
                 let array = self.heap[args[0]].as_array()?;
@@ -2127,6 +2160,81 @@ fn is_array_signature(signature: &str, middle: &str) -> bool {
     signature
         .split_once('.')
         .is_some_and(|(ty, rest)| ty.ends_with("Array") && rest.starts_with(middle))
+}
+
+/// `Array.Sort(keys[, items], index, length)`: `keys[index..index +
+/// length]` in `Comparer.Default` order, `items` (when given) moved with
+/// them. .NET's introsort is not stable, and a small array would come out
+/// of Rust's unstable sort as if it were, so the emulator is deliberately
+/// unstable: each run of equal keys ends up reversed — a test that relies
+/// on the engine keeping ties in order fails here rather than in a world.
+fn sort_arrays(
+    keys: &Rc<RefCell<Vec<Value>>>,
+    items: Option<&Rc<RefCell<Vec<Value>>>>,
+    index: usize,
+    length: usize,
+) -> Result<(), EmulatorError> {
+    let range = index..index + length;
+    let mut keys = keys.borrow_mut();
+    if range.end > keys.len() || items.is_some_and(|items| range.end > items.borrow().len()) {
+        return Err(EmulatorError::Exception(
+            "Array.Sort: index and length do not denote a valid range".into(),
+        ));
+    }
+    let mut failure = None;
+    let mut order: Vec<usize> = range.clone().collect();
+    order.sort_by(|&a, &b| {
+        native_compare(&keys[a], &keys[b]).unwrap_or_else(|error| {
+            failure.get_or_insert(error);
+            std::cmp::Ordering::Equal
+        })
+    });
+    if let Some(error) = failure {
+        return Err(error);
+    }
+    let mut start = 0;
+    while start < order.len() {
+        let mut end = start + 1;
+        while end < order.len() && native_compare(&keys[order[start]], &keys[order[end]])?.is_eq() {
+            end += 1;
+        }
+        order[start..end].reverse();
+        start = end;
+    }
+    let sorted: Vec<Value> = order.iter().map(|&at| keys[at].clone()).collect();
+    keys[range.clone()].clone_from_slice(&sorted);
+    if let Some(items) = items {
+        let mut items = items.borrow_mut();
+        let moved: Vec<Value> = order.iter().map(|&at| items[at].clone()).collect();
+        items[range].clone_from_slice(&moved);
+    }
+    Ok(())
+}
+
+/// `Comparer.Default.Compare(a, b)` over two boxed values of one type: what
+/// the engine's `Array.Sort` orders by. `null` first, as in .NET.
+fn native_compare(a: &Value, b: &Value) -> Result<std::cmp::Ordering, EmulatorError> {
+    use std::cmp::Ordering;
+    Ok(match (a, b) {
+        (Value::Null, Value::Null) => Ordering::Equal,
+        (Value::Null, _) => Ordering::Less,
+        (_, Value::Null) => Ordering::Greater,
+        (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+        (Value::Int32(a), Value::Int32(b)) => a.cmp(b),
+        (Value::Int64(a), Value::Int64(b)) => a.cmp(b),
+        (Value::UInt32(a), Value::UInt32(b)) => a.cmp(b),
+        (Value::UInt64(a), Value::UInt64(b)) => a.cmp(b),
+        (Value::Char(a), Value::Char(b)) => a.cmp(b),
+        (Value::Single(a), Value::Single(b)) => compare_floats(*a as f64, *b as f64).cmp(&0),
+        (Value::Double(a), Value::Double(b)) => compare_floats(*a, *b).cmp(&0),
+        (Value::Decimal(a), Value::Decimal(b)) => a.compare(*b),
+        (Value::Str(a), Value::Str(b)) => compare_culture(a, b).cmp(&0),
+        (a, b) => {
+            return Err(EmulatorError::Exception(format!(
+                "Array.Sort: the comparer cannot order {a:?} against {b:?}"
+            )));
+        }
+    })
 }
 
 /// `float.CompareTo`/`double.CompareTo`: NaN orders before everything,

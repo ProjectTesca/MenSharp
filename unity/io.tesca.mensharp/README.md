@@ -1013,6 +1013,14 @@ instructions), and `OrderBy` computes every key once and sorts positions.
 For a hot per-frame loop over a large array, a plain `for` is still cheaper;
 for the everyday "find, filter, sort, sum" of a world script, LINQ is fine.
 
+Sorting by the default order of a number, `string`, `char` or enum —
+`List<T>.Sort()`, `Sort(Comparer<T>.Default)`, `OrderBy(x => x.Score)` with
+no comparer — hands the whole array to the engine's own `Array.Sort`, still
+stable: thousands of elements in a few milliseconds. A `Comparison<T>`, an
+`IComparer<T>` or an `IComparable<T>` of yours runs in Udon, about n log n
+calls of it (a merge sort); a key selector plus `OrderBy` is usually the
+faster way to sort objects.
+
 ## Delegates, lambdas and events
 
 Delegates are ordinary values: `Func<>`/`Action<>`/`Predicate<>` and the

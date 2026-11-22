@@ -147,6 +147,17 @@ namespace System.Collections.Generic
             size += added;
         }
 
+        /// A list over `items` itself, which the caller gives up: how LINQ's
+        /// `ToList` keeps an array it already built instead of adding its
+        /// elements one by one.
+        internal static List<T> __Adopt(T[] items)
+        {
+            var list = new List<T>();
+            list.items = items;
+            list.size = items.Length;
+            return list;
+        }
+
         public T[] ToArray()
         {
             T[] result = new T[size];
@@ -255,17 +266,7 @@ namespace System.Collections.Generic
         /// `IComparable<T>`. Stable, unlike .NET's.
         public void Sort()
         {
-            for (int i = 1; i < size; i++)
-            {
-                T key = items[i];
-                int j = i - 1;
-                while (j >= 0 && MenSharp.Internal.Comparers.Compare(items[j], key) > 0)
-                {
-                    items[j + 1] = items[j];
-                    j--;
-                }
-                items[j + 1] = key;
-            }
+            MenSharp.Internal.Sorting.Sort(items, 0, size);
         }
 
         public void Reverse()
@@ -432,21 +433,11 @@ namespace System.Collections.Generic
             return removed;
         }
 
-        // A stable insertion sort: fine for the list sizes a world script
-        // keeps, and free of the recursion .NET's introsort would need.
+        // Stable, as `Sort()` is; see Sorting.cs.
         public void Sort(Comparison<T> comparison)
         {
-            for (int i = 1; i < size; i++)
-            {
-                T key = items[i];
-                int j = i - 1;
-                while (j >= 0 && comparison(items[j], key) > 0)
-                {
-                    items[j + 1] = items[j];
-                    j--;
-                }
-                items[j + 1] = key;
-            }
+            if (comparison == null) { throw new ArgumentNullException("comparison"); }
+            MenSharp.Internal.Sorting.Sort(items, 0, size, comparison);
         }
 
         public void Sort(IComparer<T> comparer)
@@ -457,20 +448,7 @@ namespace System.Collections.Generic
         public void Sort(int index, int count, IComparer<T> comparer)
         {
             if (index < 0 || count < 0 || index + count > size) { throw new ArgumentOutOfRangeException("index"); }
-            int end = index + count;
-            for (int i = index + 1; i < end; i++)
-            {
-                T key = items[i];
-                int j = i - 1;
-                while (j >= index && (comparer == null
-                    ? MenSharp.Internal.Comparers.Compare(items[j], key)
-                    : comparer.Compare(items[j], key)) > 0)
-                {
-                    items[j + 1] = items[j];
-                    j--;
-                }
-                items[j + 1] = key;
-            }
+            MenSharp.Internal.Sorting.Sort(items, index, count, comparer);
         }
 
         public List<TOut> ConvertAll<TOut>(Converter<T, TOut> converter)
